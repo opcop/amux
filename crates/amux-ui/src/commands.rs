@@ -14,15 +14,31 @@ pub enum UiAction {
     SelectPreviousCommandPaletteItem,
     OpenWorkspacePicker,
     OpenWindowsWorkspace(PathBuf),
-    OpenWslWorkspace { distro: String, path: String },
+    OpenWslWorkspace {
+        distro: String,
+        path: String,
+    },
     FocusPane(PaneId),
     FocusNextPane,
     FocusPreviousPane,
     FocusNextTab,
     FocusPreviousTab,
-    OpenSurface { pane_id: PaneId, surface: SurfaceState },
-    CloseTab { pane_id: PaneId, tab_id: TabId },
-    SplitPane { pane_id: PaneId, axis: SplitAxis },
+    OpenSurface {
+        pane_id: PaneId,
+        surface: SurfaceState,
+    },
+    CloseTab {
+        pane_id: PaneId,
+        tab_id: TabId,
+    },
+    SplitPane {
+        pane_id: PaneId,
+        axis: SplitAxis,
+    },
+    PinTab,
+    UnpinTab,
+    RenameTab(String),
+    CloseOtherTabs,
 }
 
 impl UiAction {
@@ -41,12 +57,12 @@ impl UiAction {
             | UiAction::FocusPreviousPane
             | UiAction::FocusNextTab
             | UiAction::FocusPreviousTab => None,
-            UiAction::OpenWindowsWorkspace(path) => {
-                Some(amux_core::Command::OpenWorkspace(WorkspaceTarget::WindowsPath { path }))
-            }
-            UiAction::OpenWslWorkspace { distro, path } => {
-                Some(amux_core::Command::OpenWorkspace(WorkspaceTarget::WslPath { distro, path }))
-            }
+            UiAction::OpenWindowsWorkspace(path) => Some(amux_core::Command::OpenWorkspace(
+                WorkspaceTarget::WindowsPath { path },
+            )),
+            UiAction::OpenWslWorkspace { distro, path } => Some(amux_core::Command::OpenWorkspace(
+                WorkspaceTarget::WslPath { distro, path },
+            )),
             UiAction::FocusPane(pane_id) => Some(amux_core::Command::FocusPane(pane_id)),
             UiAction::OpenSurface { pane_id, surface } => {
                 Some(amux_core::Command::OpenSurface { pane_id, surface })
@@ -57,6 +73,10 @@ impl UiAction {
             UiAction::SplitPane { pane_id, axis } => {
                 Some(amux_core::Command::SplitPane { pane_id, axis })
             }
+            UiAction::PinTab
+            | UiAction::UnpinTab
+            | UiAction::RenameTab(_)
+            | UiAction::CloseOtherTabs => None,
         }
     }
 }
@@ -80,14 +100,28 @@ pub enum AppCommand {
     BrowseWslRoot,
     BrowseWslPath(String), // path to browse
     // Quick switcher commands
-    SwitchWorkspace(usize),      // Switch to workspace by index (1-9)
-    SwitchNextWorkspace,         // Switch to next workspace
-    SwitchPreviousWorkspace,     // Switch to previous workspace
-    FocusNextPane,              // Switch to next pane
-    FocusPreviousPane,          // Switch to previous pane
-    FocusNextTab,               // Switch to next tab in current pane
-    FocusPreviousTab,          // Switch to previous tab in current pane
-    OpenSettings,               // Open settings panel
+    SwitchWorkspace(usize),  // Switch to workspace by index (1-9)
+    SwitchNextWorkspace,     // Switch to next workspace
+    SwitchPreviousWorkspace, // Switch to previous workspace
+    FocusNextPane,           // Switch to next pane
+    FocusPreviousPane,       // Switch to previous pane
+    FocusNextTab,            // Switch to next tab in current pane
+    FocusPreviousTab,        // Switch to previous tab in current pane
+    OpenSettings,            // Open settings panel
+    IncreaseFontSize,        // Increase terminal font size
+    DecreaseFontSize,        // Decrease terminal font size
+    ResetFontSize,           // Reset terminal font size to default
+    // File operations
+    CreateFile { path: String },
+    CreateDirectory { path: String },
+    DeleteFile { path: String },
+    RenameFile { old_path: String, new_path: String },
+    // Workspace operations
+    CloseWorkspace { id: Option<String> },
+    RenameWorkspace { id: String, new_name: String },
+    ReorderWorkspace { from_index: usize, to_index: usize },
+    // Browser operations
+    OpenBrowser { url: Option<String> },
 }
 
 pub fn parse_command(input: &str, active_pane_id: Option<PaneId>) -> Result<AppCommand, String> {
@@ -136,7 +170,8 @@ pub fn parse_command(input: &str, active_pane_id: Option<PaneId>) -> Result<AppC
         ["autosave", "enable"] => Ok(AppCommand::EnableAutoSave),
         ["autosave", "disable"] => Ok(AppCommand::DisableAutoSave),
         ["autosave", "interval", secs] => {
-            let interval: u64 = secs.parse()
+            let interval: u64 = secs
+                .parse()
                 .map_err(|_| "invalid interval, expected number of seconds".to_string())?;
             Ok(AppCommand::SetAutoSaveInterval(interval))
         }
@@ -152,11 +187,21 @@ pub fn parse_command(input: &str, active_pane_id: Option<PaneId>) -> Result<AppC
         ["switch", "tab", "next"] => Ok(AppCommand::FocusNextTab),
         ["switch", "tab", "prev"] => Ok(AppCommand::FocusPreviousTab),
         ["switch", "workspace", n] => {
-            let idx: usize = n.parse()
+            let idx: usize = n
+                .parse()
                 .map_err(|_| "invalid workspace number".to_string())?;
             Ok(AppCommand::SwitchWorkspace(idx))
         }
         ["settings"] | ["preferences"] => Ok(AppCommand::OpenSettings),
+        // Font size commands
+        ["font", "increase"] | ["font", "zoom-in"] => Ok(AppCommand::IncreaseFontSize),
+        ["font", "decrease"] | ["font", "zoom-out"] => Ok(AppCommand::DecreaseFontSize),
+        ["font", "reset"] => Ok(AppCommand::ResetFontSize),
+        // Browser commands
+        ["browser"] | ["open", "url"] | ["open", "browser"] => {
+            let url = parts.get(1).map(|s| s.to_string());
+            Ok(AppCommand::OpenBrowser { url })
+        }
         _ => Err(format!("unknown command: {trimmed}")),
     }
 }
@@ -257,47 +302,229 @@ impl PaletteCommand {
 }
 
 pub fn palette_filter_help() -> &'static [&'static str] {
-    &["all", "workspace", "pane", "agent", "file", "navigation", "session"]
+    &[
+        "all",
+        "workspace",
+        "pane",
+        "agent",
+        "file",
+        "navigation",
+        "session",
+    ]
 }
 
 pub fn palette_command_catalog() -> Vec<PaletteCommand> {
     vec![
         // General
-        PaletteCommand::new("help", "Show Help", "Display available commands", PaletteCategory::General, Some("?")),
-        PaletteCommand::new("save", "Save Session", "Persist current session to disk", PaletteCategory::General, Some("Ctrl+S")),
-        PaletteCommand::new("palette", "Toggle Palette", "Open or close command palette", PaletteCategory::General, Some("Ctrl+Shift+P")),
-        PaletteCommand::new("settings", "Open Settings", "Open settings panel", PaletteCategory::General, Some("Ctrl+,")),
+        PaletteCommand::new(
+            "help",
+            "Show Help",
+            "Display available commands",
+            PaletteCategory::General,
+            Some("?"),
+        ),
+        PaletteCommand::new(
+            "save",
+            "Save Session",
+            "Persist current session to disk",
+            PaletteCategory::General,
+            Some("Ctrl+S"),
+        ),
+        PaletteCommand::new(
+            "palette",
+            "Toggle Palette",
+            "Open or close command palette",
+            PaletteCategory::General,
+            Some("Ctrl+Shift+P"),
+        ),
+        PaletteCommand::new(
+            "settings",
+            "Open Settings",
+            "Open settings panel",
+            PaletteCategory::General,
+            Some("Ctrl+,"),
+        ),
         // Workspace
-        PaletteCommand::new("workspace open D:/repo/amux", "Open Windows Workspace", "Open a local Windows directory as workspace", PaletteCategory::Workspace, None),
-        PaletteCommand::new("workspace open-wsl Ubuntu /home/user/project", "Open WSL Workspace", "Open a WSL directory as workspace", PaletteCategory::Workspace, None),
-        PaletteCommand::new("wsl list", "List WSL Distros", "Show available WSL distributions", PaletteCategory::Workspace, None),
-        PaletteCommand::new("wsl browse /home/user", "Browse WSL Path", "Browse files in WSL directory", PaletteCategory::Workspace, None),
+        PaletteCommand::new(
+            "workspace open D:/repo/amux",
+            "Open Windows Workspace",
+            "Open a local Windows directory as workspace",
+            PaletteCategory::Workspace,
+            None,
+        ),
+        PaletteCommand::new(
+            "workspace open-wsl Ubuntu /home/user/project",
+            "Open WSL Workspace",
+            "Open a WSL directory as workspace",
+            PaletteCategory::Workspace,
+            None,
+        ),
+        PaletteCommand::new(
+            "wsl list",
+            "List WSL Distros",
+            "Show available WSL distributions",
+            PaletteCategory::Workspace,
+            None,
+        ),
+        PaletteCommand::new(
+            "wsl browse /home/user",
+            "Browse WSL Path",
+            "Browse files in WSL directory",
+            PaletteCategory::Workspace,
+            None,
+        ),
         // Pane
-        PaletteCommand::new("pane split-right", "Split Right", "Split current pane horizontally", PaletteCategory::Pane, Some("Ctrl+\\")),
-        PaletteCommand::new("pane split-down", "Split Down", "Split current pane vertically", PaletteCategory::Pane, Some("Ctrl+Shift+\\")),
-        PaletteCommand::new("pane resize-left", "Resize Left", "Shrink split ratio", PaletteCategory::Pane, None),
-        PaletteCommand::new("pane resize-right", "Resize Right", "Grow split ratio", PaletteCategory::Pane, None),
-        PaletteCommand::new("pane resize-reset", "Reset Split Ratio", "Reset all splits to equal size", PaletteCategory::Pane, None),
+        PaletteCommand::new(
+            "pane split-right",
+            "Split Right",
+            "Split current pane horizontally",
+            PaletteCategory::Pane,
+            Some("Ctrl+\\"),
+        ),
+        PaletteCommand::new(
+            "pane split-down",
+            "Split Down",
+            "Split current pane vertically",
+            PaletteCategory::Pane,
+            Some("Ctrl+Shift+\\"),
+        ),
+        PaletteCommand::new(
+            "pane resize-left",
+            "Resize Left",
+            "Shrink split ratio",
+            PaletteCategory::Pane,
+            None,
+        ),
+        PaletteCommand::new(
+            "pane resize-right",
+            "Resize Right",
+            "Grow split ratio",
+            PaletteCategory::Pane,
+            None,
+        ),
+        PaletteCommand::new(
+            "pane resize-reset",
+            "Reset Split Ratio",
+            "Reset all splits to equal size",
+            PaletteCategory::Pane,
+            None,
+        ),
         // Navigation
-        PaletteCommand::new("switch workspace next", "Next Workspace", "Switch to next workspace", PaletteCategory::Navigation, Some("Ctrl+Tab")),
-        PaletteCommand::new("switch workspace prev", "Previous Workspace", "Switch to previous workspace", PaletteCategory::Navigation, Some("Ctrl+Shift+Tab")),
-        PaletteCommand::new("switch pane next", "Next Pane", "Focus next pane", PaletteCategory::Navigation, Some("Ctrl+]")),
-        PaletteCommand::new("switch pane prev", "Previous Pane", "Focus previous pane", PaletteCategory::Navigation, Some("Ctrl+[")),
-        PaletteCommand::new("switch tab next", "Next Tab", "Switch to next tab in pane", PaletteCategory::Navigation, Some("Ctrl+PageDown")),
-        PaletteCommand::new("switch tab prev", "Previous Tab", "Switch to previous tab in pane", PaletteCategory::Navigation, Some("Ctrl+PageUp")),
-        PaletteCommand::new("switch workspace 1", "Workspace 1", "Switch to workspace 1", PaletteCategory::Navigation, Some("Ctrl+1")),
-        PaletteCommand::new("switch workspace 2", "Workspace 2", "Switch to workspace 2", PaletteCategory::Navigation, Some("Ctrl+2")),
+        PaletteCommand::new(
+            "switch workspace next",
+            "Next Workspace",
+            "Switch to next workspace",
+            PaletteCategory::Navigation,
+            Some("Ctrl+Tab"),
+        ),
+        PaletteCommand::new(
+            "switch workspace prev",
+            "Previous Workspace",
+            "Switch to previous workspace",
+            PaletteCategory::Navigation,
+            Some("Ctrl+Shift+Tab"),
+        ),
+        PaletteCommand::new(
+            "switch pane next",
+            "Next Pane",
+            "Focus next pane",
+            PaletteCategory::Navigation,
+            Some("Ctrl+]"),
+        ),
+        PaletteCommand::new(
+            "switch pane prev",
+            "Previous Pane",
+            "Focus previous pane",
+            PaletteCategory::Navigation,
+            Some("Ctrl+["),
+        ),
+        PaletteCommand::new(
+            "switch tab next",
+            "Next Tab",
+            "Switch to next tab in pane",
+            PaletteCategory::Navigation,
+            Some("Ctrl+PageDown"),
+        ),
+        PaletteCommand::new(
+            "switch tab prev",
+            "Previous Tab",
+            "Switch to previous tab in pane",
+            PaletteCategory::Navigation,
+            Some("Ctrl+PageUp"),
+        ),
+        PaletteCommand::new(
+            "switch workspace 1",
+            "Workspace 1",
+            "Switch to workspace 1",
+            PaletteCategory::Navigation,
+            Some("Ctrl+1"),
+        ),
+        PaletteCommand::new(
+            "switch workspace 2",
+            "Workspace 2",
+            "Switch to workspace 2",
+            PaletteCategory::Navigation,
+            Some("Ctrl+2"),
+        ),
         // Agent
-        PaletteCommand::new("agent codex", "Launch Codex", "Start Codex AI agent in terminal", PaletteCategory::Agent, None),
-        PaletteCommand::new("agent claude", "Launch Claude", "Start Claude AI agent in terminal", PaletteCategory::Agent, None),
+        PaletteCommand::new(
+            "agent codex",
+            "Launch Codex",
+            "Start Codex AI agent in terminal",
+            PaletteCategory::Agent,
+            None,
+        ),
+        PaletteCommand::new(
+            "agent claude",
+            "Launch Claude",
+            "Start Claude AI agent in terminal",
+            PaletteCategory::Agent,
+            None,
+        ),
         // File
-        PaletteCommand::new("file open README.md", "Open README", "Open README.md in editor", PaletteCategory::File, None),
-        PaletteCommand::new("file open notes.md", "Open Notes", "Open notes.md in editor", PaletteCategory::File, None),
+        PaletteCommand::new(
+            "file open README.md",
+            "Open README",
+            "Open README.md in editor",
+            PaletteCategory::File,
+            None,
+        ),
+        PaletteCommand::new(
+            "file open notes.md",
+            "Open Notes",
+            "Open notes.md in editor",
+            PaletteCategory::File,
+            None,
+        ),
         // Session
-        PaletteCommand::new("autosave enable", "Enable Auto-Save", "Turn on automatic session saving", PaletteCategory::Session, None),
-        PaletteCommand::new("autosave disable", "Disable Auto-Save", "Turn off automatic session saving", PaletteCategory::Session, None),
-        PaletteCommand::new("autosave interval 60", "Set Auto-Save Interval", "Set auto-save interval in seconds", PaletteCategory::Session, None),
-        PaletteCommand::new("autosave status", "Auto-Save Status", "Show auto-save configuration", PaletteCategory::Session, None),
+        PaletteCommand::new(
+            "autosave enable",
+            "Enable Auto-Save",
+            "Turn on automatic session saving",
+            PaletteCategory::Session,
+            None,
+        ),
+        PaletteCommand::new(
+            "autosave disable",
+            "Disable Auto-Save",
+            "Turn off automatic session saving",
+            PaletteCategory::Session,
+            None,
+        ),
+        PaletteCommand::new(
+            "autosave interval 60",
+            "Set Auto-Save Interval",
+            "Set auto-save interval in seconds",
+            PaletteCategory::Session,
+            None,
+        ),
+        PaletteCommand::new(
+            "autosave status",
+            "Auto-Save Status",
+            "Show auto-save configuration",
+            PaletteCategory::Session,
+            None,
+        ),
     ]
 }
 
@@ -351,7 +578,9 @@ pub fn filtered_palette_commands(query: &str) -> Vec<PaletteCommand> {
                 cmd.description.to_ascii_lowercase(),
             );
             // Support multi-word queries: all words must match
-            search_term.split_whitespace().all(|word| haystack.contains(word))
+            search_term
+                .split_whitespace()
+                .all(|word| haystack.contains(word))
         })
         .collect()
 }
@@ -368,7 +597,7 @@ pub fn filtered_palette_command_strings(query: &str) -> Vec<String> {
 mod tests {
     use amux_core::{PaneId, SplitAxis};
 
-    use super::{AppCommand, PaletteCategory, UiAction, filtered_palette_commands, parse_command};
+    use super::{filtered_palette_commands, parse_command, AppCommand, PaletteCategory, UiAction};
 
     #[test]
     fn parses_split_command_against_active_pane() {
@@ -389,8 +618,8 @@ mod tests {
         let results = filtered_palette_commands("split");
         assert!(!results.is_empty());
         assert!(results.iter().all(|cmd| {
-            let haystack = format!("{} {} {}", cmd.command, cmd.label, cmd.description)
-                .to_ascii_lowercase();
+            let haystack =
+                format!("{} {} {}", cmd.command, cmd.label, cmd.description).to_ascii_lowercase();
             haystack.contains("split")
         }));
     }
@@ -424,8 +653,8 @@ mod tests {
         let results = filtered_palette_commands("workspace next");
         assert!(!results.is_empty());
         for cmd in &results {
-            let haystack = format!("{} {} {}", cmd.command, cmd.label, cmd.description)
-                .to_ascii_lowercase();
+            let haystack =
+                format!("{} {} {}", cmd.command, cmd.label, cmd.description).to_ascii_lowercase();
             assert!(haystack.contains("workspace") && haystack.contains("next"));
         }
     }

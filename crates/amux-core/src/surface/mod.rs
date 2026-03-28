@@ -45,6 +45,7 @@ pub enum SurfaceState {
     Preview(PreviewSurfaceState),
     Welcome(WelcomeSurfaceState),
     Settings(SettingsSurfaceState),
+    Browser(BrowserSurfaceState),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -86,7 +87,7 @@ impl SettingsCategory {
             SettingsCategory::Workspace,
         ]
     }
-    
+
     pub fn label(&self) -> &'static str {
         match self {
             SettingsCategory::General => "General",
@@ -110,4 +111,14 @@ pub enum AgentLaunchMode {
 pub struct AgentAttachment {
     pub agent_instance_id: Option<AgentInstanceId>,
     pub session_id: Option<TerminalSessionId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BrowserSurfaceState {
+    pub surface_id: SurfaceId,
+    pub url: String,
+    pub title: String,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub is_loading: bool,
 }

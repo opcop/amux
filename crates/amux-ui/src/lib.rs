@@ -12,12 +12,12 @@ pub use controller::{AutoSaveConfig, AutoSaveState};
 pub use render::AppRenderer;
 #[cfg(feature = "gpui")]
 pub use render::GpuiRenderer;
+pub use render::TextRenderer;
 #[cfg(feature = "gpui")]
 pub use render::{
     GpuiActiveSurfaceItem, GpuiAgentItem, GpuiFileItem, GpuiOpenFileItem, GpuiPaletteCommandItem,
     GpuiPaneItem, GpuiTabItem, GpuiWindowModel, GpuiWorkspaceItem,
 };
-pub use render::TextRenderer;
 pub use root::DesktopApp;
 pub use state::{
     ActiveSurfaceItem, AgentListItem, AppSnapshot, FileListItem, LayoutSnapshot, OpenFileItem,

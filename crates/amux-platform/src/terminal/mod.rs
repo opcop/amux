@@ -25,7 +25,7 @@ pub use session::{TerminalSession, TerminalSessionManager, keyboard_to_pty};
 pub use view::{TerminalView, keys};
 
 // Re-export manager types
-pub use manager::{TerminalManager, TabId, PaneId, SplitDirection, TerminalTab, TerminalPane};
+pub use manager::{TerminalManager, TabId, PaneId, PaneLayout, SplitDirection, TerminalPane};
 
 // Re-export from amux_core
 pub use amux_core::TerminalSessionId;

@@ -23,4 +23,3 @@ impl WorkspaceSidebar {
         lines.join("\n")
     }
 }
-

@@ -17,5 +17,5 @@ tokio = { version = "1", features = ["sync", "rt"] }
 futures-lite = "2"
 
 # System information (CPU, memory, processes)
-sysinfo = "0.31"
+sysinfo = "0.32"
 

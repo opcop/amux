@@ -28,7 +28,11 @@ impl CommandPalette {
                     lines.push(format!("  [{}]", cat));
                     current_category = cat;
                 }
-                let marker = if index == self.selected_index { ">" } else { "-" };
+                let marker = if index == self.selected_index {
+                    ">"
+                } else {
+                    "-"
+                };
                 let kb = cmd.keybinding.as_deref().unwrap_or("");
                 let kb_display = if kb.is_empty() {
                     String::new()

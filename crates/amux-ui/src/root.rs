@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use amux_core::{PaneId, SplitAxis, TabId};
 
 use crate::{
-    AppSnapshot, UiState,
     commands::UiAction,
     controller::AppController,
     render::{AppRenderer, TextRenderer},
+    AppSnapshot, UiState,
 };
 
 #[derive(Clone, Debug)]
@@ -69,7 +69,8 @@ impl DesktopApp {
     }
 
     pub fn select_next_palette_item(&mut self) {
-        let count = crate::commands::filtered_palette_commands(&self.state.command_palette_query).len();
+        let count =
+            crate::commands::filtered_palette_commands(&self.state.command_palette_query).len();
         if count == 0 {
             let _ = self.dispatch(UiAction::SetCommandPaletteSelectedIndex(0));
             return;
@@ -79,22 +80,20 @@ impl DesktopApp {
     }
 
     pub fn select_previous_palette_item(&mut self) {
-        let count = crate::commands::filtered_palette_commands(&self.state.command_palette_query).len();
+        let count =
+            crate::commands::filtered_palette_commands(&self.state.command_palette_query).len();
         if count == 0 {
             let _ = self.dispatch(UiAction::SetCommandPaletteSelectedIndex(0));
             return;
         }
         let current = self.state.command_palette_selected_index.min(count - 1);
-        let previous = if current == 0 {
-            count - 1
-        } else {
-            current - 1
-        };
+        let previous = if current == 0 { count - 1 } else { current - 1 };
         let _ = self.dispatch(UiAction::SetCommandPaletteSelectedIndex(previous));
     }
 
     pub fn execute_selected_palette_command(&mut self) -> Result<String, String> {
-        let commands = crate::commands::filtered_palette_commands(&self.state.command_palette_query);
+        let commands =
+            crate::commands::filtered_palette_commands(&self.state.command_palette_query);
         if commands.is_empty() {
             return Err("no command matches the current palette query".into());
         }
@@ -107,7 +106,13 @@ impl DesktopApp {
     }
 
     pub fn activate_workspace(&mut self, workspace_id: &str) -> Result<(), String> {
-        self.controller.activate_workspace(&mut self.state, workspace_id)
+        self.controller
+            .activate_workspace(&mut self.state, workspace_id)
+    }
+
+    pub fn rename_workspace(&mut self, workspace_id: &str, new_name: &str) -> Result<String, String> {
+        self.controller
+            .rename_workspace(&mut self.state, workspace_id, new_name)
     }
 
     pub fn split_active_pane(&mut self, axis: SplitAxis) -> Result<(), String> {
@@ -119,7 +124,8 @@ impl DesktopApp {
     }
 
     pub fn activate_tab(&mut self, pane_id: PaneId, tab_id: TabId) -> Result<(), String> {
-        self.controller.activate_tab(&mut self.state, pane_id, tab_id)
+        self.controller
+            .activate_tab(&mut self.state, pane_id, tab_id)
     }
 
     pub fn close_tab(&mut self, pane_id: PaneId, tab_id: TabId) -> Result<(), String> {
@@ -163,7 +169,9 @@ mod tests {
         let mut app = test_app("launch");
         app.bootstrap_demo();
 
-        let launched = app.run_command("agent claude").expect("agent command should work");
+        let launched = app
+            .run_command("agent claude")
+            .expect("agent command should work");
         let opened = app
             .run_command("file open notes.md")
             .expect("file command should work");
@@ -171,7 +179,10 @@ mod tests {
         assert!(launched.contains("claude"));
         assert!(opened.contains("notes.md"));
         let snapshot = app.snapshot();
-        assert!(snapshot.open_files.iter().any(|file| file.relative_path == "notes.md"));
+        assert!(snapshot
+            .open_files
+            .iter()
+            .any(|file| file.relative_path == "notes.md"));
     }
 
     #[test]
@@ -183,13 +194,17 @@ mod tests {
         let before_open_files = before.open_files.len();
         let before_agent_tabs = count_surface_kind(&before.active_workspace, "agent");
 
-        app.run_command("agent codex").expect("agent command should work");
+        app.run_command("agent codex")
+            .expect("agent command should work");
         app.run_command("file open README.md")
             .expect("file command should work");
 
         let after = app.snapshot();
         assert_eq!(after.open_files.len(), before_open_files);
-        assert_eq!(count_surface_kind(&after.active_workspace, "agent"), before_agent_tabs);
+        assert_eq!(
+            count_surface_kind(&after.active_workspace, "agent"),
+            before_agent_tabs
+        );
     }
 
     #[test]
@@ -233,10 +248,7 @@ mod tests {
         assert_eq!(snapshot.command_palette_selected_index, 0);
     }
 
-    fn count_surface_kind(
-        workspace: &Option<crate::WorkspaceSnapshot>,
-        kind: &str,
-    ) -> usize {
+    fn count_surface_kind(workspace: &Option<crate::WorkspaceSnapshot>, kind: &str) -> usize {
         fn count_layout(layout: &crate::LayoutSnapshot, kind: &str) -> usize {
             match layout {
                 crate::LayoutSnapshot::Pane(pane) => pane

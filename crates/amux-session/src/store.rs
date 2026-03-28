@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use amux_core::SessionState;
 
-use crate::{JsonSessionCodec, SessionCodec, session_file_path};
+use crate::{session_file_path, JsonSessionCodec, SessionCodec};
 
 pub trait SessionStore {
     fn load(&self) -> Result<SessionState, String>;
@@ -54,7 +54,23 @@ impl<C: SessionCodec> SessionStore for FileSessionStore<C> {
             fs::create_dir_all(parent).map_err(|err| err.to_string())?;
         }
         let raw = self.codec.encode(session)?;
-        fs::write(path, raw).map_err(|err| err.to_string())
+
+        // Atomic save: write to temp file first, then rename
+        let temp_path = path.with_extension("tmp");
+        fs::write(&temp_path, raw).map_err(|err| err.to_string())?;
+
+        // Rename is atomic on most filesystems
+        #[cfg(unix)]
+        std::fs::rename(&temp_path, &path).map_err(|err| err.to_string())?;
+
+        #[cfg(not(unix))]
+        {
+            // On Windows, rename may fail if target exists
+            fs::remove_file(&path).ok();
+            std::fs::rename(&temp_path, &path).map_err(|err| err.to_string())?;
+        }
+
+        Ok(())
     }
 }
 

@@ -146,6 +146,20 @@ impl std::fmt::Debug for RealTerminalBackend {
     }
 }
 
+/// Check if a program exists in PATH
+fn which_exists(program: &str) -> bool {
+    if let Ok(path) = std::env::var("PATH") {
+        let separator = if cfg!(target_os = "windows") { ';' } else { ':' };
+        for dir in path.split(separator) {
+            let full = std::path::Path::new(dir).join(program);
+            if full.exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl RealTerminalBackend {
     pub fn new() -> Self {
         Self {
@@ -227,8 +241,14 @@ impl RealTerminalBackend {
 
         match (&spec.target, &spec.shell) {
             (WorkspaceTarget::WindowsPath { .. }, ShellKind::PowerShell) => {
+                // Prefer pwsh.exe (PowerShell 7+) over powershell.exe (5.1)
+                let program = if which_exists("pwsh.exe") {
+                    "pwsh.exe"
+                } else {
+                    "powershell.exe"
+                };
                 Ok((
-                    "powershell.exe".to_string(),
+                    program.to_string(),
                     vec!["-NoLogo".to_string()],
                     spec.cwd.clone(),
                 ))

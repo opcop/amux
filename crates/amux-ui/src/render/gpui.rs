@@ -1,8 +1,10 @@
 use std::fmt;
 
 use crate::{
+    commands::{
+        filtered_palette_commands, palette_filter_help, palette_query_suggestions, PaletteCommand,
+    },
     ActiveSurfaceItem, AppSnapshot, LayoutSnapshot,
-    commands::{PaletteCommand, filtered_palette_commands, palette_filter_help, palette_query_suggestions},
 };
 
 use super::AppRenderer;
@@ -99,7 +101,7 @@ pub struct GpuiWindowModel {
     pub command_palette_open: bool,
     pub command_palette_query: String,
     pub command_palette_selected_index: usize,
-    pub command_palette_command_count: usize,  // Count of filtered commands
+    pub command_palette_command_count: usize, // Count of filtered commands
     pub active_workspace_name: Option<String>,
     pub last_activity: Option<String>,
     pub palette_filters: Vec<String>,
@@ -115,7 +117,7 @@ pub struct GpuiWindowModel {
     pub active_surface: Option<GpuiActiveSurfaceItem>,
     pub sections: Vec<GpuiSection>,
     // Status bar fields
-    pub status_save: String,            // "saved 2m ago", "unsaved", "saving"
+    pub status_save: String, // "saved 2m ago", "unsaved", "saving"
     pub status_wsl_distro: Option<String>,
     pub status_split_count: usize,
     pub status_terminal_shell: Option<String>,
@@ -187,7 +189,9 @@ impl AppRenderer for GpuiRenderer {
                 .iter()
                 .map(|item| (*item).to_string())
                 .collect(),
-            selected_palette_command: palette_commands.get(selected_index).map(|c| c.command.clone()),
+            selected_palette_command: palette_commands
+                .get(selected_index)
+                .map(|c| c.command.clone()),
             palette_commands: palette_items,
             workspace_items: snapshot
                 .workspaces
@@ -328,19 +332,10 @@ fn flatten_layout(layout: &LayoutSnapshot) -> Vec<String> {
         match layout {
             LayoutSnapshot::Pane(pane) => {
                 let active = if pane.is_active { "*" } else { "-" };
-                lines.push(format!(
-                    "{}{} Pane {}",
-                    "  ".repeat(depth),
-                    active,
-                    pane.id
-                ));
+                lines.push(format!("{}{} Pane {}", "  ".repeat(depth), active, pane.id));
             }
             LayoutSnapshot::Split(split) => {
-                lines.push(format!(
-                    "{}Split({:?})",
-                    "  ".repeat(depth),
-                    split.axis
-                ));
+                lines.push(format!("{}Split({:?})", "  ".repeat(depth), split.axis));
                 visit(&split.first, depth + 1, lines);
                 visit(&split.second, depth + 1, lines);
             }
@@ -479,9 +474,15 @@ mod tests {
         assert!(!model.command_palette_open);
         assert!(model.command_palette_query.is_empty());
         assert_eq!(model.command_palette_selected_index, 0);
-        assert_eq!(model.command_palette_command_count, model.palette_commands.len());
+        assert_eq!(
+            model.command_palette_command_count,
+            model.palette_commands.len()
+        );
         assert_eq!(model.active_workspace_name.as_deref(), Some("demo"));
-        assert_eq!(model.last_activity.as_deref(), Some("session: loaded from store"));
+        assert_eq!(
+            model.last_activity.as_deref(),
+            Some("session: loaded from store")
+        );
         assert!(!model.palette_filters.is_empty());
         assert!(!model.palette_query_suggestions.is_empty());
         assert!(!model.palette_commands.is_empty());
@@ -493,7 +494,10 @@ mod tests {
         assert_eq!(model.tab_items.len(), 2);
         assert_eq!(model.pane_items.len(), 2);
         assert!(model.active_surface.is_some());
-        assert!(model.sections.iter().any(|section| section.title == "Layout"));
+        assert!(model
+            .sections
+            .iter()
+            .any(|section| section.title == "Layout"));
     }
 
     #[test]
@@ -516,7 +520,10 @@ mod tests {
 
         assert_eq!(model.command_palette_query, "agent");
         assert_eq!(model.command_palette_selected_index, 0);
-        assert_eq!(model.selected_palette_command.as_deref(), Some("agent codex"));
+        assert_eq!(
+            model.selected_palette_command.as_deref(),
+            Some("agent codex")
+        );
         assert!(model
             .palette_commands
             .iter()

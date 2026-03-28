@@ -34,7 +34,11 @@ fn render_pane(pane: &PaneSnapshot) -> String {
 fn render_layout(layout: &LayoutSnapshot, depth: usize, lines: &mut Vec<String>) {
     match layout {
         LayoutSnapshot::Pane(pane) => {
-            lines.push(format!("{}{}", indent(depth), render_pane(pane).trim_start()));
+            lines.push(format!(
+                "{}{}",
+                indent(depth),
+                render_pane(pane).trim_start()
+            ));
         }
         LayoutSnapshot::Split(split) => {
             lines.push(format!("{}{}", indent(depth), split_label(split.axis)));

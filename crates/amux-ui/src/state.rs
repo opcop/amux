@@ -2,9 +2,7 @@ use amux_core::{
     Event, LayoutNode, SaveStatus as CoreSaveStatus, SessionOpError, SessionState, SplitAxis,
     SurfaceState, TabState, WorkspaceState,
 };
-use amux_platform::{
-    SystemMetrics, format_bytes, format_cpu_usage, get_load_status,
-};
+use amux_platform::{format_bytes, format_cpu_usage, get_load_status, SystemMetrics};
 
 use crate::commands::UiAction;
 
@@ -117,14 +115,14 @@ pub struct AppSnapshot {
     pub dirty: bool,
     // Status bar fields
     pub status_wsl_distro: Option<String>, // Current WSL distro if using WSL workspace
-    pub status_split_count: usize,          // Number of splits in current layout
+    pub status_split_count: usize,         // Number of splits in current layout
     pub status_terminal_shell: Option<String>, // Current terminal shell type
     // System metrics
-    pub status_cpu_usage: Option<String>,      // e.g., "45%"
-    pub status_cpu_cores: Option<String>,      // e.g., "8 cores"
-    pub status_memory_usage: Option<String>,  // e.g., "4.2/16.0 GB"
-    pub status_memory_percent: Option<f32>,    // e.g., 26.2
-    pub status_load_color: Option<String>,      // "green", "yellow", "red"
+    pub status_cpu_usage: Option<String>,    // e.g., "45%"
+    pub status_cpu_cores: Option<String>,    // e.g., "8 cores"
+    pub status_memory_usage: Option<String>, // e.g., "4.2/16.0 GB"
+    pub status_memory_percent: Option<f32>,  // e.g., 26.2
+    pub status_load_color: Option<String>,   // "green", "yellow", "red"
 }
 
 /// Simplified recent workspace item for UI display
@@ -161,7 +159,11 @@ impl UiState {
                 }
                 self.push_activity(format!(
                     "ui: command palette {}",
-                    if self.command_palette_open { "opened" } else { "closed" }
+                    if self.command_palette_open {
+                        "opened"
+                    } else {
+                        "closed"
+                    }
                 ));
                 Vec::new()
             }
@@ -249,14 +251,14 @@ impl UiState {
             },
         }
     }
-    
+
     /// Mark the session as saved and update status
     pub fn mark_saved(&mut self) {
         self.dirty = false;
         self.session.mark_saved();
         self.save_status = SaveStatus::Saved("just now".to_string());
     }
-    
+
     /// Get the current save status description
     pub fn get_save_status(&self) -> SaveStatus {
         if self.dirty {
@@ -268,14 +270,14 @@ impl UiState {
     pub fn snapshot(&mut self) -> AppSnapshot {
         // Refresh system metrics before taking snapshot
         self.refresh_system_metrics();
-        
+
         // Format save status
         let save_status = match self.get_save_status() {
             SaveStatus::Saved(desc) => format!("saved {}", desc),
             SaveStatus::Unsaved => "unsaved".to_string(),
             SaveStatus::Saving => "saving...".to_string(),
         };
-        
+
         // Format recent workspaces
         let recent_workspaces = self
             .session
@@ -298,7 +300,7 @@ impl UiState {
                 }
             })
             .collect();
-        
+
         AppSnapshot {
             workspaces: self
                 .session
@@ -327,35 +329,53 @@ impl UiState {
             save_status,
             dirty: self.dirty,
             // Status bar fields
-            status_wsl_distro: self.session.active_workspace().and_then(|ws| {
-                match &ws.target {
+            status_wsl_distro: self
+                .session
+                .active_workspace()
+                .and_then(|ws| match &ws.target {
                     amux_core::WorkspaceTarget::WslPath { distro, .. } => Some(distro.clone()),
                     _ => None,
-                }
-            }),
-            status_split_count: self.session.active_workspace()
+                }),
+            status_split_count: self
+                .session
+                .active_workspace()
                 .map(|ws| count_splits(&ws.layout))
                 .unwrap_or(0),
             status_terminal_shell: self.get_active_terminal_shell(),
             // System metrics
-            status_cpu_usage: self.system_metrics.as_ref().map(|m| format_cpu_usage(m.cpu_usage)),
-            status_cpu_cores: self.system_metrics.as_ref().map(|m| format!("{} cores", m.cpu_count)),
-            status_memory_usage: self.system_metrics.as_ref()
-                .map(|m| format!("{}/{}", format_bytes(m.memory_used), format_bytes(m.memory_total))),
+            status_cpu_usage: self
+                .system_metrics
+                .as_ref()
+                .map(|m| format_cpu_usage(m.cpu_usage)),
+            status_cpu_cores: self
+                .system_metrics
+                .as_ref()
+                .map(|m| format!("{} cores", m.cpu_count)),
+            status_memory_usage: self.system_metrics.as_ref().map(|m| {
+                format!(
+                    "{}/{}",
+                    format_bytes(m.memory_used),
+                    format_bytes(m.memory_total)
+                )
+            }),
             status_memory_percent: self.system_metrics.as_ref().map(|m| m.memory_usage_percent),
-            status_load_color: self.system_metrics.as_ref().map(|m| get_load_status(m).to_string()),
+            status_load_color: self
+                .system_metrics
+                .as_ref()
+                .map(|m| get_load_status(m).to_string()),
         }
     }
-    
+
     /// Update system metrics snapshot (call periodically)
     pub fn refresh_system_metrics(&mut self) {
         use amux_platform::SystemMetricsCollector;
-        
+
         self.system_metrics = Some(SystemMetricsCollector::new().get_metrics());
     }
-    
+
     fn get_active_terminal_shell(&self) -> Option<String> {
-        self.session.active_workspace()
+        self.session
+            .active_workspace()
             .and_then(|ws| find_terminal_surface(&ws.layout, &ws.active_pane_id.0))
     }
 
@@ -414,6 +434,7 @@ fn surface_kind(surface: &SurfaceState) -> &'static str {
         SurfaceState::Preview(_) => "preview",
         SurfaceState::Welcome(_) => "welcome",
         SurfaceState::Settings(_) => "settings",
+        SurfaceState::Browser(_) => "browser",
     }
 }
 
@@ -463,10 +484,20 @@ fn surface_summary_lines(surface: &SurfaceState) -> Vec<String> {
         SurfaceState::Agent(agent) => vec![
             format!("Provider: {}", agent.provider_id),
             format!("Mode: {:?}", agent.launch_mode),
-            format!("CWD: {}", agent.cwd.clone().unwrap_or_else(|| "unset".into())),
+            format!(
+                "CWD: {}",
+                agent.cwd.clone().unwrap_or_else(|| "unset".into())
+            ),
         ],
         SurfaceState::FileTree(file_tree) => vec![
-            format!("Filter: {}", if file_tree.filter.is_empty() { "(none)" } else { &file_tree.filter }),
+            format!(
+                "Filter: {}",
+                if file_tree.filter.is_empty() {
+                    "(none)"
+                } else {
+                    &file_tree.filter
+                }
+            ),
             format!(
                 "Selected: {}",
                 file_tree
@@ -493,15 +524,17 @@ fn surface_summary_lines(surface: &SurfaceState) -> Vec<String> {
             format!("Category: {}", settings.selected_category.label()),
             format!("{} categories", settings.categories.len()),
         ],
+        SurfaceState::Browser(browser) => vec![
+            format!("URL: {}", browser.url),
+            format!("Title: {}", browser.title),
+        ],
     }
 }
 
 /// Count the number of splits in a layout
 fn count_splits(layout: &LayoutNode) -> usize {
     match layout {
-        LayoutNode::Split(split) => {
-            1 + count_splits(&split.first) + count_splits(&split.second)
-        }
+        LayoutNode::Split(split) => 1 + count_splits(&split.first) + count_splits(&split.second),
         LayoutNode::Pane(_) => 0,
     }
 }
@@ -509,21 +542,19 @@ fn count_splits(layout: &LayoutNode) -> usize {
 /// Find the terminal shell type in the active pane
 fn find_terminal_surface(layout: &LayoutNode, active_pane_id: &str) -> Option<String> {
     match layout {
-        LayoutNode::Pane(pane) if pane.pane_id.0 == active_pane_id => {
-            pane.tabs.iter()
-                .find(|tab| matches!(tab.surface, SurfaceState::Terminal(_)))
-                .and_then(|tab| match &tab.surface {
-                    SurfaceState::Terminal(terminal) => {
-                        Some(format!("{:?}", terminal.launch_profile.shell))
-                    }
-                    _ => None,
-                })
-        }
+        LayoutNode::Pane(pane) if pane.pane_id.0 == active_pane_id => pane
+            .tabs
+            .iter()
+            .find(|tab| matches!(tab.surface, SurfaceState::Terminal(_)))
+            .and_then(|tab| match &tab.surface {
+                SurfaceState::Terminal(terminal) => {
+                    Some(format!("{:?}", terminal.launch_profile.shell))
+                }
+                _ => None,
+            }),
         LayoutNode::Pane(_) => None,
-        LayoutNode::Split(split) => {
-            find_terminal_surface(&split.first, active_pane_id)
-                .or_else(|| find_terminal_surface(&split.second, active_pane_id))
-        }
+        LayoutNode::Split(split) => find_terminal_surface(&split.first, active_pane_id)
+            .or_else(|| find_terminal_surface(&split.second, active_pane_id)),
     }
 }
 

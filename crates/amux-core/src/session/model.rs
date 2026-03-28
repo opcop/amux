@@ -8,12 +8,17 @@ pub struct RecentWorkspace {
     pub id: WorkspaceId,
     pub name: String,
     pub target: crate::WorkspaceTarget,
-    pub last_accessed: u64, // Unix timestamp
+    pub last_accessed: u64,     // Unix timestamp
     pub workspace_index: usize, // Index in workspaces vec
 }
 
 impl RecentWorkspace {
-    pub fn new(id: WorkspaceId, name: String, target: crate::WorkspaceTarget, workspace_index: usize) -> Self {
+    pub fn new(
+        id: WorkspaceId,
+        name: String,
+        target: crate::WorkspaceTarget,
+        workspace_index: usize,
+    ) -> Self {
         let last_accessed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -99,33 +104,36 @@ impl SessionState {
     pub fn touch_workspace(&mut self, workspace_id: &WorkspaceId) {
         if let Some(index) = self.workspaces.iter().position(|ws| &ws.id == workspace_id) {
             let workspace = &self.workspaces[index];
-            
+
             // Remove from recent if already exists
             self.recent_workspaces.retain(|r| &r.id != workspace_id);
-            
+
             // Add to front of recent list
-            self.recent_workspaces.insert(0, RecentWorkspace::new(
-                workspace.id.clone(),
-                workspace.name.clone(),
-                workspace.target.clone(),
-                index,
-            ));
-            
+            self.recent_workspaces.insert(
+                0,
+                RecentWorkspace::new(
+                    workspace.id.clone(),
+                    workspace.name.clone(),
+                    workspace.target.clone(),
+                    index,
+                ),
+            );
+
             // Keep only last 10 recent workspaces
             self.recent_workspaces.truncate(10);
         }
     }
-    
+
     /// Mark session as saved
     pub fn mark_saved(&mut self) {
         self.last_saved = Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
-                .unwrap_or(0)
+                .unwrap_or(0),
         );
     }
-    
+
     /// Get save status description
     pub fn save_status(&self) -> SaveStatus {
         match self.last_saved {
@@ -145,6 +153,48 @@ impl SessionState {
             }
             None => SaveStatus::Unsaved,
         }
+    }
+
+    pub fn remove_workspace(&mut self, workspace_id: &WorkspaceId) -> Option<WorkspaceState> {
+        if let Some(index) = self.workspaces.iter().position(|ws| &ws.id == workspace_id) {
+            let removed = self.workspaces.remove(index);
+
+            // Update active workspace if needed
+            if self.active_workspace_id.as_ref() == Some(workspace_id) {
+                self.active_workspace_id = self.workspaces.first().map(|ws| ws.id.clone());
+            }
+
+            // Remove from recent
+            self.recent_workspaces.retain(|r| &r.id != workspace_id);
+
+            Some(removed)
+        } else {
+            None
+        }
+    }
+
+    pub fn rename_workspace(
+        &mut self,
+        workspace_id: &WorkspaceId,
+        new_name: String,
+    ) -> Result<(), String> {
+        let workspace = self
+            .workspaces
+            .iter_mut()
+            .find(|ws| &ws.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+
+        workspace.name = new_name;
+        Ok(())
+    }
+
+    pub fn move_workspace(&mut self, from_index: usize, to_index: usize) -> Result<(), String> {
+        if from_index >= self.workspaces.len() || to_index >= self.workspaces.len() {
+            return Err("invalid workspace index".to_string());
+        }
+        let workspace = self.workspaces.remove(from_index);
+        self.workspaces.insert(to_index, workspace);
+        Ok(())
     }
 }
 

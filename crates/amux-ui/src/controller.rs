@@ -6,19 +6,19 @@ use amux_agent::{
 };
 use amux_core::{
     AgentLaunchMode, AgentSurfaceState, EditorSurfaceState, PaneId, PreviewKind,
-    PreviewSurfaceState, SplitAxis, SurfaceId, SurfaceState, TabId, TerminalSessionId,
-    TerminalLaunchProfile,
+    PreviewSurfaceState, SplitAxis, SurfaceId, SurfaceState, TabId, TerminalLaunchProfile,
+    TerminalSessionId,
 };
 use amux_platform::{
-    DefaultPathMapper, FsBackend, FsEntry, InMemoryFsBackend, InMemoryTerminalBackend,
-    PathMapper, RealFsBackend, RealTerminalBackend, TerminalBackend, TerminalOutputManager,
+    DefaultPathMapper, FsBackend, FsEntry, InMemoryFsBackend, InMemoryTerminalBackend, PathMapper,
+    RealFsBackend, RealTerminalBackend, TerminalBackend, TerminalOutputManager,
 };
 use amux_session::{FileSessionStore, SessionStore};
 use amux_workspace::{FileFilter, WorkspaceService};
 
 use crate::{
+    commands::{parse_command, AppCommand, UiAction},
     ActiveSurfaceItem, AgentListItem, AppSnapshot, FileListItem, OpenFileItem, UiState,
-    commands::{AppCommand, UiAction, parse_command},
 };
 
 /// Auto-save configuration
@@ -47,7 +47,7 @@ impl AutoSaveConfig {
             enabled: true,
         }
     }
-    
+
     /// Disable auto-save
     pub fn disabled() -> Self {
         Self {
@@ -97,7 +97,11 @@ impl FsBackend for FsBackendWrapper {
         }
     }
 
-    fn read_dir(&self, target: &amux_core::WorkspaceTarget, relative_path: &str) -> Result<Vec<FsEntry>, String> {
+    fn read_dir(
+        &self,
+        target: &amux_core::WorkspaceTarget,
+        relative_path: &str,
+    ) -> Result<Vec<FsEntry>, String> {
         match self {
             Self::InMemory(backend) => backend.read_dir(target, relative_path),
             Self::Real(backend) => backend.read_dir(target, relative_path),
@@ -152,7 +156,10 @@ impl TerminalBackend for TerminalBackendWrapper {
         }
     }
 
-    fn metadata(&self, id: &TerminalSessionId) -> Result<amux_platform::TerminalSessionMetadata, String> {
+    fn metadata(
+        &self,
+        id: &TerminalSessionId,
+    ) -> Result<amux_platform::TerminalSessionMetadata, String> {
         match self {
             Self::InMemory(backend) => backend.metadata(id),
             Self::Real(backend) => backend.metadata(id),
@@ -191,7 +198,9 @@ impl TerminalBackendWrapper {
                 // For in-memory backend, get from records
                 let records = backend.records();
                 if let Some(record) = records.iter().find(|r| r.metadata.id.0 == session_id.0) {
-                    record.writes.iter()
+                    record
+                        .writes
+                        .iter()
                         .take(count)
                         .map(|w| String::from_utf8_lossy(w).to_string())
                         .collect()
@@ -199,12 +208,11 @@ impl TerminalBackendWrapper {
                     Vec::new()
                 }
             }
-            Self::Real(backend) => {
-                backend.get_recent_output(session_id, count)
-                    .iter()
-                    .map(|line| line.text.clone())
-                    .collect()
-            }
+            Self::Real(backend) => backend
+                .get_recent_output(session_id, count)
+                .iter()
+                .map(|line| line.text.clone())
+                .collect(),
         }
     }
 }
@@ -363,7 +371,11 @@ impl AppController {
     }
 
     /// Force an immediate auto-save
-    pub fn force_auto_save(&mut self, state: &mut UiState, current_time_millis: u64) -> Result<(), String> {
+    pub fn force_auto_save(
+        &mut self,
+        state: &mut UiState,
+        current_time_millis: u64,
+    ) -> Result<(), String> {
         self.persist_session(state)?;
         self.auto_save_state.last_auto_save = Some(current_time_millis);
         self.auto_save_state.auto_save_count += 1;
@@ -380,7 +392,8 @@ impl AppController {
             return;
         }
 
-        state.dispatch(UiAction::OpenWindowsWorkspace(PathBuf::from("D:/repo/amux")));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        state.dispatch(UiAction::OpenWindowsWorkspace(cwd));
 
         let _ = self.seed_demo_workspace_files(state);
 
@@ -445,42 +458,36 @@ impl AppController {
                 state.push_activity("command ok: help");
                 Ok(crate::commands::command_help().join("\n"))
             }
-            AppCommand::SaveSession => {
-                match self.persist_session(state) {
-                    Ok(()) => {
-                        state.push_activity("command ok: save");
-                        Ok("session saved".into())
-                    }
-                    Err(err) => {
-                        state.push_activity(format!("command error: save failed - {err}"));
-                        Err(format!("save failed: {err}"))
-                    }
+            AppCommand::SaveSession => match self.persist_session(state) {
+                Ok(()) => {
+                    state.push_activity("command ok: save");
+                    Ok("session saved".into())
                 }
-            }
-            AppCommand::ResizeSplit(delta) => {
-                match self.resize_active_split(state, delta) {
-                    Ok(_) => {
-                        state.push_activity("command ok: resize split");
-                        Ok(format!("split resized by {}", delta))
-                    }
-                    Err(err) => {
-                        state.push_activity(format!("command error: {err}"));
-                        Err(err)
-                    }
+                Err(err) => {
+                    state.push_activity(format!("command error: save failed - {err}"));
+                    Err(format!("save failed: {err}"))
                 }
-            }
-            AppCommand::ResetSplitRatios => {
-                match self.reset_split_ratios(state) {
-                    Ok(_) => {
-                        state.push_activity("command ok: reset ratios");
-                        Ok("split ratios reset".into())
-                    }
-                    Err(err) => {
-                        state.push_activity(format!("command error: {err}"));
-                        Err(err)
-                    }
+            },
+            AppCommand::ResizeSplit(delta) => match self.resize_active_split(state, delta) {
+                Ok(_) => {
+                    state.push_activity("command ok: resize split");
+                    Ok(format!("split resized by {}", delta))
                 }
-            }
+                Err(err) => {
+                    state.push_activity(format!("command error: {err}"));
+                    Err(err)
+                }
+            },
+            AppCommand::ResetSplitRatios => match self.reset_split_ratios(state) {
+                Ok(_) => {
+                    state.push_activity("command ok: reset ratios");
+                    Ok("split ratios reset".into())
+                }
+                Err(err) => {
+                    state.push_activity(format!("command error: {err}"));
+                    Err(err)
+                }
+            },
             AppCommand::ListWslDistros => {
                 #[cfg(target_os = "windows")]
                 {
@@ -497,7 +504,10 @@ impl AppController {
                                     amux_platform::DistroState::Stopped => "Stopped",
                                     amux_platform::DistroState::Installing => "Installing",
                                 };
-                                lines.push(format!("  {} ({}) v{}", distro.name, state, distro.version));
+                                lines.push(format!(
+                                    "  {} ({}) v{}",
+                                    distro.name, state, distro.version
+                                ));
                             }
                             if let Some(default) = &result.default_distro {
                                 lines.push(format!("\nDefault: {}", default));
@@ -538,8 +548,9 @@ impl AppController {
             }
             AppCommand::ShowAutoSaveStatus => {
                 let (enabled, count, last) = self.auto_save_stats();
-                let status = if enabled {
-                    format!(
+                let status =
+                    if enabled {
+                        format!(
                         "Auto-save: enabled (interval: {}s)\nSaves this session: {}\nLast save: {}",
                         self.auto_save.interval_secs,
                         count,
@@ -549,17 +560,22 @@ impl AppController {
                             .as_millis() as u64 - ts) / 1000))
                         .unwrap_or_else(|| "never".to_string())
                     )
-                } else {
-                    format!(
-                        "Auto-save: disabled\nSaves this session: {}\nLast save: {}",
-                        count,
-                        last.map(|ts| format!("{} ago", (std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64 - ts) / 1000))
-                        .unwrap_or_else(|| "never".to_string())
-                    )
-                };
+                    } else {
+                        format!(
+                            "Auto-save: disabled\nSaves this session: {}\nLast save: {}",
+                            count,
+                            last.map(|ts| format!(
+                                "{} ago",
+                                (std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64
+                                    - ts)
+                                    / 1000
+                            ))
+                            .unwrap_or_else(|| "never".to_string())
+                        )
+                    };
                 state.push_activity("command ok: autosave status");
                 Ok(status)
             }
@@ -568,16 +584,17 @@ impl AppController {
                 {
                     use amux_platform::detect_wsl_distributions;
                     let result = detect_wsl_distributions();
-                    
+
                     if !result.wsl_available {
                         state.push_activity("command error: wsl not available");
                         return Err("WSL is not available on this system".to_string());
                     }
-                    
-                    let distro = result.default_distro
+
+                    let distro = result
+                        .default_distro
                         .or_else(|| result.distros.first().map(|d| d.name.clone()))
                         .ok_or_else(|| "No WSL distributions found".to_string())?;
-                    
+
                     self.browse_wsl_path(state, &distro, "/")
                 }
                 #[cfg(not(target_os = "windows"))]
@@ -596,7 +613,7 @@ impl AppController {
                             _ => None,
                         })
                         .ok_or_else(|| "No active WSL workspace. Use 'workspace open-wsl <distro> <path>' first".to_string())?;
-                    
+
                     self.browse_wsl_path(state, &distro, &_path)
                 }
                 #[cfg(not(target_os = "windows"))]
@@ -606,72 +623,322 @@ impl AppController {
                 }
             }
             // Quick switcher commands
-            AppCommand::SwitchWorkspace(n) => {
-                self.switch_to_workspace(state, n)
+            AppCommand::SwitchWorkspace(n) => self.switch_to_workspace(state, n),
+            AppCommand::SwitchNextWorkspace => self.switch_to_next_workspace(state),
+            AppCommand::SwitchPreviousWorkspace => self.switch_to_prev_workspace(state),
+            AppCommand::FocusNextPane => self.focus_next_pane(state),
+            AppCommand::FocusPreviousPane => self.focus_prev_pane(state),
+            AppCommand::FocusNextTab => self.focus_next_tab(state),
+            AppCommand::FocusPreviousTab => self.focus_prev_tab(state),
+            AppCommand::OpenSettings => self.open_settings(state),
+            AppCommand::IncreaseFontSize => self.adjust_font_size(state, 2),
+            AppCommand::DecreaseFontSize => self.adjust_font_size(state, -2),
+            AppCommand::ResetFontSize => self.reset_font_size(state),
+            AppCommand::CreateFile { path } => self.create_file(state, &path),
+            AppCommand::CreateDirectory { path } => self.create_directory(state, &path),
+            AppCommand::DeleteFile { path } => self.delete_file(state, &path),
+            AppCommand::RenameFile { old_path, new_path } => {
+                self.rename_file(state, &old_path, &new_path)
             }
-            AppCommand::SwitchNextWorkspace => {
-                self.switch_to_next_workspace(state)
+            AppCommand::CloseWorkspace { id } => self.close_workspace(state, id.as_deref()),
+            AppCommand::RenameWorkspace { id, new_name } => {
+                self.rename_workspace(state, &id, &new_name)
             }
-            AppCommand::SwitchPreviousWorkspace => {
-                self.switch_to_prev_workspace(state)
-            }
-            AppCommand::FocusNextPane => {
-                self.focus_next_pane(state)
-            }
-            AppCommand::FocusPreviousPane => {
-                self.focus_prev_pane(state)
-            }
-            AppCommand::FocusNextTab => {
-                self.focus_next_tab(state)
-            }
-            AppCommand::FocusPreviousTab => {
-                self.focus_prev_tab(state)
-            }
-            AppCommand::OpenSettings => {
-                self.open_settings(state)
-            }
+            AppCommand::ReorderWorkspace {
+                from_index,
+                to_index,
+            } => self.reorder_workspace(state, from_index, to_index),
+            AppCommand::OpenBrowser { url } => self.open_browser(state, url.as_deref()),
         }
     }
-    
+
+    fn open_browser(&self, state: &mut UiState, url: Option<&str>) -> Result<String, String> {
+        let workspace = state
+            .session
+            .active_workspace()
+            .ok_or("no active workspace")?;
+
+        let url = url.unwrap_or("https://www.google.com").to_string();
+
+        let surface = amux_core::BrowserSurfaceState {
+            surface_id: amux_core::SurfaceId::new(format!(
+                "surface-browser-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+            url: url.clone(),
+            title: url.clone(),
+            can_go_back: false,
+            can_go_forward: false,
+            is_loading: false,
+        };
+
+        state.dispatch(UiAction::OpenSurface {
+            pane_id: workspace.active_pane_id.clone(),
+            surface: amux_core::SurfaceState::Browser(surface),
+        });
+
+        state.dirty = true;
+        Ok(format!("opened browser: {}", url))
+    }
+
+    fn close_workspace(&self, state: &mut UiState, id: Option<&str>) -> Result<String, String> {
+        let workspace_id = match id {
+            Some(id) => amux_core::WorkspaceId::new(id),
+            None => state
+                .session
+                .active_workspace_id
+                .clone()
+                .ok_or("no active workspace")?,
+        };
+
+        if state.session.workspaces.len() <= 1 {
+            return Err("cannot close the last workspace".to_string());
+        }
+
+        let removed = state
+            .session
+            .remove_workspace(&workspace_id)
+            .ok_or("workspace not found")?;
+
+        state.dirty = true;
+        state.push_activity(format!("closed workspace: {}", removed.name));
+        Ok(format!("closed workspace: {}", removed.name))
+    }
+
+    pub fn rename_workspace(
+        &self,
+        state: &mut UiState,
+        id: &str,
+        new_name: &str,
+    ) -> Result<String, String> {
+        let workspace_id = amux_core::WorkspaceId::new(id);
+        state
+            .session
+            .rename_workspace(&workspace_id, new_name.to_string())?;
+        state.dirty = true;
+        state.push_activity(format!("renamed workspace to: {}", new_name));
+        Ok(format!("renamed workspace to: {}", new_name))
+    }
+
+    fn reorder_workspace(
+        &self,
+        state: &mut UiState,
+        from_index: usize,
+        to_index: usize,
+    ) -> Result<String, String> {
+        state.session.move_workspace(from_index, to_index)?;
+        state.dirty = true;
+        state.push_activity("workspace reordered".to_string());
+        Ok("workspace reordered".to_string())
+    }
+
+    fn create_file(&self, state: &mut UiState, path: &str) -> Result<String, String> {
+        let workspace = state
+            .session
+            .active_workspace()
+            .ok_or("no active workspace")?;
+
+        let fs = self.fs_backend.clone();
+        let mapped = self
+            .path_mapper
+            .map_file_for_editor(&workspace.target, path)?;
+
+        fs.write_string(&mapped, "")?;
+
+        state.dirty = true;
+        Ok(format!("created file: {}", path))
+    }
+
+    fn create_directory(&self, state: &mut UiState, path: &str) -> Result<String, String> {
+        let workspace = state
+            .session
+            .active_workspace()
+            .ok_or("no active workspace")?;
+
+        let dir_path = self
+            .path_mapper
+            .map_file_for_editor(&workspace.target, path)?;
+
+        std::fs::create_dir_all(&dir_path.native_path)
+            .map_err(|e| format!("failed to create directory: {}", e))?;
+
+        state.dirty = true;
+        state.push_activity(format!("created directory: {}", path));
+        Ok(format!("created directory: {}", path))
+    }
+
+    fn delete_file(&self, state: &mut UiState, path: &str) -> Result<String, String> {
+        let workspace = state
+            .session
+            .active_workspace()
+            .ok_or("no active workspace")?;
+
+        let file_path = self
+            .path_mapper
+            .map_file_for_editor(&workspace.target, path)?;
+
+        if file_path.native_path.is_dir() {
+            std::fs::remove_dir_all(&file_path.native_path)
+                .map_err(|e| format!("failed to delete directory: {}", e))?;
+        } else {
+            std::fs::remove_file(&file_path.native_path)
+                .map_err(|e| format!("failed to delete file: {}", e))?;
+        }
+
+        state.dirty = true;
+        Ok(format!("deleted: {}", path))
+    }
+
+    fn rename_file(
+        &self,
+        state: &mut UiState,
+        old_path: &str,
+        new_path: &str,
+    ) -> Result<String, String> {
+        let workspace = state
+            .session
+            .active_workspace()
+            .ok_or("no active workspace")?;
+
+        let old_file = self
+            .path_mapper
+            .map_file_for_editor(&workspace.target, old_path)?;
+        let new_file = self
+            .path_mapper
+            .map_file_for_editor(&workspace.target, new_path)?;
+
+        if old_file.native_path.is_dir() {
+            std::fs::rename(&old_file.native_path, &new_file.native_path)
+                .map_err(|e| format!("failed to rename directory: {}", e))?;
+        } else {
+            std::fs::rename(&old_file.native_path, &new_file.native_path)
+                .map_err(|e| format!("failed to rename file: {}", e))?;
+        }
+
+        state.dirty = true;
+        Ok(format!("renamed {} to {}", old_path, new_path))
+    }
+
+    pub fn handle_tab_action(
+        &mut self,
+        state: &mut UiState,
+        action: UiAction,
+    ) -> Result<String, String> {
+        match action {
+            UiAction::PinTab => self.pin_active_tab(state),
+            UiAction::UnpinTab => self.unpin_active_tab(state),
+            UiAction::RenameTab(new_title) => self.rename_active_tab(state, new_title),
+            UiAction::CloseOtherTabs => self.close_other_tabs(state),
+            _ => Err("invalid tab action".into()),
+        }
+    }
+
+    fn pin_active_tab(&self, state: &mut UiState) -> Result<String, String> {
+        let workspace = state
+            .session
+            .active_workspace_mut()
+            .ok_or("no active workspace")?;
+        workspace.pin_active_tab().map_err(|e| format!("{:?}", e))?;
+        state.dirty = true;
+        Ok("tab pinned".into())
+    }
+
+    fn unpin_active_tab(&self, state: &mut UiState) -> Result<String, String> {
+        let workspace = state
+            .session
+            .active_workspace_mut()
+            .ok_or("no active workspace")?;
+        workspace
+            .unpin_active_tab()
+            .map_err(|e| format!("{:?}", e))?;
+        state.dirty = true;
+        Ok("tab unpinned".into())
+    }
+
+    fn rename_active_tab(&self, state: &mut UiState, new_title: String) -> Result<String, String> {
+        let workspace = state
+            .session
+            .active_workspace_mut()
+            .ok_or("no active workspace")?;
+        workspace
+            .rename_active_tab(new_title.clone())
+            .map_err(|e| format!("{:?}", e))?;
+        state.dirty = true;
+        Ok(format!("tab renamed to: {}", new_title))
+    }
+
+    fn close_other_tabs(&self, state: &mut UiState) -> Result<String, String> {
+        let workspace = state
+            .session
+            .active_workspace_mut()
+            .ok_or("no active workspace")?;
+        workspace
+            .close_other_tabs()
+            .map_err(|e| format!("{:?}", e))?;
+        state.dirty = true;
+        Ok("other tabs closed".into())
+    }
+
+    fn adjust_font_size(&self, state: &mut UiState, delta: i16) -> Result<String, String> {
+        let current = state.session.ui_preferences.font_size as i16;
+        let new_size = (current + delta).max(8).min(72) as u16;
+        state.session.ui_preferences.font_size = new_size;
+        state.push_activity(format!("font size: {}px", new_size));
+        Ok(format!("font size: {}px", new_size))
+    }
+
+    fn reset_font_size(&self, state: &mut UiState) -> Result<String, String> {
+        let default_size = 14u16;
+        state.session.ui_preferences.font_size = default_size;
+        state.push_activity(format!("font size reset to {}px", default_size));
+        Ok(format!("font size reset to {}px", default_size))
+    }
+
     #[cfg(target_os = "windows")]
-    fn browse_wsl_path(&self, state: &mut UiState, distro: &str, path: &str) -> Result<String, String> {
-        use amux_platform::{wsl_read_dir, wsl_parent_path, FsEntry};
-        
+    fn browse_wsl_path(
+        &self,
+        state: &mut UiState,
+        distro: &str,
+        path: &str,
+    ) -> Result<String, String> {
+        use amux_platform::{wsl_parent_path, wsl_read_dir, FsEntry};
+
         match wsl_read_dir(distro, path) {
             Ok(entries) => {
                 let parent = wsl_parent_path(path);
-                let mut lines = vec![
-                    format!("WSL:{} - {}:", distro, path),
-                    "=".repeat(50),
-                ];
-                
+                let mut lines = vec![format!("WSL:{} - {}:", distro, path), "=".repeat(50)];
+
                 // Show parent link if exists
                 if let Some(ref parent_path) = parent {
                     lines.push(format!("[.. {}]", parent_path));
                 }
-                
+
                 // Sort: dirs first, then files
                 let mut dirs: Vec<&FsEntry> = entries.iter().filter(|e| e.is_dir).collect();
                 let mut files: Vec<&FsEntry> = entries.iter().filter(|e| !e.is_dir).collect();
                 dirs.sort_by_key(|e| &e.name);
                 files.sort_by_key(|e| &e.name);
-                
+
                 let dirs_count = dirs.len();
                 let files_count = files.len();
-                
+
                 for entry in dirs {
                     lines.push(format!("[DIR]  {}", entry.name));
                 }
                 for entry in files {
                     lines.push(format!("[FILE] {}", entry.name));
                 }
-                
-                lines.push(format!("\n{} items ({} dirs, {} files)", 
+
+                lines.push(format!(
+                    "\n{} items ({} dirs, {} files)",
                     entries.len(),
                     dirs_count,
                     files_count
                 ));
-                
+
                 state.push_activity(format!("command ok: browsed wsl {}:{}", distro, path));
                 Ok(lines.join("\n"))
             }
@@ -681,9 +948,9 @@ impl AppController {
             }
         }
     }
-    
+
     // === Quick Switcher Methods ===
-    
+
     fn switch_to_workspace(&self, state: &mut UiState, index: usize) -> Result<String, String> {
         // Get workspace info first
         let (workspace_id, workspace_name) = {
@@ -691,21 +958,28 @@ impl AppController {
             if workspaces.is_empty() {
                 return Err("no workspaces available".to_string());
             }
-            
+
             // Convert 1-based index to 0-based
             let idx = index.saturating_sub(1);
             if idx >= workspaces.len() {
-                return Err(format!("workspace {} not found (only {} workspaces)", index, workspaces.len()));
+                return Err(format!(
+                    "workspace {} not found (only {} workspaces)",
+                    index,
+                    workspaces.len()
+                ));
             }
-            
+
             (workspaces[idx].id.0.clone(), workspaces[idx].name.clone())
         }; // workspaces borrow ends here
-        
+
         self.activate_workspace(state, &workspace_id)?;
         state.push_activity(format!("switched to workspace {}", index));
-        Ok(format!("Switched to workspace {}: {}", index, workspace_name))
+        Ok(format!(
+            "Switched to workspace {}: {}",
+            index, workspace_name
+        ))
     }
-    
+
     fn switch_to_next_workspace(&self, state: &mut UiState) -> Result<String, String> {
         // Get workspace info first
         let (workspace_id, workspace_name, next_idx) = {
@@ -713,23 +987,35 @@ impl AppController {
             if workspaces.len() <= 1 {
                 return Err("only one workspace available".to_string());
             }
-            
-            let current_id = state.session.active_workspace_id.as_ref()
+
+            let current_id = state
+                .session
+                .active_workspace_id
+                .as_ref()
                 .ok_or("no active workspace")?;
-            
-            let current_idx = workspaces.iter()
+
+            let current_idx = workspaces
+                .iter()
                 .position(|w| &w.id == current_id)
                 .ok_or("active workspace not found")?;
-            
+
             let next_idx = (current_idx + 1) % workspaces.len();
-            (workspaces[next_idx].id.0.clone(), workspaces[next_idx].name.clone(), next_idx)
+            (
+                workspaces[next_idx].id.0.clone(),
+                workspaces[next_idx].name.clone(),
+                next_idx,
+            )
         };
-        
+
         self.activate_workspace(state, &workspace_id)?;
         state.push_activity("switched to next workspace");
-        Ok(format!("Switched to workspace {}: {}", next_idx + 1, workspace_name))
+        Ok(format!(
+            "Switched to workspace {}: {}",
+            next_idx + 1,
+            workspace_name
+        ))
     }
-    
+
     fn switch_to_prev_workspace(&self, state: &mut UiState) -> Result<String, String> {
         // Get workspace info first
         let (workspace_id, workspace_name, prev_idx) = {
@@ -737,168 +1023,212 @@ impl AppController {
             if workspaces.len() <= 1 {
                 return Err("only one workspace available".to_string());
             }
-            
-            let current_id = state.session.active_workspace_id.as_ref()
+
+            let current_id = state
+                .session
+                .active_workspace_id
+                .as_ref()
                 .ok_or("no active workspace")?;
-            
-            let current_idx = workspaces.iter()
+
+            let current_idx = workspaces
+                .iter()
                 .position(|w| &w.id == current_id)
                 .ok_or("active workspace not found")?;
-            
-            let prev_idx = if current_idx == 0 { workspaces.len() - 1 } else { current_idx - 1 };
-            (workspaces[prev_idx].id.0.clone(), workspaces[prev_idx].name.clone(), prev_idx)
+
+            let prev_idx = if current_idx == 0 {
+                workspaces.len() - 1
+            } else {
+                current_idx - 1
+            };
+            (
+                workspaces[prev_idx].id.0.clone(),
+                workspaces[prev_idx].name.clone(),
+                prev_idx,
+            )
         };
-        
+
         self.activate_workspace(state, &workspace_id)?;
         state.push_activity("switched to previous workspace");
-        Ok(format!("Switched to workspace {}: {}", prev_idx + 1, workspace_name))
+        Ok(format!(
+            "Switched to workspace {}: {}",
+            prev_idx + 1,
+            workspace_name
+        ))
     }
-    
+
     fn focus_next_pane(&self, state: &mut UiState) -> Result<String, String> {
-        let workspace = state.session.active_workspace_mut()
+        let workspace = state
+            .session
+            .active_workspace_mut()
             .ok_or("no active workspace")?;
-        
+
         use amux_core::layout::get_all_panes;
         let panes = get_all_panes(&workspace.layout);
-        
+
         if panes.len() <= 1 {
             return Err("only one pane in layout".to_string());
         }
-        
+
         let current_pane_id = &workspace.active_pane_id.0;
-        let current_idx = panes.iter()
+        let current_idx = panes
+            .iter()
             .position(|p| p.pane_id.0 == *current_pane_id)
             .unwrap_or(0);
-        
+
         let next_idx = (current_idx + 1) % panes.len();
         let next_pane_id = panes[next_idx].pane_id.clone();
-        
+
         workspace.active_pane_id = next_pane_id.clone();
         state.push_activity(format!("focused next pane"));
         Ok(format!("Focused pane {}", next_idx + 1))
     }
-    
+
     fn focus_prev_pane(&self, state: &mut UiState) -> Result<String, String> {
-        let workspace = state.session.active_workspace_mut()
+        let workspace = state
+            .session
+            .active_workspace_mut()
             .ok_or("no active workspace")?;
-        
+
         use amux_core::layout::get_all_panes;
         let panes = get_all_panes(&workspace.layout);
-        
+
         if panes.len() <= 1 {
             return Err("only one pane in layout".to_string());
         }
-        
+
         let current_pane_id = &workspace.active_pane_id.0;
-        let current_idx = panes.iter()
+        let current_idx = panes
+            .iter()
             .position(|p| p.pane_id.0 == *current_pane_id)
             .unwrap_or(0);
-        
-        let prev_idx = if current_idx == 0 { panes.len() - 1 } else { current_idx - 1 };
+
+        let prev_idx = if current_idx == 0 {
+            panes.len() - 1
+        } else {
+            current_idx - 1
+        };
         let prev_pane_id = panes[prev_idx].pane_id.clone();
-        
+
         workspace.active_pane_id = prev_pane_id.clone();
         state.push_activity("focused previous pane");
         Ok(format!("Focused pane {}", prev_idx + 1))
     }
-    
+
     fn focus_next_tab(&self, state: &mut UiState) -> Result<String, String> {
         use amux_core::layout::find_pane_mut;
-        
-        let workspace = state.session.active_workspace_mut()
+
+        let workspace = state
+            .session
+            .active_workspace_mut()
             .ok_or("no active workspace")?;
-        
+
         let pane = find_pane_mut(&mut workspace.layout, &workspace.active_pane_id)
             .ok_or("active pane not found")?;
-        
+
         if pane.tabs.len() <= 1 {
             return Err("only one tab in pane".to_string());
         }
-        
-        let current_idx = pane.tabs.iter()
+
+        let current_idx = pane
+            .tabs
+            .iter()
             .position(|t| t.id == pane.active_tab_id)
             .unwrap_or(0);
         let next_idx = (current_idx + 1) % pane.tabs.len();
-        
+
         let tab_id = pane.tabs[next_idx].id.clone();
         pane.active_tab_id = tab_id;
-        
+
         state.push_activity("focused next tab");
         Ok(format!("Focused tab {}", next_idx + 1))
     }
-    
+
     fn focus_prev_tab(&self, state: &mut UiState) -> Result<String, String> {
         use amux_core::layout::find_pane_mut;
-        
-        let workspace = state.session.active_workspace_mut()
+
+        let workspace = state
+            .session
+            .active_workspace_mut()
             .ok_or("no active workspace")?;
-        
+
         let pane = find_pane_mut(&mut workspace.layout, &workspace.active_pane_id)
             .ok_or("active pane not found")?;
-        
+
         if pane.tabs.len() <= 1 {
             return Err("only one tab in pane".to_string());
         }
-        
-        let current_idx = pane.tabs.iter()
+
+        let current_idx = pane
+            .tabs
+            .iter()
             .position(|t| t.id == pane.active_tab_id)
             .unwrap_or(0);
-        let prev_idx = if current_idx == 0 { pane.tabs.len() - 1 } else { current_idx - 1 };
-        
+        let prev_idx = if current_idx == 0 {
+            pane.tabs.len() - 1
+        } else {
+            current_idx - 1
+        };
+
         let tab_id = pane.tabs[prev_idx].id.clone();
         pane.active_tab_id = tab_id;
-        
+
         state.push_activity("focused previous tab");
         Ok(format!("Focused tab {}", prev_idx + 1))
     }
-    
+
     fn resize_active_split(&self, state: &mut UiState, delta: f32) -> Result<(), String> {
         use amux_core::layout::find_split_for_pane;
-        
-        let workspace = state.session.active_workspace_mut()
+
+        let workspace = state
+            .session
+            .active_workspace_mut()
             .ok_or("no active workspace")?;
-        
+
         let pane_id = &workspace.active_pane_id;
         let Some((split_id, _axis)) = find_split_for_pane(&workspace.layout, pane_id) else {
             return Err("active pane is not in a split".to_string());
         };
-        
+
         workspace.layout.resize_split(&split_id, delta);
         Ok(())
     }
-    
+
     fn reset_split_ratios(&self, state: &mut UiState) -> Result<(), String> {
-        let workspace = state.session.active_workspace_mut()
+        let workspace = state
+            .session
+            .active_workspace_mut()
             .ok_or("no active workspace")?;
         workspace.layout.reset_split_ratios();
         Ok(())
     }
-    
+
     fn open_settings(&self, state: &mut UiState) -> Result<String, String> {
         use amux_core::surface::{SettingsCategory, SettingsSurfaceState};
-        use amux_core::{SurfaceId, layout::append_tab};
-        
-        let workspace = state.session.active_workspace_mut()
+        use amux_core::{layout::append_tab, SurfaceId};
+
+        let workspace = state
+            .session
+            .active_workspace_mut()
             .ok_or("no active workspace")?;
-        
+
         let pane_id = workspace.active_pane_id.clone();
-        
+
         let settings = SettingsSurfaceState {
             surface_id: SurfaceId::new("settings"),
             title: "Settings".to_string(),
             selected_category: SettingsCategory::General,
             categories: SettingsCategory::all(),
         };
-        
+
         let tab_id = amux_core::TabId::new("settings-tab");
-        
+
         let tab = amux_core::TabState::new(
             tab_id.clone(),
             "Settings",
             false,
             amux_core::SurfaceState::Settings(settings),
         );
-        
+
         if append_tab(&mut workspace.layout, &pane_id, tab) {
             state.push_activity("opened settings");
             Ok("Settings opened".to_string())
@@ -1008,11 +1338,7 @@ impl AppController {
         Ok(())
     }
 
-    pub fn split_active_pane(
-        &self,
-        state: &mut UiState,
-        axis: SplitAxis,
-    ) -> Result<(), String> {
+    pub fn split_active_pane(&self, state: &mut UiState, axis: SplitAxis) -> Result<(), String> {
         let pane_id = state
             .session
             .active_workspace()
@@ -1023,11 +1349,7 @@ impl AppController {
         Ok(())
     }
 
-    pub fn focus_pane(
-        &self,
-        state: &mut UiState,
-        pane_id: PaneId,
-    ) -> Result<(), String> {
+    pub fn focus_pane(&self, state: &mut UiState, pane_id: PaneId) -> Result<(), String> {
         let _ = self.dispatch(state, UiAction::FocusPane(pane_id));
         if let Some(error) = &state.last_error {
             return Err(error.clone());
@@ -1238,7 +1560,8 @@ impl AppController {
                 } else if let Some(provider) =
                     extract_summary_value(&active_surface.summary_lines, "Provider:")
                 {
-                    active_surface.content_lines = vec![format!("Status: attached to {provider} session")];
+                    active_surface.content_lines =
+                        vec![format!("Status: attached to {provider} session")];
                 }
             }
             _ => {}
@@ -1250,7 +1573,23 @@ impl AppController {
 
 fn default_session_dir(app_name: &str) -> PathBuf {
     let slug = app_name.to_ascii_lowercase().replace(' ', "-");
-    std::env::temp_dir().join(format!("{slug}-session"))
+    // Use home directory for persistent storage, fallback to temp
+    if let Some(home) = dirs_home() {
+        home.join(format!(".{slug}"))
+    } else {
+        std::env::temp_dir().join(format!("{slug}-session"))
+    }
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME").ok().map(PathBuf::from)
+    }
 }
 
 fn language_for_path(relative_path: &str) -> Option<String> {
@@ -1264,12 +1603,18 @@ fn language_for_path(relative_path: &str) -> Option<String> {
 }
 
 fn extract_summary_value(lines: &[String], prefix: &str) -> Option<String> {
-    lines.iter()
-        .find_map(|line| line.strip_prefix(prefix).map(|value| value.trim().to_string()))
+    lines.iter().find_map(|line| {
+        line.strip_prefix(prefix)
+            .map(|value| value.trim().to_string())
+    })
 }
 
 fn content_preview_lines(content: &str) -> Vec<String> {
-    content.lines().take(50).map(|line| line.to_string()).collect()
+    content
+        .lines()
+        .take(50)
+        .map(|line| line.to_string())
+        .collect()
 }
 
 fn terminal_preview_lines(
@@ -1318,10 +1663,7 @@ fn collect_open_files(layout: &amux_core::LayoutNode) -> Vec<OpenFileItem> {
     }
 }
 
-fn find_editor_tab(
-    layout: &amux_core::LayoutNode,
-    relative_path: &str,
-) -> Option<(PaneId, TabId)> {
+fn find_editor_tab(layout: &amux_core::LayoutNode, relative_path: &str) -> Option<(PaneId, TabId)> {
     match layout {
         amux_core::LayoutNode::Pane(pane) => pane.tabs.iter().find_map(|tab| match &tab.surface {
             SurfaceState::Editor(editor) if editor.relative_path == relative_path => {
@@ -1334,10 +1676,7 @@ fn find_editor_tab(
     }
 }
 
-fn find_agent_tab(
-    layout: &amux_core::LayoutNode,
-    provider_id: &str,
-) -> Option<(PaneId, TabId)> {
+fn find_agent_tab(layout: &amux_core::LayoutNode, provider_id: &str) -> Option<(PaneId, TabId)> {
     match layout {
         amux_core::LayoutNode::Pane(pane) => pane.tabs.iter().find_map(|tab| match &tab.surface {
             SurfaceState::Agent(agent) if agent.provider_id == provider_id => {
@@ -1369,7 +1708,9 @@ fn normalize_layout_tabs(
             let mut filtered = Vec::with_capacity(pane.tabs.len());
             for tab in pane.tabs.drain(..) {
                 let keep = match &tab.surface {
-                    SurfaceState::Editor(editor) => seen_editors.insert(editor.relative_path.clone()),
+                    SurfaceState::Editor(editor) => {
+                        seen_editors.insert(editor.relative_path.clone())
+                    }
                     SurfaceState::Agent(agent) => seen_agents.insert(agent.provider_id.clone()),
                     _ => true,
                 };

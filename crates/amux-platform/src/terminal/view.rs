@@ -170,13 +170,20 @@ impl TerminalView {
             }
             std::mem::take(&mut *pending)
         };
+        // Auto-scroll to bottom when new output arrives
+        if self.emulator.is_scrolled() {
+            self.emulator.scroll_to_bottom();
+        }
         self.emulator.feed(&data);
         true
     }
 
     /// Check if there is pending output waiting
     pub fn has_pending_output(&self) -> bool {
-        self.pending_output.lock().map(|p| !p.is_empty()).unwrap_or(false)
+        self.pending_output
+            .lock()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
     }
 
     /// Feed data to the emulator directly (for local echo / testing)
@@ -195,6 +202,11 @@ impl TerminalView {
 
     /// Resize the terminal
     pub fn resize(&mut self, cols: usize, rows: usize) -> Result<(), String> {
+        let (cur_cols, cur_rows) = self.emulator.dimensions();
+        if cols == cur_cols && rows == cur_rows {
+            return Ok(());
+        }
+
         self.emulator.resize(cols, rows);
 
         if let Some(ref session_id) = self.session_id {
@@ -245,9 +257,19 @@ impl TerminalView {
         self.output_callback = Some(Arc::new(callback));
     }
 
-    /// Clear the terminal
+    /// Clear the terminal (screen and scrollback)
     pub fn clear(&mut self) {
-        self.emulator.feed(b"\x1b[2J\x1b[H");
+        self.emulator.clear_all();
+    }
+
+    /// Clear only the screen (not scrollback)
+    pub fn clear_screen(&mut self) {
+        self.emulator.clear_screen();
+    }
+
+    /// Clear only the scrollback buffer
+    pub fn clear_scrollback(&mut self) {
+        self.emulator.clear_scrollback();
     }
 
     /// Send text to the terminal (for copy/paste)
@@ -398,7 +420,10 @@ mod tests {
 
     #[test]
     fn test_arrow_up() {
-        assert_eq!(keys::to_pty("ArrowUp", false, false, false), vec![0x1B, 0x5B, 0x41]);
+        assert_eq!(
+            keys::to_pty("ArrowUp", false, false, false),
+            vec![0x1B, 0x5B, 0x41]
+        );
     }
 
     #[test]

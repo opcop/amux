@@ -536,11 +536,11 @@ fn render_terminal_surface_view(item: &GpuiActiveSurfaceItem) -> impl IntoElemen
             // AI agent terminals - purple theme
             (rgb(0x0f0a1a), rgb(0x4c1d95), rgb(0x1e1b4b), rgb(0xc4b5fd), rgb(0xe9d5ff))
         } else {
-            // Regular terminals - blue theme
-            (rgb(0x0b1220), rgb(0x1e3a5f), rgb(0x0f172a), rgb(0x60a5fa), rgb(0xe2e8f0))
+            // Regular terminals - Catppuccin theme
+            (rgb(0x1e1e2e), rgb(0x313244), rgb(0x181825), rgb(0x89b4fa), rgb(0xcdd6f4))
         };
 
-    let mut content = surface_content_block(rgb(0x0f172a), term_border)
+    let mut content = surface_content_block(rgb(0x181825), term_border)
         // Header with terminal controls visual
         .child(
             div()

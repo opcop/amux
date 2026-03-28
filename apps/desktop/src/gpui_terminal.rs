@@ -15,8 +15,8 @@ use amux_platform::terminal::emulator::{
 };
 
 /// Character cell dimensions (in pixels)
-const CELL_WIDTH: f32 = 8.0;
-const CELL_HEIGHT: f32 = 16.0;
+pub const CELL_WIDTH: f32 = 8.4;
+pub const CELL_HEIGHT: f32 = 20.0;
 
 /// Terminal view state for GPUI rendering
 #[cfg(feature = "gpui")]
@@ -44,12 +44,12 @@ pub struct TerminalColorScheme {
 impl Default for TerminalColorScheme {
     fn default() -> Self {
         Self {
-            background: rgb(0x0b1220),      // Dark blue-black
-            foreground: rgb(0xe2e8f0),      // Light gray
-            cursor: rgb(0x60a5fa),           // Blue
-            cursor_text: rgb(0x0b1220),     // Dark
-            selection_bg: rgb(0x1e3a5f),   // Blue selection
-            selection_fg: rgb(0xffffff),    // White text
+            background: rgb(0x1e1e2e),      // Catppuccin Mocha base
+            foreground: rgb(0xcdd6f4),      // Catppuccin Mocha text
+            cursor: rgb(0x89b4fa),           // Catppuccin blue
+            cursor_text: rgb(0x1e1e2e),     // Catppuccin base
+            selection_bg: rgb(0x45475a),   // Catppuccin surface1
+            selection_fg: rgb(0xcdd6f4),    // Catppuccin text
         }
     }
 }
@@ -242,10 +242,26 @@ impl TerminalRenderElements {
 ///
 /// Uses simple flex row layout — one div per row, styled text runs inline.
 #[cfg(feature = "gpui")]
-pub fn render_terminal(emulator: &TerminalEmulator, cursor: &Cursor) -> impl IntoElement {
+pub fn render_terminal(emulator: &TerminalEmulator, cursor: &Cursor, cursor_blink_on: bool) -> impl IntoElement {
     let (cols, rows) = emulator.dimensions();
-    let grid = emulator.grid();
+    let is_scrolled = emulator.is_scrolled();
+    let scroll_grid;
+    let grid: &[Vec<Cell>];
+    let display_rows;
+    if is_scrolled {
+        let visible = emulator.visible_grid();
+        // Convert &[Cell] rows to Vec<Cell> for owned storage
+        scroll_grid = visible.iter().map(|row| row.to_vec()).collect::<Vec<_>>();
+        display_rows = scroll_grid.len().min(rows);
+        grid = &scroll_grid;
+    } else {
+        grid = emulator.grid();
+        display_rows = rows.min(grid.len());
+    };
+    // Only show cursor when not scrolled back and blink is on
+    let show_cursor = cursor.visible && !is_scrolled && cursor_blink_on;
     let cs = TerminalColorScheme::default();
+    let selection = emulator.selection();
 
     div()
         .bg(cs.background)
@@ -256,7 +272,7 @@ pub fn render_terminal(emulator: &TerminalEmulator, cursor: &Cursor) -> impl Int
         .p_1()
         .font_family("Cascadia Code, Consolas, DejaVu Sans Mono, monospace".to_string())
         .text_sm()
-        .children((0..rows.min(50)).map(|y| {
+        .children((0..display_rows.min(rows)).map(|y| {
             let row = if y < grid.len() {
                 &grid[y]
             } else {
@@ -272,20 +288,38 @@ pub fn render_terminal(emulator: &TerminalEmulator, cursor: &Cursor) -> impl Int
 
             for x in 0..col_limit {
                 let cell = &row[x];
-                let is_cursor = cursor.visible && cursor.x == x && cursor.y == y;
+
+                // Skip continuation cells of wide characters
+                if cell.wide_continuation {
+                    continue;
+                }
+
+                let is_cursor = show_cursor && cursor.x == x && cursor.y == y;
+                let is_selected = selection.contains(x, y);
 
                 let cell_fg = if is_cursor {
                     cs.cursor_text
+                } else if is_selected {
+                    cs.selection_fg
                 } else {
-                    cs.get_color(&cell.fg, false)
+                    let mut c = cs.get_color(&cell.fg, false);
+                    if cell.dim {
+                        // Dim: reduce brightness by ~50%
+                        c.r *= 0.5;
+                        c.g *= 0.5;
+                        c.b *= 0.5;
+                    }
+                    c
                 };
                 let cell_bg = if is_cursor {
                     cs.cursor
+                } else if is_selected {
+                    cs.selection_bg
                 } else {
                     cs.get_color(&cell.bg, true)
                 };
 
-                // Style changed or cursor — flush current run
+                // Style changed — flush current run
                 if cell_fg != run_fg || cell_bg != run_bg {
                     if !run_text.is_empty() {
                         spans.push(

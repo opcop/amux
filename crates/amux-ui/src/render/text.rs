@@ -1,11 +1,11 @@
 use crate::{
-    AppSnapshot,
     commands::filtered_palette_commands,
     components::{
         AgentLauncherPanel, CommandPalette, FileExplorerPanel, OpenFilesPanel, PaneGrid, TitleBar,
         WorkspaceSidebar,
     },
     panels::ActivityPanel,
+    AppSnapshot,
 };
 
 use super::AppRenderer;
@@ -63,9 +63,8 @@ impl AppRenderer for TextRenderer {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ActiveSurfaceItem, AgentListItem, AppSnapshot, FileListItem, LayoutSnapshot,
-        OpenFileItem, PaneSnapshot, SplitSnapshot, TabSnapshot, WorkspaceListItem,
-        WorkspaceSnapshot,
+        ActiveSurfaceItem, AgentListItem, AppSnapshot, FileListItem, LayoutSnapshot, OpenFileItem,
+        PaneSnapshot, SplitSnapshot, TabSnapshot, WorkspaceListItem, WorkspaceSnapshot,
     };
 
     use super::{AppRenderer, TextRenderer};

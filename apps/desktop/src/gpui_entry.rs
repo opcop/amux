@@ -10,9 +10,7 @@ use gpui_platform::application;
 #[cfg(feature = "gpui")]
 use amux_platform::terminal::manager::{TerminalManager, SplitDirection};
 #[cfg(feature = "gpui")]
-use amux_platform::terminal::emulator::{TerminalEmulator, Cursor};
-#[cfg(feature = "gpui")]
-use crate::gpui_status_bar::render_status_bar;
+use crate::gpui_status_bar::{render_status_bar, StatusBarData};
 #[cfg(feature = "gpui")]
 use crate::gpui_workspace_sidebar::WorkspaceSidebarState;
 
@@ -22,10 +20,65 @@ pub(crate) struct GpuiShellView {
     app: DesktopApp,
     model: GpuiWindowModel,
     sidebar_state: WorkspaceSidebarState,
-    // Terminal manager with tabs and panes
-    terminal_manager: TerminalManager,
-    // Focus handle for keyboard input
+    /// Per-workspace terminal managers
+    workspace_terminals: std::collections::HashMap<String, TerminalManager>,
+    /// Current active workspace ID for terminal lookup
+    active_workspace_id: String,
     focus_handle: gpui::FocusHandle,
+    /// Mouse drag state for text selection
+    selecting: bool,
+    /// Context menu state
+    context_menu: Option<ContextMenuState>,
+    /// Drag state for resizing split panes
+    resize_drag: Option<ResizeDragState>,
+    /// Cursor blink frame counter (toggled by 60fps timer)
+    cursor_blink_frame: u32,
+    /// Workspace rename state: (workspace_id, current_text)
+    renaming_workspace: Option<(String, String)>,
+}
+
+/// Right-click context menu
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+struct ContextMenuState {
+    position: gpui::Point<gpui::Pixels>,
+}
+
+/// Drag state for resizing split panes
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+struct ResizeDragState {
+    /// First pane ID in the left/top child (identifies which split)
+    split_first_pane: String,
+    /// true = horizontal split (drag left/right), false = vertical (drag up/down)
+    is_horizontal: bool,
+    /// Mouse position at drag start (x for horizontal, y for vertical)
+    start_mouse_pos: f32,
+    /// Ratio at drag start
+    start_ratio: f32,
+    /// Estimated container size in the drag axis (pixels)
+    container_length: f32,
+}
+
+/// Context menu item definition
+#[cfg(feature = "gpui")]
+#[derive(Clone)]
+struct ContextMenuItem {
+    label: &'static str,
+    shortcut: Option<&'static str>,
+    enabled: bool,
+    separator_after: bool,
+}
+
+#[cfg(feature = "gpui")]
+impl ContextMenuItem {
+    fn action(label: &'static str, shortcut: Option<&'static str>, enabled: bool) -> Self {
+        Self { label, shortcut, enabled, separator_after: false }
+    }
+    fn separator(mut self) -> Self {
+        self.separator_after = true;
+        self
+    }
 }
 
 #[cfg(feature = "gpui")]
@@ -33,9 +86,187 @@ impl GpuiShellView {
     /// Create a new shell view with terminal manager
     pub fn new(app: DesktopApp, model: GpuiWindowModel, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let mut terminal_manager = TerminalManager::new();
 
-        // Detect platform and choose the right shell
+        // Get the active workspace ID
+        let active_ws_id = model.workspace_items.iter()
+            .find(|w| w.is_active)
+            .map(|w| w.id.clone())
+            .unwrap_or_else(|| "default".to_string());
+
+        // Create terminal manager for the initial workspace
+        let mut workspace_terminals = std::collections::HashMap::new();
+        let mut tm = TerminalManager::new();
+        let _ = tm.spawn_in_active(Self::default_profile());
+        workspace_terminals.insert(active_ws_id.clone(), tm);
+
+        Self {
+            app,
+            model,
+            sidebar_state: WorkspaceSidebarState::default(),
+            workspace_terminals,
+            active_workspace_id: active_ws_id,
+            focus_handle,
+            selecting: false,
+            context_menu: None,
+            resize_drag: None,
+            cursor_blink_frame: 0,
+            renaming_workspace: None,
+        }
+    }
+
+    /// Get the terminal manager for the active workspace (immutable)
+    fn terminal_manager(&self) -> &TerminalManager {
+        self.workspace_terminals.get(&self.active_workspace_id)
+            .expect("active workspace must have a terminal manager")
+    }
+
+    /// Get the terminal manager for the active workspace (mutable)
+    fn terminal_manager_mut(&mut self) -> &mut TerminalManager {
+        self.workspace_terminals.get_mut(&self.active_workspace_id)
+            .expect("active workspace must have a terminal manager")
+    }
+
+    /// Ensure a workspace has a terminal manager, creating one if needed
+    fn ensure_workspace_terminal(&mut self, workspace_id: &str) {
+        if !self.workspace_terminals.contains_key(workspace_id) {
+            let mut tm = TerminalManager::new();
+            let _ = tm.spawn_in_active(Self::default_profile());
+            self.workspace_terminals.insert(workspace_id.to_string(), tm);
+        }
+    }
+
+    /// Switch the active workspace terminal
+    fn switch_workspace_terminal(&mut self, workspace_id: &str) {
+        self.ensure_workspace_terminal(workspace_id);
+        self.active_workspace_id = workspace_id.to_string();
+    }
+
+    /// Copy selected text to clipboard
+    fn copy_selection(&self, cx: &mut Context<Self>) {
+        if let Some(term) = self.terminal_manager().active_terminal_ref() {
+            let em = term.emulator();
+            let text = em.selection().get_selected_text(em.grid());
+            if !text.is_empty() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+        }
+    }
+
+    /// Paste from clipboard into terminal
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        let text = cx.read_from_clipboard()
+            .and_then(|item| item.text().map(|s| s.to_string()));
+        if let Some(text) = text {
+            if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                let _ = term.send_input(text.as_bytes());
+            }
+        }
+    }
+
+    /// Convert pixel position to terminal cell coordinates.
+    /// Accounts for sidebar width. Uses px() arithmetic.
+    fn pixel_to_cell(pos: gpui::Point<gpui::Pixels>, sidebar_width: f32) -> (usize, usize) {
+        let sidebar_px = px(sidebar_width);
+        let cell_w = px(crate::gpui_terminal::CELL_WIDTH);
+        let cell_h = px(crate::gpui_terminal::CELL_HEIGHT);
+        // Subtract sidebar, clamp to zero, divide by cell size
+        let adj_x = if pos.x > sidebar_px { pos.x - sidebar_px } else { px(0.0) };
+        let col = (adj_x / cell_w) as usize;
+        let row = (pos.y / cell_h) as usize;
+        (col, row)
+    }
+
+    /// Build context menu items based on current state
+    fn build_context_menu_items(&self) -> Vec<ContextMenuItem> {
+        let has_selection = self.terminal_manager().active_terminal_ref()
+            .map(|t| !t.emulator().selection().is_empty())
+            .unwrap_or(false);
+
+        let mut items = vec![
+            ContextMenuItem::action("Copy", Some("Ctrl+C"), has_selection),
+            ContextMenuItem::action("Paste", Some("Ctrl+V"), true).separator(),
+            ContextMenuItem::action("Split Right", Some("Ctrl+D"), true),
+            ContextMenuItem::action("Split Down", Some("Ctrl+Shift+D"), true).separator(),
+            ContextMenuItem::action("New Tab", Some("Ctrl+T"), true),
+            ContextMenuItem::action("Close Pane", Some("Ctrl+W"), self.terminal_manager().total_panes() > 1).separator(),
+            ContextMenuItem::action("Clear", Some("Ctrl+K"), true).separator(),
+        ];
+
+        // AI Agent launchers
+        for agent in &self.model.agent_items {
+            if agent.status == "installed" || agent.supported {
+                let label: &'static str = match agent.id.as_str() {
+                    "claude" => "Launch Claude",
+                    "codex" => "Launch Codex",
+                    "opencode" => "Launch OpenCode",
+                    "aider" => "Launch Aider",
+                    _ => continue,
+                };
+                items.push(ContextMenuItem::action(label, None, true));
+            }
+        }
+
+        items
+    }
+
+    /// Execute a context menu action by label
+    fn execute_context_menu_action(&mut self, label: &str, cx: &mut Context<Self>) {
+        match label {
+            "Copy" => {
+                self.copy_selection(cx);
+                if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                    term.emulator_mut().selection_mut().clear();
+                }
+            }
+            "Paste" => {
+                self.paste_clipboard(cx);
+            }
+            "Split Right" => {
+                self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
+                let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+            }
+            "Split Down" => {
+                self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
+                let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+            }
+            "New Tab" => {
+                self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
+                let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+            }
+            "Close Pane" => {
+                self.terminal_manager_mut().close_active_pane();
+            }
+            "Clear" => {
+                if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                    // Send Ctrl+L to PTY — shell clears screen and redraws prompt
+                    let _ = term.send_input(&[0x0c]); // 0x0c = Form Feed = Ctrl+L
+                    term.clear_scrollback();
+                }
+            }
+            "Launch Claude" => {
+                let _ = self.app.run_command("agent claude");
+                self.refresh_model();
+            }
+            "Launch Codex" => {
+                let _ = self.app.run_command("agent codex");
+                self.refresh_model();
+            }
+            "Launch OpenCode" => {
+                let _ = self.app.run_command("agent opencode");
+                self.refresh_model();
+            }
+            "Launch Aider" => {
+                let _ = self.app.run_command("agent aider");
+                self.refresh_model();
+            }
+            _ => {}
+        }
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    /// Build a default terminal launch profile for the current platform
+    fn default_profile() -> amux_core::TerminalLaunchProfile {
         let (target, shell, cwd) = if cfg!(target_os = "windows") {
             (
                 amux_core::WorkspaceTarget::WindowsPath {
@@ -47,47 +278,22 @@ impl GpuiShellView {
                     .ok(),
             )
         } else {
-            // Linux / macOS / WSL — use bash
             (
                 amux_core::WorkspaceTarget::WindowsPath {
                     path: std::env::current_dir().unwrap_or_default(),
                 },
-                amux_core::ShellKind::Cmd, // We'll override the command below
+                amux_core::ShellKind::PowerShell, // On Linux, build_pty_command ignores this and uses $SHELL
                 std::env::current_dir()
                     .map(|p| p.to_string_lossy().to_string())
                     .ok(),
             )
         };
-
-        // Try to spawn a real PTY session
-        if let Some(term) = terminal_manager.active_terminal() {
-            let profile = amux_core::TerminalLaunchProfile {
-                target,
-                shell,
-                cwd,
-                env: std::collections::BTreeMap::new(),
-                title: Some("Terminal".to_string()),
-            };
-
-            match term.spawn(profile) {
-                Ok(_) => {
-                    eprintln!("Terminal spawned successfully");
-                }
-                Err(e) => {
-                    eprintln!("Failed to spawn terminal: {}", e);
-                    term.feed(b"\x1b[1;32mWelcome to AMUX Terminal\x1b[0m\r\n");
-                    term.feed(b"\x1b[33mNote: Run in a real terminal environment for full functionality.\x1b[0m\r\n\r\n");
-                    term.feed(b"$ ");
-                }
-            }
-        }
-
-        Self {
-            app,
-            model,
-            sidebar_state: WorkspaceSidebarState::default(),
-            terminal_manager,
-            focus_handle,
+        amux_core::TerminalLaunchProfile {
+            target,
+            shell,
+            cwd,
+            env: std::collections::BTreeMap::new(),
+            title: Some("Terminal".to_string()),
         }
     }
 
@@ -95,20 +301,48 @@ impl GpuiShellView {
     pub fn handle_terminal_input(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool) {
         use amux_platform::terminal::keys;
         
-        let input = keys::to_pty(key, ctrl, shift, alt);
+        // GPUI sends lowercase keys but to_pty expects title case
+        let normalized_key = match key {
+            "enter" => "Enter",
+            "tab" => "Tab",
+            "escape" => "Escape",
+            "backspace" => "Backspace",
+            "arrowup" => "ArrowUp",
+            "arrowdown" => "ArrowDown",
+            "arrowleft" => "ArrowLeft",
+            "arrowright" => "ArrowRight",
+            "home" => "Home",
+            "end" => "End",
+            "pageup" => "PageUp",
+            "pagedown" => "PageDown",
+            "insert" => "Insert",
+            "delete" => "Delete",
+            "f1" => "F1",
+            "f2" => "F2",
+            "f3" => "F3",
+            "f4" => "F4",
+            "f5" => "F5",
+            "f6" => "F6",
+            "f7" => "F7",
+            "f8" => "F8",
+            "f9" => "F9",
+            "f10" => "F10",
+            "f11" => "F11",
+            "f12" => "F12",
+            "space" => "Space",
+            _ => key,
+        };
         
-        // Feed to active terminal emulator for local rendering
-        if let Some(terminal) = self.terminal_manager.active_terminal() {
-            terminal.feed(&input);
-            
-            // Send to PTY if session is active
+        let input = keys::to_pty(normalized_key, ctrl, shift, alt);
+        
+        // Only send to PTY - PTY will echo back, no local echo needed
+        if let Some(terminal) = self.terminal_manager_mut().active_terminal() {
             if terminal.is_active() {
                 let _ = terminal.send_input(&input);
             }
         }
         
-        // Request re-render
-        self.model = self.app.render_with(&amux_ui::GpuiRenderer);
+        // Don't request re-render here - the 60fps polling loop will trigger re-render when PTY output arrives
     }
 }
 
@@ -124,34 +358,27 @@ impl Render for GpuiShellView {
         let workspaces = self.model.workspace_items.clone();
         let model_ref = &self.model;
 
-        // Poll PTY output and feed to emulator before rendering
-        let had_output = self.terminal_manager.poll_active();
-
-        // Get terminal info from manager
-        let terminal_tabs = self.terminal_manager.tab_titles();
-        let term_view = self.terminal_manager.active_terminal_ref();
-        let emulator: Option<&TerminalEmulator> = term_view.map(|t| t.emulator());
-        let cursor: Option<&Cursor> = emulator.map(|e| e.cursor());
-
-        // Debug: log terminal state on first few renders
-        {
-            static RENDER_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let count = RENDER_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if count < 5 || (had_output && count < 20) {
-                let has_em = emulator.is_some();
-                let grid_content = emulator.map(|em| {
-                    let grid = em.grid();
-                    let first_row: String = if !grid.is_empty() {
-                        grid[0].iter().map(|c| c.ch).collect::<String>().trim_end().to_string()
-                    } else {
-                        "(empty grid)".to_string()
-                    };
-                    let non_empty_rows = grid.iter().filter(|row| row.iter().any(|c| c.ch != ' ' && c.ch != '\0')).count();
-                    format!("rows_with_content={}, first_row='{}'", non_empty_rows, &first_row[..first_row.len().min(60)])
-                }).unwrap_or_else(|| "no emulator".to_string());
-                eprintln!("[render#{}] has_emulator={}, had_output={}, tabs={}, {}", count, has_em, had_output, terminal_tabs.len(), grid_content);
-            }
+        // Poll ALL workspace terminal managers for PTY output
+        let mut had_output = false;
+        for tm in self.workspace_terminals.values_mut() {
+            had_output |= tm.poll_all();
         }
+
+        // Resize terminals — skip during drag to avoid content loss
+        if self.resize_drag.is_none() {
+            let sidebar_w = if self.sidebar_state.collapsed { 28.0 } else { 220.0 };
+            let vp = window.viewport_size();
+            let content_w = vp.width.as_f32() - sidebar_w;
+            let status_bar_h = 28.0_f32;
+            let content_h = vp.height.as_f32() - status_bar_h;
+            self.terminal_manager_mut().resize_all_panes(
+                content_w, content_h,
+                crate::gpui_terminal::CELL_WIDTH,
+                crate::gpui_terminal::CELL_HEIGHT,
+            );
+        }
+
+
         
         // Main layout - limux/mori style dark theme
         div()
@@ -159,10 +386,82 @@ impl Render for GpuiShellView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x171717))
+            .bg(rgb(0x1e1e2e))
             .text_color(rgb(0xffffff))
             .on_key_down(cx.listener(|this, event, window, cx| {
                 this.on_global_key_down(event, window, cx);
+            }))
+            // Mouse: start selection on left button down (also closes context menu)
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _window, cx| {
+                // Cancel workspace rename on click elsewhere
+                if this.renaming_workspace.is_some() {
+                    this.renaming_workspace = None;
+                    cx.notify();
+                }
+                // Don't close context menu here — it's handled by the overlay dismiss layer
+                // Don't start text selection if a resize drag is active
+                if this.resize_drag.is_some() {
+                    return;
+                }
+                let sidebar_w = if this.sidebar_state.collapsed { 28.0 } else { 220.0 };
+                let (col, row) = Self::pixel_to_cell(event.position, sidebar_w);
+                if let Some(term) = this.terminal_manager_mut().active_terminal() {
+                    term.emulator_mut().set_selection_start(col, row);
+                }
+                this.selecting = true;
+                cx.notify();
+            }))
+            // Mouse: extend selection or resize drag
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+                // Handle split resize drag (don't cx.notify here — 60fps timer handles re-render)
+                if let Some(ref drag) = this.resize_drag.clone() {
+                    let current_pos = if drag.is_horizontal {
+                        event.position.x.as_f32()
+                    } else {
+                        event.position.y.as_f32()
+                    };
+                    let delta = current_pos - drag.start_mouse_pos;
+                    let new_ratio = (drag.start_ratio + delta / drag.container_length).clamp(0.1, 0.9);
+                    let pane_id = amux_platform::terminal::manager::PaneId(drag.split_first_pane.clone());
+                    this.terminal_manager_mut().update_split_ratio(&pane_id, new_ratio);
+                    return;
+                }
+                // Handle text selection
+                if !this.selecting { return; }
+                let sidebar_w = if this.sidebar_state.collapsed { 28.0 } else { 220.0 };
+                let (col, row) = Self::pixel_to_cell(event.position, sidebar_w);
+                if let Some(term) = this.terminal_manager_mut().active_terminal() {
+                    term.emulator_mut().set_selection_end(col, row);
+                }
+                cx.notify();
+            }))
+            // Mouse: end selection or resize drag on button up
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _event: &gpui::MouseUpEvent, _window, cx| {
+                this.selecting = false;
+                this.resize_drag = None;
+                cx.notify();
+            }))
+            // Mouse wheel: scroll terminal history
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                let lines = match event.delta {
+                    gpui::ScrollDelta::Lines(pt) => -pt.y,
+                    gpui::ScrollDelta::Pixels(pt) => -pt.y.as_f32() / crate::gpui_terminal::CELL_HEIGHT,
+                };
+                if let Some(term) = this.terminal_manager_mut().active_terminal() {
+                    if lines > 0.0 {
+                        term.emulator_mut().scroll_up(lines.ceil() as usize);
+                    } else if lines < 0.0 {
+                        term.emulator_mut().scroll_down((-lines).ceil() as usize);
+                    }
+                }
+                cx.notify();
+            }))
+            // Right-click: show context menu
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, event: &gpui::MouseDownEvent, _window, cx| {
+                this.context_menu = Some(ContextMenuState {
+                    position: event.position,
+                });
+                cx.notify();
             }))
             // Main content
             .child(
@@ -175,102 +474,170 @@ impl Render for GpuiShellView {
                     .child({
                         if sidebar_visible {
                             div()
+                                .id("sidebar-expanded")
                                 .w(px(220.0))
-                                .bg(rgb(0x191919))
+                                .bg(rgb(0x181818))
+                                .flex()
                                 .flex_col()
                                 .border_r_1()
-                                .border_color(rgb(0x333333))
+                                .border_color(rgb(0x2a2a2a))
+                                // Header: title + collapse button
                                 .child(
                                     div()
+                                        .flex()
+                                        .justify_between()
+                                        .items_center()
                                         .px_3()
                                         .py_2()
-                                        .text_xs()
-                                        .text_color(rgb(0x666666))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("WORKSPACES")
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x585b70))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child("WORKSPACES"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("sidebar-collapse-btn")
+                                                .px(px(5.0))
+                                                .py(px(2.0))
+                                                .rounded(px(3.0))
+                                                .text_xs()
+                                                .text_color(rgb(0x585b70))
+                                                .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                                .child("◀")
+                                                .on_click(cx.listener(|this, _e, _w, cx| {
+                                                    this.sidebar_state.collapsed = true;
+                                                    cx.notify();
+                                                })),
+                                        ),
                                 )
+                                // Workspace list
                                 .child(
                                     div()
                                         .flex_col()
                                         .flex_1()
                                         .overflow_hidden()
-                                        // Workspace list
                                         .children(workspaces.iter().map(|item| {
                                             let is_active = item.is_active;
-                                            let bg_color = if is_active { rgb(0x2a2a2a) } else { rgb(0x191919) };
-                                            let border_color = if is_active { rgb(0x0091ff) } else { rgb(0x333333) };
-                                            let text_color = if is_active { rgb(0xffffff) } else { rgb(0xb3b3b3) };
-                                            let font_weight = if is_active { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
-                                            let name_label = if is_active { format!("● {}", item.name) } else { item.name.clone() };
-                                            
+                                            let bg_color = if is_active { rgb(0x252530) } else { rgb(0x181818) };
+                                            let text_color = if is_active { rgb(0xcdd6f4) } else { rgb(0x7f849c) };
+                                            let ws_id = item.id.clone();
+                                            let ws_id_dbl = item.id.clone();
+                                            let ws_name = item.name.clone();
+                                            let is_renaming = self.renaming_workspace.as_ref()
+                                                .map(|(id, _)| id == &item.id)
+                                                .unwrap_or(false);
+
                                             div()
+                                                .id(gpui::ElementId::Name(format!("ws-{}", item.id).into()))
                                                 .flex()
+                                                .items_center()
                                                 .px_3()
-                                                .py_2()
+                                                .py(px(6.0))
                                                 .mx_1()
-                                                .my_1()
-                                                .rounded(px(6.0))
+                                                .my_px()
+                                                .rounded(px(4.0))
                                                 .bg(bg_color)
-                                                .border_l_3()
-                                                .border_color(border_color)
-                                                .child(
+                                                .cursor_pointer()
+                                                .hover(|d| d.bg(rgb(0x252530)))
+                                                .when(is_active, |d| d.border_l_2().border_color(rgb(0x89b4fa)))
+                                                // Click: switch workspace; double-click: rename
+                                                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
+                                                    if event.click_count() >= 2 {
+                                                        // Double click: start inline rename
+                                                        this.renaming_workspace = Some((ws_id_dbl.clone(), ws_name.clone()));
+                                                        cx.notify();
+                                                    } else if this.renaming_workspace.is_none() {
+                                                        // Single click: switch workspace
+                                                        let _ = this.app.activate_workspace(&ws_id);
+                                                        this.switch_workspace_terminal(&ws_id);
+                                                        this.model = this.app.render_with(&amux_ui::GpuiRenderer);
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .child(if is_renaming {
+                                                    // Inline rename input
+                                                    let rename_text = self.renaming_workspace.as_ref()
+                                                        .map(|(_, t)| t.clone())
+                                                        .unwrap_or_default();
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(0xcdd6f4))
+                                                        .px_1()
+                                                        .bg(rgb(0x313244))
+                                                        .rounded(px(2.0))
+                                                        .border_1()
+                                                        .border_color(rgb(0x89b4fa))
+                                                        .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
+                                                        .into_any_element()
+                                                } else {
                                                     div()
                                                         .text_sm()
                                                         .text_color(text_color)
-                                                        .font_weight(font_weight)
-                                                        .child(name_label)
-                                                )
-                                        }))
+                                                        .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                                                        .child(item.name.clone())
+                                                        .into_any_element()
+                                                })
+                                        })),
                                 )
-                                // New workspace hint
+                                // Bottom: + New Workspace
                                 .child(
                                     div()
-                                        .px_3()
-                                        .py_2()
-                                        .mx_1()
-                                        .mb_2()
-                                        .rounded(px(6.0))
-                                        .bg(rgb(0x1a1a1a))
-                                        .text_sm()
-                                        .text_color(rgb(0xb3b3b3))
+                                        .id("sidebar-new-ws")
                                         .flex()
                                         .items_center()
                                         .gap_2()
-                                        .child("+ New Workspace")
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x666666))
-                                                .child("(Ctrl+Shift+N)")
-                                        )
-                                )
-                                // Collapse hint
-                                .child(
-                                    div()
                                         .px_3()
                                         .py_2()
                                         .mx_1()
-                                        .rounded(px(6.0))
-                                        .bg(rgb(0x1a1a1a))
-                                        .text_sm()
-                                        .text_color(rgb(0xb3b3b3))
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child("← Collapse")
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x666666))
-                                                .child("(Ctrl+M)")
-                                        )
+                                        .mb_1()
+                                        .rounded(px(4.0))
+                                        .text_xs()
+                                        .text_color(rgb(0x585b70))
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(rgb(0x252530)).text_color(rgb(0xcdd6f4)))
+                                        .child("+  New Workspace")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            let cwd = std::env::current_dir().unwrap_or_default();
+                                            let _ = this.app.dispatch(
+                                                amux_ui::UiAction::OpenWindowsWorkspace(cwd)
+                                            );
+                                            this.model = this.app.render_with(&amux_ui::GpuiRenderer);
+                                            // Create terminal for the new workspace and switch to it
+                                            if let Some(new_ws) = this.model.workspace_items.iter().find(|w| w.is_active) {
+                                                this.switch_workspace_terminal(&new_ws.id.clone());
+                                            }
+                                            cx.notify();
+                                        })),
                                 )
                         } else {
-                            // Collapsed sidebar - thin strip
+                            // Collapsed sidebar: narrow strip with expand button
                             div()
-                                .w(px(4.0))
-                                .bg(rgb(0x191919))
+                                .id("sidebar-expand")
+                                .w(px(28.0))
+                                .bg(rgb(0x181818))
+                                .flex()
                                 .flex_col()
+                                .items_center()
+                                .border_r_1()
+                                .border_color(rgb(0x2a2a2a))
+                                .child(
+                                    div()
+                                        .id("sidebar-expand-btn")
+                                        .mt_2()
+                                        .px(px(5.0))
+                                        .py(px(4.0))
+                                        .rounded(px(3.0))
+                                        .text_xs()
+                                        .text_color(rgb(0x585b70))
+                                        .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                        .child("▶")
+                                        .on_click(cx.listener(|this, _e, _w, cx| {
+                                            this.sidebar_state.collapsed = false;
+                                            cx.notify();
+                                        })),
+                                )
                         }
                     })
                     // Main content area
@@ -279,42 +646,57 @@ impl Render for GpuiShellView {
                             .flex_1()
                             .flex()
                             .flex_col()
-                            .bg(rgb(0x0f172a))  // Terminal background
                             .overflow_hidden()
-                            // Terminal view - the main content
+                            // Terminal pane(s) — renders split layout recursively
                             .child({
-                                if let (Some(em), Some(cur)) = (emulator, cursor) {
-                                    crate::gpui_terminal::render_terminal(em, cur).into_any_element()
+                                let active_pane_id = self.terminal_manager_mut().active_pane_id().cloned();
+                                let sidebar_w = if self.sidebar_state.collapsed { 28.0 } else { 220.0 };
+                                let vp = window.viewport_size();
+                                let content_w = vp.width.as_f32() - sidebar_w;
+                                let status_bar_h = 28.0_f32;
+                                let content_h = vp.height.as_f32() - status_bar_h;
+                                let cursor_blink_on = (self.cursor_blink_frame / 30) % 2 == 0;
+                                if let Some(layout) = self.terminal_manager_mut().active_layout().cloned() {
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, cx)
                                 } else {
-                                    div().flex_1().child("No terminal").into_any_element()
+                                    div().flex_1().bg(rgb(0x1e1e2e)).child("No terminal").into_any_element()
                                 }
                             })
-                            // Tab strip at bottom
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .bg(rgb(0x171717))
-                                    .border_t_1()
-                                    .border_color(rgb(0x333333))
-                                    .px_2()
-                                    .py_1()
-                                    .gap_1()
-                                    .children(terminal_tabs.iter().map(|(id, title, is_active)| {
-                                        div()
-                                            .px_3()
-                                            .py_1()
-                                            .rounded(px(4.0))
-                                            .text_xs()
-                                            .text_color(if *is_active { rgb(0xffffff) } else { rgb(0xb3b3b3) })
-                                            .bg(if *is_active { rgb(0x262626) } else { rgb(0x1f1f1f) })
-                                            .child(title.clone())
-                                    }))
-                            )
                     ),
             )
             // Status bar
-            .child(render_status_bar(&self.model))
+            .child(render_status_bar(&StatusBarData {
+                workspace_name: self.model.active_workspace_name
+                    .clone()
+                    .unwrap_or_else(|| "No workspace".into()),
+                pane_count: self.terminal_manager().total_panes(),
+                tab_count: self.terminal_manager().total_tabs(),
+                shell_name: if cfg!(target_os = "windows") { "pwsh".into() } else {
+                    std::env::var("SHELL").unwrap_or_else(|_| "bash".into())
+                        .rsplit('/').next().unwrap_or("bash").to_string()
+                },
+            }))
+            // Context menu: dismiss overlay + menu
+            .when_some(self.context_menu.clone(), |this, menu| {
+                let items = self.build_context_menu_items();
+                let vp = window.viewport_size();
+                this
+                    // Full-screen transparent overlay to catch clicks outside menu
+                    .child(
+                        div()
+                            .id("context-menu-dismiss")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.context_menu = None;
+                                cx.notify();
+                            }))
+                    )
+                    // The actual menu (rendered on top of the overlay)
+                    .child(render_context_menu(menu.position, items, vp.width, vp.height, cx))
+            })
     }
 }
 
@@ -333,6 +715,7 @@ impl GpuiShellView {
         let keystroke = &event.keystroke;
         let ctrl = keystroke.modifiers.control;
         let shift = keystroke.modifiers.shift;
+        let alt = keystroke.modifiers.alt;
         let key = &keystroke.key;
 
         let modifier = if ctrl && shift {
@@ -349,131 +732,701 @@ impl GpuiShellView {
             format!("{}+{}", modifier, key)
         };
 
-        match full_keystroke.to_lowercase().as_str() {
-            // Command palette
-            "escape" | "ctrl+p" => {
-                let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
-                self.refresh_model();
-                cx.notify();
-                return;
-            }
-            "enter" if self.model.command_palette_open => {
-                let _ = self.app.execute_selected_palette_command();
-                self.refresh_model();
-                cx.notify();
-                return;
-            }
-            "up" | "arrowup" if self.model.command_palette_open => {
-                self.app.select_previous_palette_item();
-                self.refresh_model();
-                cx.notify();
-                return;
-            }
-            "down" | "arrowdown" if self.model.command_palette_open => {
-                self.app.select_next_palette_item();
-                self.refresh_model();
-                cx.notify();
-                return;
-            }
-            _ if self.model.command_palette_open => return,
+        let keystr = full_keystroke.to_lowercase();
 
-            // Terminal input - send to emulator
-            "enter" | "tab" | "backspace" | "escape" => {
-                self.handle_terminal_input(key, ctrl, shift, false);
-                cx.notify();
+        // Close context menu on any key
+        if self.context_menu.is_some() {
+            self.context_menu = None;
+            cx.notify();
+            if keystr == "escape" {
                 return;
             }
-            s if s.starts_with("arrow") || s.starts_with("f1") || s.starts_with("f2") 
-                || s.starts_with("f3") || s.starts_with("f4") || s.starts_with("f5")
-                || s.starts_with("f6") || s.starts_with("f7") || s.starts_with("f8")
-                || s.starts_with("f9") || s.starts_with("f10") || s.starts_with("f11")
-                || s.starts_with("f12") || s.starts_with("page") || s.starts_with("home")
-                || s.starts_with("end") || s.starts_with("insert") || s.starts_with("delete") => {
-                self.handle_terminal_input(key, ctrl, shift, false);
-                cx.notify();
-                return;
-            }
-            _ if key.len() == 1 || key == "Space" => {
-                // Regular character input
-                self.handle_terminal_input(key, ctrl, shift, false);
-                cx.notify();
-                return;
-            }
+        }
 
-            // Terminal pane operations
-            "ctrl+d" => {
-                // Split terminal horizontally (side by side)
-                self.terminal_manager.split_active_pane(SplitDirection::Horizontal);
-                cx.notify();
-                return;
-            }
-            "ctrl+shift+d" => {
-                // Split terminal vertically (top and bottom)
-                self.terminal_manager.split_active_pane(SplitDirection::Vertical);
-                cx.notify();
-                return;
-            }
-            "ctrl+t" => {
-                // New terminal tab
-                self.terminal_manager.create_tab_auto();
-                cx.notify();
-                return;
-            }
-            "ctrl+w" => {
-                // Close current pane (if more than one pane)
-                if self.terminal_manager.close_active_pane() {
+        // Workspace rename handling
+        if let Some((ref ws_id, ref mut text)) = self.renaming_workspace {
+            match keystr.as_str() {
+                "enter" => {
+                    let ws_id = ws_id.clone();
+                    let new_name = text.clone();
+                    if !new_name.is_empty() {
+                        let _ = self.app.rename_workspace(&ws_id, &new_name);
+                        self.refresh_model();
+                    }
+                    self.renaming_workspace = None;
                     cx.notify();
+                    return;
                 }
-                return;
+                "escape" => {
+                    self.renaming_workspace = None;
+                    cx.notify();
+                    return;
+                }
+                "backspace" => {
+                    text.pop();
+                    cx.notify();
+                    return;
+                }
+                _ => {
+                    // Type characters into rename field
+                    if !ctrl && !alt && key.len() == 1 {
+                        text.push_str(key);
+                        cx.notify();
+                        return;
+                    } else if keystr == "space" {
+                        text.push(' ');
+                        cx.notify();
+                        return;
+                    }
+                    return;
+                }
             }
-            "ctrl+m" => {
-                self.sidebar_state.collapsed = !self.sidebar_state.collapsed;
-                cx.notify();
-                return;
-            }
+        }
 
-            // Workspace
-            "ctrl+shift+n" => {
-                let _ = self.app.run_command("new workspace");
-                self.refresh_model();
-                cx.notify();
+        // Command palette handling
+        if self.model.command_palette_open {
+            match keystr.as_str() {
+                "escape" | "ctrl+p" => {
+                    let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "enter" => {
+                    let _ = self.app.execute_selected_palette_command();
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "up" | "arrowup" => {
+                    self.app.select_previous_palette_item();
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "down" | "arrowdown" => {
+                    self.app.select_next_palette_item();
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                _ => return,
             }
-            "ctrl+shift+left" | "ctrl+pageup" => {
-                let _ = self.app.run_command("switch tab prev");
-                self.refresh_model();
-                cx.notify();
+        }
+
+        // Ctrl shortcuts - these need to be checked FIRST before character input
+        if ctrl {
+            match keystr.as_str() {
+                // Copy / Paste
+                "ctrl+shift+c" => {
+                    self.copy_selection(cx);
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+v" => {
+                    self.paste_clipboard(cx);
+                    cx.notify();
+                    return;
+                }
+                "ctrl+c" => {
+                    // If there's a selection, copy it; otherwise send Ctrl+C to PTY
+                    let has_selection = self.terminal_manager_mut().active_terminal_ref()
+                        .map(|t| !t.emulator().selection().is_empty())
+                        .unwrap_or(false);
+                    if has_selection {
+                        self.copy_selection(cx);
+                        // Clear selection after copy
+                        if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                            term.emulator_mut().selection_mut().clear();
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    // No selection → fall through to send Ctrl+C to PTY
+                }
+                "ctrl+v" => {
+                    self.paste_clipboard(cx);
+                    cx.notify();
+                    return;
+                }
+                // Terminal pane operations
+                "ctrl+d" => {
+                    self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
+                    let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+d" => {
+                    self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
+                    let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+                    cx.notify();
+                    return;
+                }
+                "ctrl+t" => {
+                    self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
+                    let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+                    cx.notify();
+                    return;
+                }
+                "ctrl+w" => {
+                    if self.terminal_manager_mut().close_active_pane() {
+                        cx.notify();
+                    }
+                    return;
+                }
+                "ctrl+m" => {
+                    self.sidebar_state.collapsed = !self.sidebar_state.collapsed;
+                    cx.notify();
+                    return;
+                }
+                // Pane navigation
+                "ctrl+left" => {
+                    let _ = self.app.run_command("switch pane prev");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+right" => {
+                    let _ = self.app.run_command("switch pane next");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                // Split resize
+                "ctrl+shift+left" => {
+                    let _ = self.app.run_command("pane resize-left");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+right" => {
+                    let _ = self.app.run_command("pane resize-right");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                // Terminal operations
+                "ctrl+k" => {
+                    if let Some(terminal) = self.terminal_manager_mut().active_terminal() {
+                        let _ = terminal.send_input(&[0x0c]); // Ctrl+L to shell
+                        terminal.clear_scrollback();
+                        cx.notify();
+                    }
+                    return;
+                }
+                "ctrl+q" => {
+                    cx.quit();
+                    return;
+                }
+                // Font size
+                "ctrl+=" | "ctrl++" => {
+                    let _ = self.app.run_command("font increase");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+-" => {
+                    let _ = self.app.run_command("font decrease");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+0" => {
+                    let _ = self.app.run_command("font reset");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                // Workspace
+                "ctrl+shift+n" => {
+                    let _ = self.app.run_command("new workspace");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+left" | "ctrl+pageup" => {
+                    let _ = self.app.run_command("switch tab prev");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+right" | "ctrl+pagedown" => {
+                    let _ = self.app.run_command("switch tab next");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+1" => {
+                    let _ = self.app.run_command("switch workspace 1");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+2" => {
+                    let _ = self.app.run_command("switch workspace 2");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+3" => {
+                    let _ = self.app.run_command("switch workspace 3");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+4" => {
+                    let _ = self.app.run_command("switch workspace 4");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+5" => {
+                    let _ = self.app.run_command("switch workspace 5");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+p" => {
+                    let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                _ => {}
             }
-            "ctrl+shift+right" | "ctrl+pagedown" => {
-                let _ = self.app.run_command("switch tab next");
-                self.refresh_model();
+        }
+
+        // Terminal input keys (no Ctrl modifier)
+        match keystr.as_str() {
+            "enter" | "tab" | "backspace" | "escape" | "space" => {
+                self.handle_terminal_input(key, ctrl, shift, alt);
                 cx.notify();
+                return;
             }
-            "ctrl+1" => {
-                let _ = self.app.run_command("switch workspace 1");
-                self.refresh_model();
+            s if s.starts_with("arrow") || s.starts_with("f1") 
+                || s.starts_with("f2") || s.starts_with("f3") || s.starts_with("f4") 
+                || s.starts_with("f5") || s.starts_with("f6") || s.starts_with("f7") 
+                || s.starts_with("f8") || s.starts_with("f9") || s.starts_with("f10") 
+                || s.starts_with("f11") || s.starts_with("f12") || s.starts_with("page") 
+                || s.starts_with("home") || s.starts_with("end") || s.starts_with("insert") 
+                || s.starts_with("delete") => {
+                self.handle_terminal_input(key, ctrl, shift, alt);
                 cx.notify();
-            }
-            "ctrl+2" => {
-                let _ = self.app.run_command("switch workspace 2");
-                self.refresh_model();
-                cx.notify();
-            }
-            "ctrl+3" => {
-                let _ = self.app.run_command("switch workspace 3");
-                self.refresh_model();
-                cx.notify();
-            }
-            "ctrl+4" => {
-                let _ = self.app.run_command("switch workspace 4");
-                self.refresh_model();
-                cx.notify();
-            }
-            "ctrl+5" => {
-                let _ = self.app.run_command("switch workspace 5");
-                self.refresh_model();
-                cx.notify();
+                return;
             }
             _ => {}
+        }
+
+        // Regular character input — send to PTY
+        if key.len() == 1 {
+            self.handle_terminal_input(key, ctrl, shift, alt);
+            cx.notify();
+            return;
+        }
+    }
+}
+
+/// Render the right-click context menu
+#[cfg(feature = "gpui")]
+fn render_context_menu(
+    pos: gpui::Point<gpui::Pixels>,
+    items: Vec<ContextMenuItem>,
+    viewport_w: gpui::Pixels,
+    viewport_h: gpui::Pixels,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    let menu_w = 220.0_f32;
+    let menu_h = (items.len() as f32) * 28.0 + 16.0; // approximate menu height
+
+    // Adjust position to keep menu within viewport
+    let mut x = pos.x.as_f32();
+    let mut y = pos.y.as_f32();
+    if x + menu_w > viewport_w.as_f32() {
+        x = (viewport_w.as_f32() - menu_w).max(0.0);
+    }
+    if y + menu_h > viewport_h.as_f32() {
+        y = (viewport_h.as_f32() - menu_h).max(0.0);
+    }
+
+    let mut menu = div()
+        .absolute()
+        .left(px(x))
+        .top(px(y))
+        .w(px(menu_w))
+        .rounded(px(8.0))
+        .bg(rgb(0x1e1e2e))
+        .border_1()
+        .border_color(rgb(0x313244))
+        .shadow_lg()
+        .py_1()
+        .flex()
+        .flex_col();
+
+    for item in items {
+        let label = item.label;
+        let enabled = item.enabled;
+
+        let text_color = if enabled { rgb(0xcdd6f4) } else { rgb(0x45475a) };
+
+        let row = div()
+            .id(gpui::ElementId::Name(label.into()))
+            .px_3()
+            .py(px(6.0))
+            .mx_1()
+            .rounded(px(4.0))
+            .flex()
+            .justify_between()
+            .items_center()
+            .when(enabled, |d| d.hover(|d| d.bg(rgb(0x313244))))
+            .when(enabled, |d| {
+                d.on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.execute_context_menu_action(label, cx);
+                }))
+            })
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(text_color)
+                    .child(label),
+            )
+            .children(item.shortcut.map(|kb| {
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x585b70))
+                    .child(kb)
+            }));
+
+        menu = menu.child(row);
+
+        if item.separator_after {
+            menu = menu.child(
+                div()
+                    .mx_2()
+                    .my_1()
+                    .h(px(1.0))
+                    .bg(rgb(0x313244)),
+            );
+        }
+    }
+
+    menu
+}
+
+/// Recursively render the tab layout tree (split panes)
+/// Get the first pane ID from a layout subtree (for identifying splits)
+#[cfg(feature = "gpui")]
+fn first_pane_in_layout(layout: &amux_platform::terminal::manager::TabLayout) -> Option<amux_platform::terminal::manager::PaneId> {
+    use amux_platform::terminal::manager::TabLayout;
+    match layout {
+        TabLayout::Single(id) => Some(id.clone()),
+        TabLayout::Horizontal { left, .. } => first_pane_in_layout(left),
+        TabLayout::Vertical { top, .. } => first_pane_in_layout(top),
+    }
+}
+
+#[cfg(feature = "gpui")]
+fn render_layout(
+    layout: &amux_platform::terminal::manager::TabLayout,
+    manager: &TerminalManager,
+    active_pane_id: Option<&amux_platform::terminal::manager::PaneId>,
+    avail_w: f32,
+    avail_h: f32,
+    cursor_blink_on: bool,
+    cx: &mut Context<GpuiShellView>,
+) -> gpui::AnyElement {
+    use amux_platform::terminal::manager::{PaneId, TabLayout};
+
+    match layout {
+        TabLayout::Single(pane_id) => {
+            let is_active = active_pane_id == Some(pane_id);
+
+            // Build per-pane tab strip + terminal content
+            let (tab_strip, content) = if let Some(pane) = manager.get_pane(pane_id) {
+                let tabs = pane.tab_titles();
+                let pid_for_tabs = pane_id.clone();
+                let has_multiple_panes = manager.total_panes() > 1;
+
+                // Left side: tab buttons
+                let tabs_row = div()
+                    .flex()
+                    .flex_row()
+                    .gap_px()
+                    .flex_1()
+                    .overflow_hidden()
+                    .children(tabs.into_iter().map(|(idx, title, is_tab_active)| {
+                        let pid_click = pid_for_tabs.clone();
+                        div()
+                            .id(gpui::ElementId::Name(
+                                format!("{}-tab-{}", pid_for_tabs.0, idx).into(),
+                            ))
+                            .px_3()
+                            .py(px(4.0))
+                            .text_xs()
+                            .text_color(if is_tab_active { rgb(0xcdd6f4) } else { rgb(0x6c7086) })
+                            .bg(if is_tab_active { rgb(0x313244) } else { rgb(0x1e1e2e) })
+                            .border_b_2()
+                            .border_color(if is_tab_active { rgb(0x89b4fa) } else { rgb(0x1e1e2e) })
+                            .hover(|d| d.bg(rgb(0x313244)))
+                            .child(title)
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.terminal_manager_mut().set_active_pane(&pid_click);
+                                this.terminal_manager_mut().set_active_tab_in_pane(idx);
+                                cx.notify();
+                            }))
+                    }));
+
+                // Right side: action buttons
+                let pid_new = pane_id.clone();
+                let pid_sr = pane_id.clone();
+                let pid_sd = pane_id.clone();
+                let pid_close = pane_id.clone();
+
+                let actions_row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    // + New Tab
+                    .child(
+                        div()
+                            .id(gpui::ElementId::Name(format!("{}-btn-add", pane_id.0).into()))
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .text_xs()
+                            .text_color(rgb(0x6c7086))
+                            .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .child("+")
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.terminal_manager_mut().set_active_pane(&pid_new);
+                                this.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
+                                let _ = this.terminal_manager_mut().spawn_in_active(GpuiShellView::default_profile());
+                                cx.notify();
+                            })),
+                    )
+                    // Split Right ⬕
+                    .child(
+                        div()
+                            .id(gpui::ElementId::Name(format!("{}-btn-sr", pane_id.0).into()))
+                            .px(px(5.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .text_xs()
+                            .text_color(rgb(0x6c7086))
+                            .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .child("⬕")
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.terminal_manager_mut().set_active_pane(&pid_sr);
+                                this.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
+                                let _ = this.terminal_manager_mut().spawn_in_active(GpuiShellView::default_profile());
+                                cx.notify();
+                            })),
+                    )
+                    // Split Down ⬓
+                    .child(
+                        div()
+                            .id(gpui::ElementId::Name(format!("{}-btn-sd", pane_id.0).into()))
+                            .px(px(5.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .text_xs()
+                            .text_color(rgb(0x6c7086))
+                            .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .child("⬓")
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.terminal_manager_mut().set_active_pane(&pid_sd);
+                                this.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
+                                let _ = this.terminal_manager_mut().spawn_in_active(GpuiShellView::default_profile());
+                                cx.notify();
+                            })),
+                    )
+                    // Close ✕
+                    .child(
+                        div()
+                            .id(gpui::ElementId::Name(format!("{}-btn-close", pane_id.0).into()))
+                            .px(px(5.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .text_xs()
+                            .text_color(if has_multiple_panes { rgb(0x6c7086) } else { rgb(0x313244) })
+                            .when(has_multiple_panes, |d| {
+                                d.hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
+                            })
+                            .child("✕")
+                            .when(has_multiple_panes, |d| {
+                                d.on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.terminal_manager_mut().set_active_pane(&pid_close);
+                                    this.terminal_manager_mut().close_active_pane();
+                                    cx.notify();
+                                }))
+                            }),
+                    );
+
+                // Combine into tab strip
+                let tab_strip = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .bg(rgb(0x1e1e2e))
+                    .border_b_1()
+                    .border_color(rgb(0x313244))
+                    .child(tabs_row)
+                    .child(actions_row)
+                    .into_any_element();
+
+                let term = pane.active_terminal_ref();
+                let em = term.emulator();
+                let cur = term.cursor();
+                let content = crate::gpui_terminal::render_terminal(em, cur, cursor_blink_on).into_any_element();
+                (tab_strip, content)
+            } else {
+                (
+                    div().into_any_element(),
+                    div().flex_1().bg(rgb(0x1e1e2e)).child("Empty pane").into_any_element(),
+                )
+            };
+
+            let pid = pane_id.clone();
+            div()
+                .id(gpui::ElementId::Name(pane_id.0.clone().into()))
+                .flex_1()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .bg(rgb(0x1e1e2e))
+                // Active pane: subtle top accent line only
+                .when(is_active, |d| d.border_t_2().border_color(rgb(0x89b4fa)))
+                .when(!is_active, |d| d.border_t_1().border_color(rgb(0x252530)))
+                // Tab strip at top (limux style)
+                .child(tab_strip)
+                // Terminal content
+                .child(content)
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.terminal_manager_mut().set_active_pane(&pid);
+                    cx.notify();
+                }))
+                .into_any_element()
+        }
+        TabLayout::Horizontal { left, right, ratio } => {
+            let r = *ratio;
+            let handle_px = 6.0_f32;
+            let usable = (avail_w - handle_px).max(0.0);
+            let left_w = usable * r;
+            let right_w = usable * (1.0 - r);
+
+            let split_id = first_pane_in_layout(right)
+                .map(|p| p.0.clone())
+                .unwrap_or_default();
+            let split_id_clone = split_id.clone();
+
+            let left_div = div()
+                .id(gpui::ElementId::Name(format!("split-l-{}", split_id).into()))
+                .w(px(left_w))
+                .h_full()
+                .overflow_hidden()
+                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, cx));
+
+            let handle = div()
+                .id(gpui::ElementId::Name(format!("resize-h-{}", split_id).into()))
+                .w(px(handle_px))
+                .flex_shrink_0()
+                .cursor_col_resize()
+                .child(
+                    div()
+                        .w(px(1.0))
+                        .h_full()
+                        .mx_auto()
+                        .bg(rgb(0x313244))
+                )
+                .hover(|d| d.bg(rgb(0x313244)))
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _window, _cx| {
+                    this.resize_drag = Some(ResizeDragState {
+                        split_first_pane: split_id_clone.clone(),
+                        is_horizontal: true,
+                        start_mouse_pos: event.position.x.as_f32(),
+                        start_ratio: r,
+                        container_length: usable,
+                    });
+                }));
+
+            let right_div = div()
+                .id(gpui::ElementId::Name(format!("split-r-{}", split_id).into()))
+                .w(px(right_w))
+                .h_full()
+                .overflow_hidden()
+                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, cx));
+
+            div()
+                .w(px(avail_w))
+                .h(px(avail_h))
+                .flex()
+                .flex_row()
+                .overflow_hidden()
+                .child(left_div)
+                .child(handle)
+                .child(right_div)
+                .into_any_element()
+        }
+        TabLayout::Vertical { top, bottom, ratio } => {
+            let r = *ratio;
+            let handle_px = 6.0_f32;
+            let usable = (avail_h - handle_px).max(0.0);
+            let top_h = usable * r;
+            let bottom_h = usable * (1.0 - r);
+
+            let split_id = first_pane_in_layout(bottom)
+                .map(|p| p.0.clone())
+                .unwrap_or_default();
+            let split_id_clone = split_id.clone();
+
+            let top_div = div()
+                .id(gpui::ElementId::Name(format!("split-t-{}", split_id).into()))
+                .w_full()
+                .h(px(top_h))
+                .overflow_hidden()
+                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, cx));
+
+            let handle = div()
+                .id(gpui::ElementId::Name(format!("resize-v-{}", split_id).into()))
+                .h(px(handle_px))
+                .flex_shrink_0()
+                .cursor_ns_resize()
+                .child(
+                    div()
+                        .h(px(1.0))
+                        .w_full()
+                        .my_auto()
+                        .bg(rgb(0x313244))
+                )
+                .hover(|d| d.bg(rgb(0x313244)))
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _window, _cx| {
+                    this.resize_drag = Some(ResizeDragState {
+                        split_first_pane: split_id_clone.clone(),
+                        is_horizontal: false,
+                        start_mouse_pos: event.position.y.as_f32(),
+                        start_ratio: r,
+                        container_length: usable,
+                    });
+                }));
+
+            let bottom_div = div()
+                .id(gpui::ElementId::Name(format!("split-b-{}", split_id).into()))
+                .w_full()
+                .h(px(bottom_h))
+                .overflow_hidden()
+                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, cx));
+
+            div()
+                .w(px(avail_w))
+                .h(px(avail_h))
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(top_div)
+                .child(handle)
+                .child(bottom_div)
+                .into_any_element()
         }
     }
 }
@@ -483,20 +1436,41 @@ pub fn run(app: &amux_ui::DesktopApp) {
     use amux_ui::GpuiRenderer;
     use smol::Timer;
 
+    eprintln!("Starting GPUI application...");
+    
     let mut app = app.clone();
     let model = app.render_with(&GpuiRenderer);
 
     application().run(move |cx: &mut App| {
+        eprintln!("GPUI application started, opening window...");
         let model = model.clone();
         let app = app.clone();
-        cx.open_window(WindowOptions::default(), |_, cx| {
+        
+        let window_opts = WindowOptions {
+            titlebar: Some(gpui::TitlebarOptions {
+                title: Some("AMUX".into()),
+                appears_transparent: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let window_result = cx.open_window(window_opts, |_, cx| {
+            eprintln!("Creating window content...");
             cx.new(|cx| {
                 // Start a ~60fps polling timer to drain PTY output into the emulator
                 cx.spawn(async move |this, cx| {
                     loop {
                         Timer::after(std::time::Duration::from_millis(16)).await;
                         let result = this.update(cx, |this: &mut GpuiShellView, cx: &mut Context<GpuiShellView>| {
-                            if this.terminal_manager.poll_active() {
+                            let mut has_pty = false;
+                            for tm in this.workspace_terminals.values_mut() {
+                                has_pty |= tm.poll_all();
+                            }
+                            let has_drag = this.resize_drag.is_some();
+                            // Cursor blink: toggle every ~30 frames (500ms at 60fps)
+                            this.cursor_blink_frame = this.cursor_blink_frame.wrapping_add(1);
+                            let blink_notify = this.cursor_blink_frame % 30 == 0;
+                            if has_pty || has_drag || blink_notify {
                                 cx.notify();
                             }
                         });
@@ -509,9 +1483,17 @@ pub fn run(app: &amux_ui::DesktopApp) {
 
                 GpuiShellView::new(app, model, cx)
             })
-        })
-        .expect("Failed to open AMUX window");
-        cx.activate(true);
+        });
+        
+        match window_result {
+            Ok(_) => {
+                eprintln!("Window opened successfully!");
+                cx.activate(true);
+            }
+            Err(e) => {
+                eprintln!("ERROR: Failed to open window: {:?}", e);
+            }
+        }
     });
 }
 

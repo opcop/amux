@@ -1,4 +1,4 @@
-use crate::{LayoutNode, PaneId, PaneNode, SplitAxis, SplitNode, TabId, TabState};
+use crate::{Direction, LayoutNode, PaneId, PaneNode, SplitAxis, SplitNode, TabId, TabState};
 
 pub fn active_pane_exists(layout: &LayoutNode, pane_id: &PaneId) -> bool {
     match layout {
@@ -70,8 +70,13 @@ fn split_pane_inner(
         }
         LayoutNode::Pane(_) => false,
         LayoutNode::Split(split) => {
-            split_pane_inner(&mut split.first, pane_id, axis, split_id.clone(), new_pane.clone())
-                || split_pane_inner(&mut split.second, pane_id, axis, split_id, new_pane)
+            split_pane_inner(
+                &mut split.first,
+                pane_id,
+                axis,
+                split_id.clone(),
+                new_pane.clone(),
+            ) || split_pane_inner(&mut split.second, pane_id, axis, split_id, new_pane)
         }
     }
 }
@@ -199,6 +204,135 @@ fn collect_panes(layout: &LayoutNode, panes: &mut Vec<PaneNode>) {
     }
 }
 
+/// Find the pane in the given direction from the current pane
+/// Returns the pane_id of the target pane, or None if no pane exists in that direction
+pub fn focus_pane_in_direction(
+    layout: &LayoutNode,
+    current: &PaneId,
+    direction: Direction,
+) -> Option<PaneId> {
+    let all_panes = get_all_panes(layout);
+    let current_idx = all_panes.iter().position(|p| &p.pane_id == current)?;
+
+    match direction {
+        Direction::Left | Direction::Up => {
+            if current_idx > 0 {
+                Some(all_panes[current_idx - 1].pane_id.clone())
+            } else {
+                None
+            }
+        }
+        Direction::Right | Direction::Down => {
+            if current_idx + 1 < all_panes.len() {
+                Some(all_panes[current_idx + 1].pane_id.clone())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Find the first pane in the layout (for initial focus)
+pub fn find_first_pane(layout: &LayoutNode) -> Option<PaneId> {
+    find_first_pane_inner(layout)
+}
+
+fn find_first_pane_inner(layout: &LayoutNode) -> Option<PaneId> {
+    match layout {
+        LayoutNode::Pane(pane) => Some(pane.pane_id.clone()),
+        LayoutNode::Split(split) => find_first_pane_inner(&split.first),
+    }
+}
+
+/// Find the last pane in the layout
+pub fn find_last_pane(layout: &LayoutNode) -> Option<PaneId> {
+    find_last_pane_inner(layout)
+}
+
+fn find_last_pane_inner(layout: &LayoutNode) -> Option<PaneId> {
+    match layout {
+        LayoutNode::Pane(pane) => Some(pane.pane_id.clone()),
+        LayoutNode::Split(split) => find_last_pane_inner(&split.second),
+    }
+}
+
+/// Close a pane and all its tabs
+/// Returns the pane that should gain focus after closing
+pub fn close_pane(layout: &mut LayoutNode, pane_id: &PaneId) -> ClosePaneOutcome {
+    close_pane_inner(layout, pane_id, true)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClosePaneOutcome {
+    PaneClosed,
+    PaneRemoved,
+    CannotRemoveLastPane,
+}
+
+fn close_pane_inner(layout: &mut LayoutNode, pane_id: &PaneId, is_root: bool) -> ClosePaneOutcome {
+    match layout {
+        LayoutNode::Pane(pane) if &pane.pane_id == pane_id => {
+            if is_root {
+                ClosePaneOutcome::CannotRemoveLastPane
+            } else {
+                ClosePaneOutcome::PaneRemoved
+            }
+        }
+        LayoutNode::Pane(_) => ClosePaneOutcome::PaneClosed,
+        LayoutNode::Split(split) => {
+            let left_result = close_pane_inner(&mut split.first, pane_id, false);
+            if left_result == ClosePaneOutcome::PaneRemoved {
+                *layout = (*split.second).clone();
+                return ClosePaneOutcome::PaneRemoved;
+            }
+            if left_result != ClosePaneOutcome::PaneClosed {
+                return left_result;
+            }
+
+            let right_result = close_pane_inner(&mut split.second, pane_id, false);
+            if right_result == ClosePaneOutcome::PaneRemoved {
+                *layout = (*split.first).clone();
+                return ClosePaneOutcome::PaneRemoved;
+            }
+            right_result
+        }
+    }
+}
+
+/// Get the next tab in the same pane
+pub fn focus_next_tab(layout: &LayoutNode, pane_id: &PaneId, current: &TabId) -> Option<TabId> {
+    let pane = find_pane(layout, pane_id)?;
+    let current_idx = pane.tabs.iter().position(|t| &t.id == current)?;
+    let next_idx = (current_idx + 1) % pane.tabs.len();
+    Some(pane.tabs[next_idx].id.clone())
+}
+
+/// Get the previous tab in the same pane
+pub fn focus_previous_tab(layout: &LayoutNode, pane_id: &PaneId, current: &TabId) -> Option<TabId> {
+    let pane = find_pane(layout, pane_id)?;
+    let current_idx = pane.tabs.iter().position(|t| &t.id == current)?;
+    let prev_idx = if current_idx == 0 {
+        pane.tabs.len() - 1
+    } else {
+        current_idx - 1
+    };
+    Some(pane.tabs[prev_idx].id.clone())
+}
+
+/// Find a pane node (immutable)
+pub fn find_pane<'a>(layout: &'a LayoutNode, pane_id: &PaneId) -> Option<&'a PaneNode> {
+    find_pane_inner(layout, pane_id)
+}
+
+fn find_pane_inner<'a>(layout: &'a LayoutNode, pane_id: &PaneId) -> Option<&'a PaneNode> {
+    match layout {
+        LayoutNode::Pane(pane) if &pane.pane_id == pane_id => Some(pane),
+        LayoutNode::Pane(_) => None,
+        LayoutNode::Split(split) => find_pane_inner(&split.first, pane_id)
+            .or_else(|| find_pane_inner(&split.second, pane_id)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -207,7 +341,7 @@ mod tests {
     };
 
     use super::{
-        CloseTabOutcome, LayoutNode, PaneId, activate_tab, append_tab, close_tab, split_pane,
+        activate_tab, append_tab, close_tab, split_pane, CloseTabOutcome, LayoutNode, PaneId,
     };
 
     fn preview_tab(id: &str) -> TabState {
@@ -242,7 +376,8 @@ mod tests {
     #[test]
     fn split_pane_wraps_existing_and_new_panes() {
         let pane_id = PaneId::new("pane-1");
-        let mut layout = LayoutNode::single_pane(PaneNode::with_tab(pane_id.clone(), preview_tab("one")));
+        let mut layout =
+            LayoutNode::single_pane(PaneNode::with_tab(pane_id.clone(), preview_tab("one")));
 
         assert!(split_pane(
             &mut layout,
@@ -288,7 +423,8 @@ mod tests {
     #[test]
     fn close_tab_rejects_last_root_tab() {
         let pane_id = PaneId::new("pane-1");
-        let mut layout = LayoutNode::single_pane(PaneNode::with_tab(pane_id.clone(), preview_tab("one")));
+        let mut layout =
+            LayoutNode::single_pane(PaneNode::with_tab(pane_id.clone(), preview_tab("one")));
 
         let outcome = close_tab(&mut layout, &pane_id, &TabId::new("one"));
         assert_eq!(outcome, CloseTabOutcome::CannotRemoveLastTab);

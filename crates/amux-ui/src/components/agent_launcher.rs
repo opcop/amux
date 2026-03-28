@@ -17,8 +17,15 @@ impl AgentLauncherPanel {
 
         let mut lines = vec!["Agents".to_string()];
         for agent in &self.agents {
-            let support = if agent.supported { "ready" } else { "unsupported" };
-            lines.push(format!("  - {} [{} | {}]", agent.name, agent.status, support));
+            let support = if agent.supported {
+                "ready"
+            } else {
+                "unsupported"
+            };
+            lines.push(format!(
+                "  - {} [{} | {}]",
+                agent.name, agent.status, support
+            ));
         }
         lines.join("\n")
     }
