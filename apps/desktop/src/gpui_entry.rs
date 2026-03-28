@@ -16,6 +16,11 @@ use crate::gpui_workspace_sidebar::WorkspaceSidebarState;
 
 
 #[cfg(feature = "gpui")]
+const SIDEBAR_WIDTH_EXPANDED: f32 = 220.0;
+#[cfg(feature = "gpui")]
+const SIDEBAR_WIDTH_COLLAPSED: f32 = 28.0;
+
+#[cfg(feature = "gpui")]
 pub(crate) struct GpuiShellView {
     app: DesktopApp,
     model: GpuiWindowModel,
@@ -158,7 +163,14 @@ impl GpuiShellView {
             .and_then(|item| item.text().map(|s| s.to_string()));
         if let Some(text) = text {
             if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                let bracketed = term.emulator().bracketed_paste();
+                if bracketed {
+                    let _ = term.send_input(b"\x1b[200~");
+                }
                 let _ = term.send_input(text.as_bytes());
+                if bracketed {
+                    let _ = term.send_input(b"\x1b[201~");
+                }
             }
         }
     }
@@ -333,8 +345,12 @@ impl GpuiShellView {
             _ => key,
         };
         
-        let input = keys::to_pty(normalized_key, ctrl, shift, alt);
-        
+        // Check app cursor key mode from active terminal
+        let app_cursor = self.terminal_manager().active_terminal_ref()
+            .map(|t| t.emulator().app_cursor_keys())
+            .unwrap_or(false);
+        let input = keys::to_pty_with_mode(normalized_key, ctrl, shift, alt, app_cursor);
+
         // Only send to PTY - PTY will echo back, no local echo needed
         if let Some(terminal) = self.terminal_manager_mut().active_terminal() {
             if terminal.is_active() {
@@ -366,7 +382,7 @@ impl Render for GpuiShellView {
 
         // Resize terminals — skip during drag to avoid content loss
         if self.resize_drag.is_none() {
-            let sidebar_w = if self.sidebar_state.collapsed { 28.0 } else { 220.0 };
+            let sidebar_w = if self.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
             let vp = window.viewport_size();
             let content_w = vp.width.as_f32() - sidebar_w;
             let status_bar_h = 28.0_f32;
@@ -403,7 +419,7 @@ impl Render for GpuiShellView {
                 if this.resize_drag.is_some() {
                     return;
                 }
-                let sidebar_w = if this.sidebar_state.collapsed { 28.0 } else { 220.0 };
+                let sidebar_w = if this.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
                 let (col, row) = Self::pixel_to_cell(event.position, sidebar_w);
                 if let Some(term) = this.terminal_manager_mut().active_terminal() {
                     term.emulator_mut().set_selection_start(col, row);
@@ -428,7 +444,7 @@ impl Render for GpuiShellView {
                 }
                 // Handle text selection
                 if !this.selecting { return; }
-                let sidebar_w = if this.sidebar_state.collapsed { 28.0 } else { 220.0 };
+                let sidebar_w = if this.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
                 let (col, row) = Self::pixel_to_cell(event.position, sidebar_w);
                 if let Some(term) = this.terminal_manager_mut().active_terminal() {
                     term.emulator_mut().set_selection_end(col, row);
@@ -475,7 +491,7 @@ impl Render for GpuiShellView {
                         if sidebar_visible {
                             div()
                                 .id("sidebar-expanded")
-                                .w(px(220.0))
+                                .w(px(SIDEBAR_WIDTH_EXPANDED))
                                 .bg(rgb(0x181818))
                                 .flex()
                                 .flex_col()
@@ -615,7 +631,7 @@ impl Render for GpuiShellView {
                             // Collapsed sidebar: narrow strip with expand button
                             div()
                                 .id("sidebar-expand")
-                                .w(px(28.0))
+                                .w(px(SIDEBAR_WIDTH_COLLAPSED))
                                 .bg(rgb(0x181818))
                                 .flex()
                                 .flex_col()
@@ -650,7 +666,7 @@ impl Render for GpuiShellView {
                             // Terminal pane(s) — renders split layout recursively
                             .child({
                                 let active_pane_id = self.terminal_manager_mut().active_pane_id().cloned();
-                                let sidebar_w = if self.sidebar_state.collapsed { 28.0 } else { 220.0 };
+                                let sidebar_w = if self.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
                                 let vp = window.viewport_size();
                                 let content_w = vp.width.as_f32() - sidebar_w;
                                 let status_bar_h = 28.0_f32;
@@ -842,7 +858,12 @@ impl GpuiShellView {
                         cx.notify();
                         return;
                     }
-                    // No selection → fall through to send Ctrl+C to PTY
+                    // No selection: send Ctrl+C (interrupt) to PTY
+                    if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                        let _ = term.send_input(&[0x03]);
+                    }
+                    cx.notify();
+                    return;
                 }
                 "ctrl+v" => {
                     self.paste_clipboard(cx);
@@ -1278,7 +1299,8 @@ fn render_layout(
                 let term = pane.active_terminal_ref();
                 let em = term.emulator();
                 let cur = term.cursor();
-                let content = crate::gpui_terminal::render_terminal(em, cur, cursor_blink_on).into_any_element();
+                let cur_shape = em.cursor_shape();
+                let content = crate::gpui_terminal::render_terminal(em, cur, cursor_blink_on, cur_shape).into_any_element();
                 (tab_strip, content)
             } else {
                 (

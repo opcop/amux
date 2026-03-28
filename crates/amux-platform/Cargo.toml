@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 amux-core = { path = "../amux-core" }
 
+# Terminal emulation (Alacritty's battle-tested backend)
+alacritty_terminal = "0.25"
+
 # Cross-platform PTY support
 portable-pty = "0.8"
 

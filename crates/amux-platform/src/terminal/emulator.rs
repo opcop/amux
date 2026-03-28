@@ -286,6 +286,8 @@ pub struct ParserState {
     utf8_expected: u8,
     /// OSC sequence content buffer
     osc_buf: Vec<u8>,
+    /// CSI private mode prefix ('?' for DECSET/DECRST)
+    csi_private: bool,
 }
 
 impl Default for ParserState {
@@ -314,6 +316,7 @@ impl Default for ParserState {
             utf8_len: 0,
             utf8_expected: 0,
             osc_buf: Vec::new(),
+            csi_private: false,
         }
     }
 }
@@ -339,6 +342,17 @@ pub struct TerminalEmulator {
     selection: Selection,
     /// Terminal title (set via OSC 0/2)
     title: Option<String>,
+    /// Alternate screen buffer (saved main screen for TUI apps like vim/less)
+    alt_grid: Option<Vec<Vec<Cell>>>,
+    alt_cursor: Option<Cursor>,
+    /// Whether we're currently on the alternate screen
+    in_alt_screen: bool,
+    /// Bracketed paste mode
+    bracketed_paste: bool,
+    /// Application cursor key mode (changes arrow key escape sequences)
+    app_cursor_keys: bool,
+    /// Cursor shape: 0=block, 1=beam, 2=underline
+    cursor_shape: u8,
 }
 
 impl TerminalEmulator {
@@ -361,6 +375,12 @@ impl TerminalEmulator {
             scroll_offset: 0,
             selection: Selection::new(),
             title: None,
+            alt_grid: None,
+            alt_cursor: None,
+            in_alt_screen: false,
+            bracketed_paste: false,
+            app_cursor_keys: false,
+            cursor_shape: 0,
         }
     }
 
@@ -372,6 +392,21 @@ impl TerminalEmulator {
     /// Get the terminal title (set by OSC 0/2)
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
+    }
+
+    /// Get cursor shape: 0=block, 1=beam, 2=underline
+    pub fn cursor_shape(&self) -> u8 {
+        self.cursor_shape
+    }
+
+    /// Whether bracketed paste mode is enabled
+    pub fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
+    }
+
+    /// Whether application cursor key mode is enabled
+    pub fn app_cursor_keys(&self) -> bool {
+        self.app_cursor_keys
     }
 
     /// Get mutable selection
@@ -620,6 +655,7 @@ impl TerminalEmulator {
                     self.state.in_escape = true;
                     self.state.escape_params.clear();
                     self.state.escape_type = None;
+                    self.state.csi_private = false;
                 }
                 _ => {
                     if self.state.osc_buf.len() < 4096 {
@@ -660,6 +696,7 @@ impl TerminalEmulator {
                     self.state.in_escape = true;
                     self.state.escape_params.clear();
                     self.state.escape_type = None;
+                    self.state.csi_private = false;
                 }
                 0x7F => {
                     // Delete - ignored
@@ -764,6 +801,42 @@ impl TerminalEmulator {
     }
 
     /// Scroll the screen up by one line
+    /// Enter alternate screen buffer (used by vim, less, htop, etc.)
+    fn enter_alt_screen(&mut self) {
+        if self.in_alt_screen {
+            return;
+        }
+        // Save current grid and cursor
+        self.alt_grid = Some(self.grid.clone());
+        self.alt_cursor = Some(self.state.cursor.clone());
+        // Clear the screen for the alternate buffer
+        self.grid = vec![vec![Cell::default(); self.cols]; self.rows];
+        self.state.cursor = Cursor { x: 0, y: 0, visible: true, blinking: false };
+        self.in_alt_screen = true;
+    }
+
+    /// Leave alternate screen buffer (restore main screen)
+    fn leave_alt_screen(&mut self) {
+        if !self.in_alt_screen {
+            return;
+        }
+        // Restore saved grid and cursor
+        if let Some(saved_grid) = self.alt_grid.take() {
+            self.grid = saved_grid;
+            // Ensure grid dimensions match current terminal size
+            self.grid.resize(self.rows, vec![Cell::default(); self.cols]);
+            for row in &mut self.grid {
+                row.resize(self.cols, Cell::default());
+            }
+        }
+        if let Some(saved_cursor) = self.alt_cursor.take() {
+            self.state.cursor = saved_cursor;
+            self.state.cursor.x = self.state.cursor.x.min(self.cols.saturating_sub(1));
+            self.state.cursor.y = self.state.cursor.y.min(self.rows.saturating_sub(1));
+        }
+        self.in_alt_screen = false;
+    }
+
     /// Handle a completed OSC sequence
     fn handle_osc(&mut self) {
         let content = String::from_utf8_lossy(&self.state.osc_buf);
@@ -911,10 +984,14 @@ impl TerminalEmulator {
                     } else if let Some(last) = self.state.escape_params.last_mut() {
                         *last = *last * 10 + param;
                     }
-                } else if c == ';' {
+                } else if c == ';' || c == ':' {
+                    // ';' separates params, ':' separates sub-params (e.g. ESC[4:3m for curly underline)
                     self.state.escape_params.push(0);
                 }
-                // '?' '>' '<' '=' are private-mode indicators — silently ignored
+                // '?' '>' '<' '=' are private-mode indicators
+                if c == '?' {
+                    self.state.csi_private = true;
+                }
             }
             0x40..=0x7E => {
                 // Final byte — execute CSI command
@@ -1031,15 +1108,47 @@ impl TerminalEmulator {
             }
             'l' => {
                 // Reset mode (DECRST)
-                // Silently accept — modes like ?25l (hide cursor), ?2004l (bracketed paste) etc.
+                if self.state.csi_private {
+                    for &p in &params {
+                        match p {
+                            1 => self.app_cursor_keys = false,
+                            25 => self.state.cursor.visible = false,
+                            47 | 1047 | 1049 => self.leave_alt_screen(),
+                            2004 => self.bracketed_paste = false,
+                            _ => {}
+                        }
+                    }
+                }
             }
             'h' => {
                 // Set mode (DECSET)
-                // Silently accept — modes like ?25h (show cursor), ?2004h (bracketed paste) etc.
+                if self.state.csi_private {
+                    for &p in &params {
+                        match p {
+                            1 => self.app_cursor_keys = true,
+                            25 => self.state.cursor.visible = true,
+                            47 | 1047 | 1049 => self.enter_alt_screen(),
+                            2004 => self.bracketed_paste = true,
+                            _ => {}
+                        }
+                    }
+                }
             }
             'n' => {
-                // Device status report
-                // Could implement cursor position report
+                // Device status report — handled via response queue
+            }
+            'q' => {
+                // DECSCUSR — set cursor shape
+                // 0,1 = blinking block, 2 = steady block, 3 = blinking underline,
+                // 4 = steady underline, 5 = blinking beam, 6 = steady beam
+                let shape = param(0, 0);
+                match shape {
+                    0 | 1 | 2 => self.cursor_shape = 0, // block
+                    3 | 4 => self.cursor_shape = 2,      // underline
+                    5 | 6 => self.cursor_shape = 1,      // beam
+                    _ => {}
+                }
+                self.state.cursor.blinking = matches!(shape, 0 | 1 | 3 | 5);
             }
             's' => {
                 // Save cursor position

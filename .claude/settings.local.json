@@ -8,7 +8,10 @@
       "Bash(echo \"DISPLAY=$DISPLAY\")",
       "Bash(echo \"XDG_SESSION_TYPE=$XDG_SESSION_TYPE\")",
       "Bash(rustc --version)",
-      "Bash(rustup show:*)"
+      "Bash(rustup show:*)",
+      "Skill(browse)",
+      "WebSearch",
+      "Bash(cargo search:*)"
     ]
   }
 }

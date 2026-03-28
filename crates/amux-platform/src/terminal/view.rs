@@ -170,10 +170,6 @@ impl TerminalView {
             }
             std::mem::take(&mut *pending)
         };
-        // Auto-scroll to bottom when new output arrives
-        if self.emulator.is_scrolled() {
-            self.emulator.scroll_to_bottom();
-        }
         self.emulator.feed(&data);
         true
     }
@@ -295,18 +291,33 @@ impl Drop for TerminalView {
 pub mod keys {
     /// Convert keyboard event to PTY input bytes
     pub fn to_pty(key: &str, ctrl: bool, shift: bool, alt: bool) -> Vec<u8> {
+        to_pty_with_mode(key, ctrl, shift, alt, false)
+    }
+
+    /// Convert keyboard event to PTY input bytes, with application cursor key mode support
+    pub fn to_pty_with_mode(key: &str, ctrl: bool, shift: bool, alt: bool, app_cursor: bool) -> Vec<u8> {
         // Special keys
         match key {
             "Enter" => return vec![0x0D],
             "Tab" => return vec![0x09],
             "Escape" => return vec![0x1B],
             "Backspace" => return vec![0x7F],
-            "ArrowUp" => return escape_seq("A", ctrl, shift, alt),
-            "ArrowDown" => return escape_seq("B", ctrl, shift, alt),
-            "ArrowRight" => return escape_seq("C", ctrl, shift, alt),
-            "ArrowLeft" => return escape_seq("D", ctrl, shift, alt),
-            "Home" => return escape_seq("H", ctrl, shift, alt),
-            "End" => return escape_seq("F", ctrl, shift, alt),
+            "ArrowUp" | "ArrowDown" | "ArrowRight" | "ArrowLeft" => {
+                let ch = match key {
+                    "ArrowUp" => "A",
+                    "ArrowDown" => "B",
+                    "ArrowRight" => "C",
+                    "ArrowLeft" => "D",
+                    _ => unreachable!(),
+                };
+                if app_cursor && !ctrl && !shift && !alt {
+                    // Application mode: ESC O A/B/C/D
+                    return vec![0x1B, b'O', ch.as_bytes()[0]];
+                }
+                return escape_seq(ch, ctrl, shift, alt);
+            }
+            "Home" => return if app_cursor { vec![0x1B, b'O', b'H'] } else { escape_seq("H", ctrl, shift, alt) },
+            "End" => return if app_cursor { vec![0x1B, b'O', b'F'] } else { escape_seq("F", ctrl, shift, alt) },
             "PageUp" => return escape_seq("5~", ctrl, shift, alt),
             "PageDown" => return escape_seq("6~", ctrl, shift, alt),
             "Insert" => return escape_seq("2~", ctrl, shift, alt),

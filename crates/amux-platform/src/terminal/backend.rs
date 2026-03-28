@@ -286,8 +286,8 @@ impl RealTerminalBackend {
 
         let pty_pair = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
-                rows: 24,
-                cols: 80,
+                rows: 40,
+                cols: 120,
                 pixel_width: 0,
                 pixel_height: 0,
             })

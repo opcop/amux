@@ -242,7 +242,7 @@ impl TerminalRenderElements {
 ///
 /// Uses simple flex row layout — one div per row, styled text runs inline.
 #[cfg(feature = "gpui")]
-pub fn render_terminal(emulator: &TerminalEmulator, cursor: &Cursor, cursor_blink_on: bool) -> impl IntoElement {
+pub fn render_terminal(emulator: &TerminalEmulator, cursor: &Cursor, cursor_blink_on: bool, cursor_shape: u8) -> impl IntoElement {
     let (cols, rows) = emulator.dimensions();
     let is_scrolled = emulator.is_scrolled();
     let scroll_grid;
@@ -280,11 +280,28 @@ pub fn render_terminal(emulator: &TerminalEmulator, cursor: &Cursor, cursor_blin
             };
 
             // Build styled runs for this row
+            // Track all visual attributes per run to correctly split
             let mut spans: Vec<AnyElement> = Vec::new();
             let mut run_text = String::new();
             let mut run_fg = cs.get_color(&Color::Default, false);
             let mut run_bg = cs.get_color(&Color::Default, true);
+            let mut run_bold = false;
+            let mut run_italic = false;
+            let mut run_underline = false;
+            let mut run_strikethrough = false;
             let col_limit = cols.min(row.len());
+
+            let flush_run = |spans: &mut Vec<AnyElement>, text: &str, fg: Rgba, bg: Rgba, bold: bool, _italic: bool, _underline: bool, _strikethrough: bool| {
+                if text.is_empty() { return; }
+                let mut d = div()
+                    .text_color(fg)
+                    .bg(bg);
+                if bold {
+                    d = d.font_weight(gpui::FontWeight::BOLD);
+                }
+                // Note: underline disabled for now — GPUI's underline is too prominent for TUI apps
+                spans.push(d.child(text.to_string()).into_any_element());
+            };
 
             for x in 0..col_limit {
                 let cell = &row[x];
@@ -295,23 +312,29 @@ pub fn render_terminal(emulator: &TerminalEmulator, cursor: &Cursor, cursor_blin
                 }
 
                 let is_cursor = show_cursor && cursor.x == x && cursor.y == y;
+                let is_block_cursor = is_cursor && cursor_shape == 0;
                 let is_selected = selection.contains(x, y);
 
-                let cell_fg = if is_cursor {
+                let cell_fg = if is_block_cursor {
                     cs.cursor_text
                 } else if is_selected {
                     cs.selection_fg
                 } else {
                     let mut c = cs.get_color(&cell.fg, false);
                     if cell.dim {
-                        // Dim: reduce brightness by ~50%
                         c.r *= 0.5;
                         c.g *= 0.5;
                         c.b *= 0.5;
                     }
+                    if cell.bold && !cell.dim {
+                        // Brighten bold colors slightly
+                        c.r = (c.r * 1.2).min(1.0);
+                        c.g = (c.g * 1.2).min(1.0);
+                        c.b = (c.b * 1.2).min(1.0);
+                    }
                     c
                 };
-                let cell_bg = if is_cursor {
+                let cell_bg = if is_block_cursor {
                     cs.cursor
                 } else if is_selected {
                     cs.selection_bg
@@ -320,39 +343,60 @@ pub fn render_terminal(emulator: &TerminalEmulator, cursor: &Cursor, cursor_blin
                 };
 
                 // Style changed — flush current run
-                if cell_fg != run_fg || cell_bg != run_bg {
-                    if !run_text.is_empty() {
-                        spans.push(
-                            div()
-                                .text_color(run_fg)
-                                .bg(run_bg)
-                                .child(run_text.clone())
-                                .into_any_element(),
-                        );
-                        run_text.clear();
-                    }
+                if cell_fg != run_fg || cell_bg != run_bg
+                    || cell.bold != run_bold || cell.italic != run_italic
+                    || cell.underline != run_underline || cell.strikethrough != run_strikethrough
+                {
+                    flush_run(&mut spans, &run_text, run_fg, run_bg, run_bold, run_italic, run_underline, run_strikethrough);
+                    run_text.clear();
                     run_fg = cell_fg;
                     run_bg = cell_bg;
+                    run_bold = cell.bold;
+                    run_italic = cell.italic;
+                    run_underline = cell.underline;
+                    run_strikethrough = cell.strikethrough;
                 }
 
                 run_text.push(cell.ch);
             }
 
             // Flush last run
-            if !run_text.is_empty() {
-                spans.push(
-                    div()
-                        .text_color(run_fg)
-                        .bg(run_bg)
-                        .child(run_text)
-                        .into_any_element(),
-                );
-            }
+            flush_run(&mut spans, &run_text, run_fg, run_bg, run_bold, run_italic, run_underline, run_strikethrough);
 
-            div()
+            let mut row_div = div()
                 .flex()
                 .flex_row()
-                .h(px(CELL_HEIGHT))
+                .h(px(CELL_HEIGHT));
+
+            // Beam or underline cursor overlay
+            if show_cursor && cursor.y == y && cursor_shape > 0 {
+                let cursor_x_px = cursor.x as f32 * CELL_WIDTH;
+                if cursor_shape == 1 {
+                    // Beam cursor: thin vertical bar
+                    row_div = row_div.child(
+                        div()
+                            .absolute()
+                            .left(px(cursor_x_px))
+                            .top_0()
+                            .w(px(2.0))
+                            .h(px(CELL_HEIGHT))
+                            .bg(cs.cursor)
+                    );
+                } else if cursor_shape == 2 {
+                    // Underline cursor
+                    row_div = row_div.child(
+                        div()
+                            .absolute()
+                            .left(px(cursor_x_px))
+                            .bottom_0()
+                            .w(px(CELL_WIDTH))
+                            .h(px(2.0))
+                            .bg(cs.cursor)
+                    );
+                }
+            }
+
+            row_div
                 .children(spans)
                 .into_any_element()
         }))
