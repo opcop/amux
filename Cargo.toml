@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "apps/desktop",
+    "crates/amux-core",
+    "crates/amux-platform",
+    "crates/amux-agent",
+    "crates/amux-workspace",
+    "crates/amux-session",
+    "crates/amux-ui",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+

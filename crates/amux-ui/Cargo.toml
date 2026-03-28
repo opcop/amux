@@ -1,0 +1,16 @@
+[package]
+name = "amux-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+gpui = []
+
+[dependencies]
+amux-core = { path = "../amux-core" }
+amux-agent = { path = "../amux-agent" }
+amux-platform = { path = "../amux-platform" }
+amux-session = { path = "../amux-session" }
+amux-workspace = { path = "../amux-workspace" }

@@ -1,0 +1,21 @@
+[package]
+name = "amux-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+amux-core = { path = "../amux-core" }
+
+# Cross-platform PTY support
+portable-pty = "0.8"
+
+# Async runtime for reading PTY output
+tokio = { version = "1", features = ["sync", "rt"] }
+
+# For async Read/Write traits
+futures-lite = "2"
+
+# System information (CPU, memory, processes)
+sysinfo = "0.31"
+

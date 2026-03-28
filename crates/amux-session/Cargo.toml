@@ -1,0 +1,9 @@
+[package]
+name = "amux-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+amux-core = { path = "../amux-core" }
+serde_json = "1"

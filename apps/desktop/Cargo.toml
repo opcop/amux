@@ -1,0 +1,32 @@
+[package]
+name = "amux-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+gpui = ["amux-ui/gpui", "dep:gpui", "dep:gpui_platform", "dep:smol", "gpui_platform/wayland", "gpui_platform/x11"]
+
+[dependencies]
+amux-core = { path = "../../crates/amux-core" }
+amux-platform = { path = "../../crates/amux-platform" }
+amux-ui = { path = "../../crates/amux-ui" }
+gpui = { git = "https://github.com/zed-industries/zed", optional = true }
+gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true }
+smol = { version = "2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+git2 = { version = "0.20", features = ["https", "ssh", "vendored-libgit2", "vendored-openssl"] }
+tempfile = "3.21"
+
+[target.'cfg(not(target_os = "macos"))'.dev-dependencies]
+git2 = { version = "0.20", features = ["https", "ssh"] }
+tempfile = "3.21"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_UI_WindowsAndMessaging",
+] }

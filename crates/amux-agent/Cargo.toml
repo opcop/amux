@@ -1,0 +1,10 @@
+[package]
+name = "amux-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+amux-core = { path = "../amux-core" }
+amux-platform = { path = "../amux-platform" }
+

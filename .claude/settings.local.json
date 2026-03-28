@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l apps/desktop/src/gpui_*.rs)",
+      "Bash(cargo run:*)",
+      "Bash(cargo test:*)",
+      "Bash(echo \"WAYLAND_DISPLAY=$WAYLAND_DISPLAY\")",
+      "Bash(echo \"DISPLAY=$DISPLAY\")",
+      "Bash(echo \"XDG_SESSION_TYPE=$XDG_SESSION_TYPE\")",
+      "Bash(rustc --version)",
+      "Bash(rustup show:*)"
+    ]
+  }
+}
