@@ -8,7 +8,7 @@
 
 #[cfg(feature = "gpui")]
 use gpui::{
-    rgb, div, prelude::*, AnyElement, FontWeight, IntoElement,
+    rgb, px, div, prelude::*, AnyElement, FontWeight, IntoElement,
     ParentElement, Styled,
 };
 #[cfg(feature = "gpui")]
@@ -136,23 +136,26 @@ fn render_sidebar_header() -> impl IntoElement {
         .items_center()
         .pb_2()
         .border_b_1()
-        .border_color(rgb(0xd6d3d1))
+        .border_color(rgb(0x2a2a2a))
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
                 .child(
+                    // Logo icon: mini split-pane with accent dividers
                     div()
                         .w_6()
                         .h_6()
-                        .rounded_md()
-                        .bg(rgb(0x7c3aed))
+                        .rounded(px(5.0))
+                        .bg(rgb(0x1a1c2e))
+                        .border_1()
+                        .border_color(rgb(0x2a2d3d))
                         .flex()
                         .items_center()
                         .justify_center()
                         .text_xs()
-                        .text_color(rgb(0xffffff))
+                        .text_color(rgb(0x81a2be))
                         .font_weight(FontWeight::BOLD)
                         .child("A"),
                 )
@@ -160,7 +163,7 @@ fn render_sidebar_header() -> impl IntoElement {
                     div()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(0x1f2937))
+                        .text_color(rgb(0xc5c8c6))
                         .child("AMUX"),
                 ),
         )
@@ -169,9 +172,9 @@ fn render_sidebar_header() -> impl IntoElement {
                 .px_1p5()
                 .py_0p5()
                 .rounded_sm()
-                .hover(|h| h.bg(rgb(0xd6d3d1)))
+                .hover(|h| h.bg(rgb(0x313244)))
                 .text_xs()
-                .text_color(rgb(0x6b7280))
+                .text_color(rgb(0x585b70))
                 .child("[−]"),
         )
 }

@@ -275,8 +275,16 @@ impl TerminalManager {
 
     /// Spawn a terminal in the active pane's active tab using AlacrittyTerminal
     pub fn spawn_in_active(&mut self, shell: &str, args: &[String], cwd: Option<&str>) -> Result<(), String> {
-        let pane = self.panes.get_mut(&self.active_pane).ok_or("no active pane")?;
+        self.spawn_in_pane(&self.active_pane.clone(), shell, args, cwd)
+    }
+
+    /// Spawn a terminal in a specific pane's active tab
+    pub fn spawn_in_pane(&mut self, pane_id: &PaneId, shell: &str, args: &[String], cwd: Option<&str>) -> Result<(), String> {
+        let pane = self.panes.get_mut(pane_id).ok_or("pane not found")?;
         let tab = pane.tabs.get_mut(pane.active_tab).ok_or("no active tab")?;
+        if tab.terminal.is_some() {
+            return Ok(()); // already has a terminal
+        }
         let term = AlacrittyTerminal::new(120, 40, 8, 20, shell, args, cwd)?;
         tab.terminal = Some(term);
         Ok(())
@@ -349,7 +357,8 @@ impl TerminalManager {
         if Self::remove_from_layout(&mut self.layout, &closed) {
             self.panes.remove(&closed);
             self.active_pane = Self::first_pane(&self.layout)
-                .unwrap_or_else(|| self.panes.keys().next().cloned().unwrap());
+                .or_else(|| self.panes.keys().next().cloned())
+                .unwrap_or_else(|| PaneId("pane-1".to_string()));
             true
         } else {
             false
@@ -386,6 +395,66 @@ impl TerminalManager {
         }
     }
 
+    // === Move tab between panes ===
+
+    /// Move a tab from one pane to another.
+    /// If the source pane becomes empty, it is removed from the layout.
+    /// Returns true if the move was successful.
+    pub fn move_tab_to_pane(
+        &mut self,
+        source_pane: &PaneId,
+        tab_index: usize,
+        target_pane: &PaneId,
+    ) -> bool {
+        if source_pane == target_pane {
+            return false;
+        }
+        // Validate both panes exist and tab index is valid
+        let src_tab_count = match self.panes.get(source_pane) {
+            Some(p) => p.tabs.len(),
+            None => return false,
+        };
+        if tab_index >= src_tab_count {
+            return false;
+        }
+        if !self.panes.contains_key(target_pane) {
+            return false;
+        }
+
+        // Remove tab from source
+        let src = match self.panes.get_mut(source_pane) {
+            Some(p) => p,
+            None => return false,
+        };
+        let tab = src.tabs.remove(tab_index);
+        if src.active_tab >= src.tabs.len() && !src.tabs.is_empty() {
+            src.active_tab = src.tabs.len() - 1;
+        }
+
+        // Add tab to target and make it active
+        let target = match self.panes.get_mut(target_pane) {
+            Some(p) => p,
+            None => return false,
+        };
+        target.tabs.push(tab);
+        target.active_tab = target.tabs.len() - 1;
+
+        // If source pane is now empty, remove it from layout
+        let source_empty = self.panes.get(source_pane).map_or(true, |p| p.tabs.is_empty());
+        if source_empty {
+            Self::remove_from_layout(&mut self.layout, source_pane);
+            self.panes.remove(source_pane);
+            // If the closed pane was active, switch to target
+            if &self.active_pane == source_pane {
+                self.active_pane = target_pane.clone();
+            }
+        }
+
+        // Make target the active pane
+        self.active_pane = target_pane.clone();
+        true
+    }
+
     // === Resize ===
 
     pub fn update_split_ratio(&mut self, first_pane_id: &PaneId, new_ratio: f32) {
@@ -418,6 +487,10 @@ impl TerminalManager {
 
     pub fn active_layout(&self) -> Option<&PaneLayout> {
         Some(&self.layout)
+    }
+
+    pub fn pane_iter(&self) -> impl Iterator<Item = (&PaneId, &TerminalPane)> {
+        self.panes.iter()
     }
 
     pub fn total_panes(&self) -> usize {
@@ -462,14 +535,23 @@ impl TerminalManager {
     pub fn restore_layout(json: &str) -> Option<Self> {
         let state: LayoutState = serde_json::from_str(json).ok()?;
         let pane_ids = state.layout.pane_ids();
-        let mut panes = HashMap::new();
-        for id in pane_ids {
-            panes.insert(id.clone(), TerminalPane::new(id));
+        if pane_ids.is_empty() {
+            return None;
         }
+        let mut panes = HashMap::new();
+        for id in &pane_ids {
+            panes.insert(id.clone(), TerminalPane::new(id.clone()));
+        }
+        // Validate active_pane exists in restored layout, fallback to first pane
+        let active_pane = if pane_ids.contains(&state.active_pane) {
+            state.active_pane
+        } else {
+            pane_ids[0].clone()
+        };
         Some(Self {
             layout: state.layout,
             panes,
-            active_pane: state.active_pane,
+            active_pane,
             next_pane_num: state.next_pane_num,
         })
     }

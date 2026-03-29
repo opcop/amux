@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=AMUX
+Comment=Modern terminal multiplexer for Vibe Coding
+Exec=amux
+Icon=amux
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;
+Keywords=terminal;multiplexer;shell;
+StartupWMClass=amux
