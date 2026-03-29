@@ -7,6 +7,7 @@ pub mod emulator;
 pub mod session;
 pub mod view;
 pub mod manager;
+pub mod alacritty_view;
 
 // Re-export emulator types
 pub use emulator::{TerminalEmulator, Cell, Color, Cursor, DEFAULT_COLS, SCROLLBACK_LINES};

@@ -19,6 +19,10 @@ tokio = { version = "1", features = ["sync", "rt"] }
 # For async Read/Write traits
 futures-lite = "2"
 
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 # System information (CPU, memory, processes)
 sysinfo = "0.32"
 

@@ -1,0 +1,218 @@
+//! Alacritty-based terminal view
+//!
+//! Wraps `alacritty_terminal::Term` to provide a terminal emulator with full
+//! VT100/xterm escape sequence support.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+
+use alacritty_terminal::event::{Event as AlacrittyEvent, EventListener, Notify, OnResize, WindowSize};
+use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, Notifier};
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::term::Term;
+use alacritty_terminal::tty;
+
+/// Event listener that bridges alacritty events to our system
+#[derive(Clone)]
+pub struct AmuEventProxy {
+    pub title: Arc<Mutex<Option<String>>>,
+}
+
+impl EventListener for AmuEventProxy {
+    fn send_event(&self, event: AlacrittyEvent) {
+        match event {
+            AlacrittyEvent::Title(title) => {
+                if let Ok(mut t) = self.title.lock() {
+                    *t = Some(title);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Terminal size for alacritty
+pub struct TermSize {
+    pub cols: u16,
+    pub rows: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+}
+
+impl Default for TermSize {
+    fn default() -> Self {
+        Self { cols: 120, rows: 40, cell_width: 8, cell_height: 20 }
+    }
+}
+
+impl TermSize {
+    fn to_window_size(&self) -> WindowSize {
+        WindowSize {
+            num_lines: self.rows,
+            num_cols: self.cols,
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+        }
+    }
+}
+
+impl Dimensions for TermSize {
+    fn total_lines(&self) -> usize { self.rows as usize }
+    fn screen_lines(&self) -> usize { self.rows as usize }
+    fn columns(&self) -> usize { self.cols as usize }
+}
+
+/// Wrapper around alacritty_terminal
+pub struct AlacrittyTerminal {
+    term: Arc<FairMutex<Term<AmuEventProxy>>>,
+    notifier: Notifier,
+    event_proxy: AmuEventProxy,
+    cols: u16,
+    rows: u16,
+    cell_width: u16,
+    cell_height: u16,
+    _event_loop_handle: JoinHandle<(EventLoop<tty::Pty, AmuEventProxy>, alacritty_terminal::event_loop::State)>,
+}
+
+impl AlacrittyTerminal {
+    /// Create and spawn a new terminal session
+    pub fn new(
+        cols: u16,
+        rows: u16,
+        cell_width: u16,
+        cell_height: u16,
+        shell: &str,
+        args: &[String],
+        cwd: Option<&str>,
+    ) -> Result<Self, String> {
+        let event_proxy = AmuEventProxy {
+            title: Arc::new(Mutex::new(None)),
+        };
+
+        let size = TermSize { cols, rows, cell_width, cell_height };
+        let config = TermConfig::default();
+        let term = Term::new(config, &size, event_proxy.clone());
+        let term = Arc::new(FairMutex::new(term));
+
+        // Create PTY
+        let mut env = HashMap::new();
+        env.insert("TERM".to_string(), "xterm-256color".to_string());
+        env.insert("COLORTERM".to_string(), "truecolor".to_string());
+        env.insert("TERM_PROGRAM".to_string(), "amux".to_string());
+        // Set LS_COLORS without background colors — only foreground colors
+        env.insert("LS_COLORS".to_string(),
+            "di=1;34:ln=1;36:so=1;35:pi=33:ex=1;32:bd=1;33:cd=1;33:su=1;31:sg=1;33:tw=1;34:ow=1;34:*.tar=1;31:*.gz=1;31:*.zip=1;31:*.rpm=1;31:*.deb=1;31".to_string()
+        );
+
+        let pty_config = tty::Options {
+            shell: Some(tty::Shell::new(shell.to_string(), args.to_vec())),
+            working_directory: cwd.map(|s| std::path::PathBuf::from(s)),
+            drain_on_exit: false,
+            env,
+            #[cfg(target_os = "windows")]
+            escape_args: true,
+        };
+
+        let window_size = size.to_window_size();
+        let pty = tty::new(&pty_config, window_size, 0)
+            .map_err(|e| format!("failed to create PTY: {}", e))?;
+
+        // Spawn the event loop
+        let event_loop = EventLoop::new(
+            term.clone(),
+            event_proxy.clone(),
+            pty,
+            pty_config.drain_on_exit,
+            false,
+        ).map_err(|e| format!("failed to create event loop: {}", e))?;
+
+        let notifier = Notifier(event_loop.channel());
+        let handle = event_loop.spawn();
+
+        Ok(Self {
+            term,
+            notifier,
+            event_proxy,
+            cols,
+            rows,
+            cell_width,
+            cell_height,
+            _event_loop_handle: handle,
+        })
+    }
+
+    /// Access the term for rendering (via callback to avoid exposing guard type)
+    pub fn with_term<R>(&self, f: impl FnOnce(&Term<AmuEventProxy>) -> R) -> R {
+        let term = self.term.lock_unfair();
+        f(&term)
+    }
+
+    /// Access the term mutably
+    pub fn with_term_mut<R>(&self, f: impl FnOnce(&mut Term<AmuEventProxy>) -> R) -> R {
+        let mut term = self.term.lock();
+        f(&mut term)
+    }
+
+    /// Send keyboard input to PTY
+    pub fn send_input(&self, data: &[u8]) {
+        self.notifier.notify(data.to_vec());
+    }
+
+    /// Resize the terminal
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        self.cols = cols;
+        self.rows = rows;
+
+        let window_size = WindowSize {
+            num_lines: rows,
+            num_cols: cols,
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+        };
+
+        let size = TermSize { cols, rows, cell_width: self.cell_width, cell_height: self.cell_height };
+        let mut term = self.term.lock();
+        term.resize(size);
+        let _ = self.notifier.0.send(Msg::Resize(window_size));
+    }
+
+    /// Get terminal title
+    pub fn title(&self) -> Option<String> {
+        self.event_proxy.title.lock().ok().and_then(|t| t.clone())
+    }
+
+    /// Get current dimensions
+    pub fn dimensions(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
+    /// Scroll up
+    pub fn scroll_up(&self, lines: usize) {
+        let mut term = self.term.lock();
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(lines as i32));
+    }
+
+    /// Scroll down
+    pub fn scroll_down(&self, lines: usize) {
+        let mut term = self.term.lock();
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(-(lines as i32)));
+    }
+
+    /// Scroll to bottom
+    pub fn scroll_to_bottom(&self) {
+        let mut term = self.term.lock();
+        term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+    }
+
+    /// Whether scrolled up
+    pub fn is_scrolled(&self) -> bool {
+        let term = self.term.lock_unfair();
+        term.grid().display_offset() > 0
+    }
+}

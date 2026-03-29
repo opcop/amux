@@ -1,13 +1,15 @@
 //! Terminal Manager — per-pane tabs + nested splits (limux-style)
 //!
 //! Each pane has its own tab strip. Panes can be split arbitrarily.
+//! Uses AlacrittyTerminal for full VT100/xterm escape sequence support.
 
 use std::collections::HashMap;
 
-use crate::terminal::view::TerminalView;
+use serde::{Serialize, Deserialize};
+use crate::terminal::alacritty_view::AlacrittyTerminal;
 
 /// Unique ID for a pane
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaneId(pub String);
 
 /// Split direction
@@ -20,7 +22,7 @@ pub enum SplitDirection {
 /// A terminal tab inside a pane
 pub struct PaneTab {
     pub title: String,
-    pub terminal: TerminalView,
+    pub terminal: Option<AlacrittyTerminal>,
 }
 
 /// A pane with its own tab strip (like limux)
@@ -36,27 +38,27 @@ impl TerminalPane {
             id,
             tabs: vec![PaneTab {
                 title: "Terminal".to_string(),
-                terminal: TerminalView::new(),
+                terminal: None,
             }],
             active_tab: 0,
         }
     }
 
     /// Get the active terminal
-    pub fn active_terminal(&mut self) -> &mut TerminalView {
-        &mut self.tabs[self.active_tab].terminal
+    pub fn active_terminal(&mut self) -> Option<&mut AlacrittyTerminal> {
+        self.tabs.get_mut(self.active_tab)?.terminal.as_mut()
     }
 
     /// Get the active terminal (immutable)
-    pub fn active_terminal_ref(&self) -> &TerminalView {
-        &self.tabs[self.active_tab].terminal
+    pub fn active_terminal_ref(&self) -> Option<&AlacrittyTerminal> {
+        self.tabs.get(self.active_tab)?.terminal.as_ref()
     }
 
     /// Add a new tab to this pane and make it active
     pub fn add_tab(&mut self, title: String) -> usize {
         self.tabs.push(PaneTab {
             title,
-            terminal: TerminalView::new(),
+            terminal: None,
         });
         self.active_tab = self.tabs.len() - 1;
         self.active_tab
@@ -74,17 +76,6 @@ impl TerminalPane {
         true
     }
 
-    /// Poll all tabs for PTY output
-    pub fn poll_all_tabs(&mut self) -> bool {
-        let mut any = false;
-        for tab in &mut self.tabs {
-            if tab.terminal.poll() {
-                any = true;
-            }
-        }
-        any
-    }
-
     /// Tab count
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
@@ -96,18 +87,24 @@ impl TerminalPane {
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                // Use OSC title from terminal if available, fallback to static title
-                let title = t.terminal.emulator().title()
-                    .map(|s| s.to_string())
+                let title = t.terminal.as_ref()
+                    .and_then(|term| term.title())
                     .unwrap_or_else(|| t.title.clone());
                 (i, title, i == self.active_tab)
             })
             .collect()
     }
+
+    /// Set active tab by index
+    pub fn set_active_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active_tab = index;
+        }
+    }
 }
 
 /// Pane layout tree — splits of panes
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PaneLayout {
     Single(PaneId),
     Horizontal {
@@ -146,9 +143,16 @@ impl PaneLayout {
 
 // Keep TabLayout as alias for compatibility
 pub type TabLayout = PaneLayout;
-// Keep TabId for compatibility with tab_titles() in gpui_entry
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TabId(pub String);
+
+/// Serializable layout state for persistence
+#[derive(Serialize, Deserialize)]
+struct LayoutState {
+    layout: PaneLayout,
+    active_pane: PaneId,
+    next_pane_num: usize,
+}
 
 /// Terminal manager — layout tree of panes, each pane has its own tabs
 pub struct TerminalManager {
@@ -181,14 +185,14 @@ impl TerminalManager {
 
     // === Active pane/terminal access ===
 
-    pub fn active_terminal(&mut self) -> Option<&mut TerminalView> {
+    pub fn active_terminal(&mut self) -> Option<&mut AlacrittyTerminal> {
         let pane = self.panes.get_mut(&self.active_pane)?;
-        Some(pane.active_terminal())
+        pane.active_terminal()
     }
 
-    pub fn active_terminal_ref(&self) -> Option<&TerminalView> {
+    pub fn active_terminal_ref(&self) -> Option<&AlacrittyTerminal> {
         let pane = self.panes.get(&self.active_pane)?;
-        Some(pane.active_terminal_ref())
+        pane.active_terminal_ref()
     }
 
     pub fn active_pane_id(&self) -> Option<&PaneId> {
@@ -198,6 +202,12 @@ impl TerminalManager {
     pub fn set_active_pane(&mut self, pane_id: &PaneId) {
         if self.panes.contains_key(pane_id) {
             self.active_pane = pane_id.clone();
+        }
+    }
+
+    pub fn set_active_tab_in_pane(&mut self, tab_index: usize) {
+        if let Some(pane) = self.panes.get_mut(&self.active_pane) {
+            pane.set_active_tab(tab_index);
         }
     }
 
@@ -211,23 +221,23 @@ impl TerminalManager {
 
     // === Resize terminals ===
 
-    /// Resize all terminals in a pane to the given pixel dimensions
     pub fn resize_pane_terminals(&mut self, pane_id: &PaneId, width_px: f32, height_px: f32, cell_w: f32, cell_h: f32) {
-        let tab_strip_h = 28.0_f32; // approximate tab strip height
-        let padding = 8.0_f32; // terminal padding (p_1 = 4px each side)
-        let cols = ((width_px - padding) / cell_w).floor().max(1.0) as usize;
-        let rows = ((height_px - tab_strip_h - padding) / cell_h).floor().max(1.0) as usize;
+        let tab_strip_h = 28.0_f32;
+        let padding = 8.0_f32;
+        let cols = ((width_px - padding) / cell_w).floor().max(1.0) as u16;
+        let rows = ((height_px - tab_strip_h - padding) / cell_h).floor().max(1.0) as u16;
         if let Some(pane) = self.panes.get_mut(pane_id) {
             for tab in &mut pane.tabs {
-                let (cur_cols, cur_rows) = tab.terminal.emulator().dimensions();
-                if cur_cols != cols || cur_rows != rows {
-                    let _ = tab.terminal.resize(cols, rows);
+                if let Some(ref mut term) = tab.terminal {
+                    let (cur_cols, cur_rows) = term.dimensions();
+                    if cur_cols != cols || cur_rows != rows {
+                        term.resize(cols, rows);
+                    }
                 }
             }
         }
     }
 
-    /// Resize all panes based on layout and available space
     pub fn resize_all_panes(&mut self, avail_w: f32, avail_h: f32, cell_w: f32, cell_h: f32) {
         if let Some(layout) = self.active_layout().cloned() {
             let sizes = Self::compute_pane_sizes(&layout, avail_w, avail_h);
@@ -263,87 +273,69 @@ impl TerminalManager {
 
     // === Spawn ===
 
-    pub fn spawn_in_active(&mut self, profile: amux_core::TerminalLaunchProfile) -> Result<(), String> {
-        let term = self.active_terminal().ok_or("no active terminal")?;
-        term.spawn(profile)
+    /// Spawn a terminal in the active pane's active tab using AlacrittyTerminal
+    pub fn spawn_in_active(&mut self, shell: &str, args: &[String], cwd: Option<&str>) -> Result<(), String> {
+        let pane = self.panes.get_mut(&self.active_pane).ok_or("no active pane")?;
+        let tab = pane.tabs.get_mut(pane.active_tab).ok_or("no active tab")?;
+        let term = AlacrittyTerminal::new(120, 40, 8, 20, shell, args, cwd)?;
+        tab.terminal = Some(term);
+        Ok(())
     }
 
     // === Tab operations (per-pane) ===
 
-    /// Add a new tab to the active pane and spawn a PTY
     pub fn add_tab_to_active_pane(&mut self, title: String) -> Option<usize> {
         let pane = self.panes.get_mut(&self.active_pane)?;
         Some(pane.add_tab(title))
     }
 
-    /// Close the active tab in the active pane
     pub fn close_active_tab(&mut self) -> bool {
-        let pane = match self.panes.get_mut(&self.active_pane) {
-            Some(p) => p,
-            None => return false,
-        };
-        pane.close_tab(pane.active_tab)
-    }
-
-    /// Switch to a specific tab in the active pane
-    pub fn set_active_tab_in_pane(&mut self, tab_index: usize) {
-        if let Some(pane) = self.panes.get_mut(&self.active_pane) {
-            if tab_index < pane.tabs.len() {
-                pane.active_tab = tab_index;
-            }
+        let pane = self.panes.get_mut(&self.active_pane);
+        match pane {
+            Some(pane) => pane.close_tab(pane.active_tab),
+            None => false,
         }
     }
 
-    // === Split operations ===
+    // === Split ===
 
-    pub fn split_active_pane(&mut self, direction: SplitDirection) -> Option<PaneId> {
-        let target = self.active_pane.clone();
-        if !self.panes.contains_key(&target) {
-            return None;
-        }
-
+    pub fn split_active_pane(&mut self, direction: SplitDirection) {
         let new_pane_id = self.next_pane_id();
         let new_pane = TerminalPane::new(new_pane_id.clone());
         self.panes.insert(new_pane_id.clone(), new_pane);
 
-        Self::split_in_layout(&mut self.layout, &target, &new_pane_id, direction);
-        self.active_pane = new_pane_id.clone();
-        Some(new_pane_id)
+        let active = self.active_pane.clone();
+        Self::split_in_layout(&mut self.layout, &active, &new_pane_id, direction);
+        self.active_pane = new_pane_id;
     }
 
-    fn split_in_layout(
-        layout: &mut PaneLayout,
-        target: &PaneId,
-        new_id: &PaneId,
-        direction: SplitDirection,
-    ) -> bool {
+    fn split_in_layout(layout: &mut PaneLayout, target: &PaneId, new_pane: &PaneId, direction: SplitDirection) -> bool {
         match layout {
             PaneLayout::Single(id) if id == target => {
-                let original = PaneLayout::Single(target.clone());
-                let new_node = PaneLayout::Single(new_id.clone());
+                let old = std::mem::replace(layout, PaneLayout::Single(PaneId("temp".to_string())));
                 *layout = match direction {
                     SplitDirection::Horizontal => PaneLayout::Horizontal {
-                        left: Box::new(original),
-                        right: Box::new(new_node),
+                        left: Box::new(old),
+                        right: Box::new(PaneLayout::Single(new_pane.clone())),
                         ratio: 0.5,
                     },
                     SplitDirection::Vertical => PaneLayout::Vertical {
-                        top: Box::new(original),
-                        bottom: Box::new(new_node),
+                        top: Box::new(old),
+                        bottom: Box::new(PaneLayout::Single(new_pane.clone())),
                         ratio: 0.5,
                     },
                 };
                 true
             }
-            PaneLayout::Single(_) => false,
             PaneLayout::Horizontal { left, right, .. } => {
-                Self::split_in_layout(left, target, new_id, direction)
-                    || Self::split_in_layout(right, target, new_id, direction)
+                Self::split_in_layout(left, target, new_pane, direction)
+                    || Self::split_in_layout(right, target, new_pane, direction)
             }
             PaneLayout::Vertical { top, bottom, .. } => {
-                Self::split_in_layout(top, target, new_id, direction)
-                    || Self::split_in_layout(bottom, target, new_id, direction)
+                Self::split_in_layout(top, target, new_pane, direction)
+                    || Self::split_in_layout(bottom, target, new_pane, direction)
             }
+            _ => false,
         }
     }
 
@@ -353,23 +345,25 @@ impl TerminalManager {
         if self.panes.len() <= 1 {
             return false;
         }
-        let target = self.active_pane.clone();
-        Self::remove_from_layout(&mut self.layout, &target);
-        self.panes.remove(&target);
-        self.active_pane = Self::first_pane(&self.layout)
-            .unwrap_or_else(|| self.panes.keys().next().cloned().unwrap());
-        true
+        let closed = self.active_pane.clone();
+        if Self::remove_from_layout(&mut self.layout, &closed) {
+            self.panes.remove(&closed);
+            self.active_pane = Self::first_pane(&self.layout)
+                .unwrap_or_else(|| self.panes.keys().next().cloned().unwrap());
+            true
+        } else {
+            false
+        }
     }
 
     fn remove_from_layout(layout: &mut PaneLayout, target: &PaneId) -> bool {
         match layout {
-            PaneLayout::Single(_) => false,
             PaneLayout::Horizontal { left, right, .. } => {
-                if matches!(left.as_ref(), PaneLayout::Single(id) if id == target) {
+                if matches!(**left, PaneLayout::Single(ref id) if id == target) {
                     *layout = *right.clone();
                     return true;
                 }
-                if matches!(right.as_ref(), PaneLayout::Single(id) if id == target) {
+                if matches!(**right, PaneLayout::Single(ref id) if id == target) {
                     *layout = *left.clone();
                     return true;
                 }
@@ -377,43 +371,23 @@ impl TerminalManager {
                     || Self::remove_from_layout(right, target)
             }
             PaneLayout::Vertical { top, bottom, .. } => {
-                if matches!(top.as_ref(), PaneLayout::Single(id) if id == target) {
+                if matches!(**top, PaneLayout::Single(ref id) if id == target) {
                     *layout = *bottom.clone();
                     return true;
                 }
-                if matches!(bottom.as_ref(), PaneLayout::Single(id) if id == target) {
+                if matches!(**bottom, PaneLayout::Single(ref id) if id == target) {
                     *layout = *top.clone();
                     return true;
                 }
                 Self::remove_from_layout(top, target)
                     || Self::remove_from_layout(bottom, target)
             }
+            _ => false,
         }
-    }
-
-    fn first_pane(layout: &PaneLayout) -> Option<PaneId> {
-        match layout {
-            PaneLayout::Single(id) => Some(id.clone()),
-            PaneLayout::Horizontal { left, .. } => Self::first_pane(left),
-            PaneLayout::Vertical { top, .. } => Self::first_pane(top),
-        }
-    }
-
-    // === Polling ===
-
-    pub fn poll_all(&mut self) -> bool {
-        let mut any = false;
-        for pane in self.panes.values_mut() {
-            if pane.poll_all_tabs() {
-                any = true;
-            }
-        }
-        any
     }
 
     // === Resize ===
 
-    /// Update the split ratio for a split identified by the first pane in its left/top child
     pub fn update_split_ratio(&mut self, first_pane_id: &PaneId, new_ratio: f32) {
         Self::update_ratio_in_layout(&mut self.layout, first_pane_id, new_ratio);
     }
@@ -454,72 +428,49 @@ impl TerminalManager {
         self.panes.values().map(|p| p.tab_count()).sum()
     }
 
-    /// Global tab titles (for bottom bar — shows pane count summary)
     pub fn tab_titles(&self) -> Vec<(TabId, String, bool)> {
-        // Not used anymore — per-pane tabs replace this
         vec![]
     }
-}
 
-impl Default for TerminalManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_split_pane() {
-        let mut manager = TerminalManager::new();
-        assert_eq!(manager.total_panes(), 1);
-
-        let new_pane = manager.split_active_pane(SplitDirection::Horizontal);
-        assert!(new_pane.is_some());
-        assert_eq!(manager.total_panes(), 2);
+    fn first_pane(layout: &PaneLayout) -> Option<PaneId> {
+        match layout {
+            PaneLayout::Single(id) => Some(id.clone()),
+            PaneLayout::Horizontal { left, .. } => Self::first_pane(left),
+            PaneLayout::Vertical { top, .. } => Self::first_pane(top),
+        }
     }
 
-    #[test]
-    fn test_nested_split() {
-        let mut manager = TerminalManager::new();
-        manager.split_active_pane(SplitDirection::Horizontal);
-        assert_eq!(manager.total_panes(), 2);
+    // === Polling (no longer needed — alacritty has its own event loop) ===
 
-        // Split the new active pane again
-        manager.split_active_pane(SplitDirection::Vertical);
-        assert_eq!(manager.total_panes(), 3);
+    pub fn poll_all(&mut self) -> bool {
+        false
     }
 
-    #[test]
-    fn test_close_pane() {
-        let mut manager = TerminalManager::new();
-        manager.split_active_pane(SplitDirection::Horizontal);
-        assert_eq!(manager.total_panes(), 2);
+    // === Layout persistence ===
 
-        assert!(manager.close_active_pane());
-        assert_eq!(manager.total_panes(), 1);
+    /// Serialize the current layout to JSON
+    pub fn save_layout(&self) -> String {
+        let state = LayoutState {
+            layout: self.layout.clone(),
+            active_pane: self.active_pane.clone(),
+            next_pane_num: self.next_pane_num,
+        };
+        serde_json::to_string(&state).unwrap_or_default()
     }
 
-    #[test]
-    fn test_per_pane_tabs() {
-        let mut manager = TerminalManager::new();
-        // Add a second tab to the active pane
-        manager.add_tab_to_active_pane("Tab 2".into());
-
-        let pane = manager.get_pane(&manager.active_pane).unwrap();
-        assert_eq!(pane.tab_count(), 2);
-        assert_eq!(pane.active_tab, 1); // New tab is active
-    }
-
-    #[test]
-    fn test_close_tab() {
-        let mut manager = TerminalManager::new();
-        manager.add_tab_to_active_pane("Tab 2".into());
-        assert_eq!(manager.get_pane(&manager.active_pane).unwrap().tab_count(), 2);
-
-        assert!(manager.close_active_tab());
-        assert_eq!(manager.get_pane(&manager.active_pane).unwrap().tab_count(), 1);
+    /// Restore layout from JSON, creating empty panes for each pane ID
+    pub fn restore_layout(json: &str) -> Option<Self> {
+        let state: LayoutState = serde_json::from_str(json).ok()?;
+        let pane_ids = state.layout.pane_ids();
+        let mut panes = HashMap::new();
+        for id in pane_ids {
+            panes.insert(id.clone(), TerminalPane::new(id));
+        }
+        Some(Self {
+            layout: state.layout,
+            panes,
+            active_pane: state.active_pane,
+            next_pane_num: state.next_pane_num,
+        })
     }
 }

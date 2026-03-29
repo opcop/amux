@@ -23,9 +23,9 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
         .items_center()
         .px_3()
         .py_1()
-        .bg(rgb(0x181825))
+        .bg(rgb(0x0a0a14))
         .border_t_1()
-        .border_color(rgb(0x313244))
+        .border_color(rgb(0x1a1a2a))
         .text_xs()
         .text_color(rgb(0x7f849c))
         // Left section

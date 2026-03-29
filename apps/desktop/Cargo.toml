@@ -11,6 +11,8 @@ gpui = ["amux-ui/gpui", "dep:gpui", "dep:gpui_platform", "dep:smol", "gpui_platf
 [dependencies]
 amux-core = { path = "../../crates/amux-core" }
 amux-platform = { path = "../../crates/amux-platform" }
+alacritty_terminal = "0.25"
+serde_json = "1"
 amux-ui = { path = "../../crates/amux-ui" }
 gpui = { git = "https://github.com/zed-industries/zed", optional = true }
 gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true }

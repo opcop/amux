@@ -3,7 +3,7 @@ use amux_ui::{DesktopApp, GpuiWindowModel};
 #[cfg(feature = "gpui")]
 use gpui::{
     rgb, App, AppContext, Context, FontWeight, IntoElement, Render, Window,
-    WindowOptions, px, div, prelude::*,
+    WindowOptions, px, div, prelude::*, Bounds, Pixels, UTF16Selection,
 };
 #[cfg(feature = "gpui")]
 use gpui_platform::application;
@@ -30,6 +30,8 @@ pub(crate) struct GpuiShellView {
     /// Current active workspace ID for terminal lookup
     active_workspace_id: String,
     focus_handle: gpui::FocusHandle,
+    /// Measured cell width from actual font metrics (0 = not yet measured)
+    measured_cell_width: f32,
     /// Mouse drag state for text selection
     selecting: bool,
     /// Context menu state
@@ -98,11 +100,35 @@ impl GpuiShellView {
             .map(|w| w.id.clone())
             .unwrap_or_else(|| "default".to_string());
 
-        // Create terminal manager for the initial workspace
+        // Restore or create terminal managers for all workspaces
         let mut workspace_terminals = std::collections::HashMap::new();
-        let mut tm = TerminalManager::new();
-        let _ = tm.spawn_in_active(Self::default_profile());
-        workspace_terminals.insert(active_ws_id.clone(), tm);
+        let layouts = Self::load_all_layouts();
+        for ws in &model.workspace_items {
+            let mut tm = if let Some(json) = layouts.get(&ws.id) {
+                TerminalManager::restore_layout(json).unwrap_or_else(TerminalManager::new)
+            } else {
+                TerminalManager::new()
+            };
+            // Spawn PTY in each pane that doesn't have one
+            let (shell, args) = Self::default_shell();
+            let cwd = Self::default_cwd();
+            for pane_id in tm.active_layout().cloned().map(|l| l.pane_ids()).unwrap_or_default() {
+                if let Some(pane) = tm.get_pane_mut(&pane_id) {
+                    if pane.active_terminal_ref().is_none() {
+                        let _ = tm.spawn_in_active(&shell, &args, cwd.as_deref());
+                    }
+                }
+            }
+            workspace_terminals.insert(ws.id.clone(), tm);
+        }
+        // Ensure active workspace has a terminal
+        if !workspace_terminals.contains_key(&active_ws_id) {
+            let mut tm = TerminalManager::new();
+            let (shell, args) = Self::default_shell();
+            let cwd = Self::default_cwd();
+            let _ = tm.spawn_in_active(&shell, &args, cwd.as_deref());
+            workspace_terminals.insert(active_ws_id.clone(), tm);
+        }
 
         Self {
             app,
@@ -111,6 +137,7 @@ impl GpuiShellView {
             workspace_terminals,
             active_workspace_id: active_ws_id,
             focus_handle,
+            measured_cell_width: 0.0,
             selecting: false,
             context_menu: None,
             resize_drag: None,
@@ -135,7 +162,11 @@ impl GpuiShellView {
     fn ensure_workspace_terminal(&mut self, workspace_id: &str) {
         if !self.workspace_terminals.contains_key(workspace_id) {
             let mut tm = TerminalManager::new();
-            let _ = tm.spawn_in_active(Self::default_profile());
+            {
+            let (shell, args) = Self::default_shell();
+            let cwd = Self::default_cwd();
+            let _ = tm.spawn_in_active(&shell, &args, cwd.as_deref());
+        }
             self.workspace_terminals.insert(workspace_id.to_string(), tm);
         }
     }
@@ -146,15 +177,76 @@ impl GpuiShellView {
         self.active_workspace_id = workspace_id.to_string();
     }
 
-    /// Copy selected text to clipboard
-    fn copy_selection(&self, cx: &mut Context<Self>) {
-        if let Some(term) = self.terminal_manager().active_terminal_ref() {
-            let em = term.emulator();
-            let text = em.selection().get_selected_text(em.grid());
-            if !text.is_empty() {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-            }
+    /// Get the default shell program and args for the current platform
+    fn default_shell() -> (String, Vec<String>) {
+        if cfg!(target_os = "windows") {
+            let shell = if std::process::Command::new("pwsh.exe").arg("--version").output().is_ok() {
+                "pwsh.exe"
+            } else {
+                "powershell.exe"
+            };
+            // -NoExit keeps shell open after running the init command
+            // PSStyle fix removes background colors from directory listings
+            (shell.to_string(), vec![
+                "-NoLogo".to_string(),
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                "$PSStyle.FileInfo.Directory = \"`e[34;1m\"; $PSStyle.FileInfo.Executable = \"`e[32;1m\"".to_string(),
+            ])
+        } else {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            (shell, vec!["-l".to_string()])
         }
+    }
+
+    fn default_cwd() -> Option<String> {
+        std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string())
+    }
+
+    /// Get layout storage path
+    fn layout_file_path() -> std::path::PathBuf {
+        let home = if cfg!(target_os = "windows") {
+            std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())
+        } else {
+            std::env::var("HOME").unwrap_or_else(|_| ".".into())
+        };
+        std::path::PathBuf::from(home).join(".amux").join("layouts.json")
+    }
+
+    /// Save all workspace layouts to disk
+    fn save_all_layouts(&self) {
+        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (ws_id, tm) in &self.workspace_terminals {
+            map.insert(ws_id.clone(), tm.save_layout());
+        }
+        let path = Self::layout_file_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(&map) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    /// Load all workspace layouts from disk
+    fn load_all_layouts() -> std::collections::HashMap<String, String> {
+        let path = Self::layout_file_path();
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            serde_json::from_str(&data).unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        }
+    }
+
+    fn spawn_terminal_in_active(&mut self) {
+        let (shell, args) = Self::default_shell();
+        let cwd = Self::default_cwd();
+        let _ = self.terminal_manager_mut().spawn_in_active(&shell, &args, cwd.as_deref());
+    }
+
+    /// Copy selected text to clipboard (TODO: integrate alacritty selection)
+    fn copy_selection(&self, _cx: &mut Context<Self>) {
+        // Selection will be re-implemented with alacritty's selection system
     }
 
     /// Paste from clipboard into terminal
@@ -163,13 +255,15 @@ impl GpuiShellView {
             .and_then(|item| item.text().map(|s| s.to_string()));
         if let Some(text) = text {
             if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                let bracketed = term.emulator().bracketed_paste();
+                let bracketed = term.with_term(|t| {
+                    t.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+                });
                 if bracketed {
-                    let _ = term.send_input(b"\x1b[200~");
+                    term.send_input(b"\x1b[200~");
                 }
-                let _ = term.send_input(text.as_bytes());
+                term.send_input(text.as_bytes());
                 if bracketed {
-                    let _ = term.send_input(b"\x1b[201~");
+                    term.send_input(b"\x1b[201~");
                 }
             }
         }
@@ -190,9 +284,7 @@ impl GpuiShellView {
 
     /// Build context menu items based on current state
     fn build_context_menu_items(&self) -> Vec<ContextMenuItem> {
-        let has_selection = self.terminal_manager().active_terminal_ref()
-            .map(|t| !t.emulator().selection().is_empty())
-            .unwrap_or(false);
+        let has_selection = false; // TODO: integrate alacritty selection
 
         let mut items = vec![
             ContextMenuItem::action("Copy", Some("Ctrl+C"), has_selection),
@@ -226,24 +318,21 @@ impl GpuiShellView {
         match label {
             "Copy" => {
                 self.copy_selection(cx);
-                if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                    term.emulator_mut().selection_mut().clear();
-                }
             }
             "Paste" => {
                 self.paste_clipboard(cx);
             }
             "Split Right" => {
                 self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-                let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+                self.spawn_terminal_in_active();
             }
             "Split Down" => {
                 self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
-                let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+                self.spawn_terminal_in_active();
             }
             "New Tab" => {
                 self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
-                let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+                self.spawn_terminal_in_active();
             }
             "Close Pane" => {
                 self.terminal_manager_mut().close_active_pane();
@@ -252,7 +341,7 @@ impl GpuiShellView {
                 if let Some(term) = self.terminal_manager_mut().active_terminal() {
                     // Send Ctrl+L to PTY — shell clears screen and redraws prompt
                     let _ = term.send_input(&[0x0c]); // 0x0c = Form Feed = Ctrl+L
-                    term.clear_scrollback();
+                    // Alacritty manages scrollback internally
                 }
             }
             "Launch Claude" => {
@@ -277,38 +366,6 @@ impl GpuiShellView {
         cx.notify();
     }
 
-    /// Build a default terminal launch profile for the current platform
-    fn default_profile() -> amux_core::TerminalLaunchProfile {
-        let (target, shell, cwd) = if cfg!(target_os = "windows") {
-            (
-                amux_core::WorkspaceTarget::WindowsPath {
-                    path: std::env::current_dir().unwrap_or_default(),
-                },
-                amux_core::ShellKind::PowerShell,
-                std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .ok(),
-            )
-        } else {
-            (
-                amux_core::WorkspaceTarget::WindowsPath {
-                    path: std::env::current_dir().unwrap_or_default(),
-                },
-                amux_core::ShellKind::PowerShell, // On Linux, build_pty_command ignores this and uses $SHELL
-                std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .ok(),
-            )
-        };
-        amux_core::TerminalLaunchProfile {
-            target,
-            shell,
-            cwd,
-            env: std::collections::BTreeMap::new(),
-            title: Some("Terminal".to_string()),
-        }
-    }
-
     /// Handle key input for the terminal
     pub fn handle_terminal_input(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool) {
         use amux_platform::terminal::keys;
@@ -319,10 +376,10 @@ impl GpuiShellView {
             "tab" => "Tab",
             "escape" => "Escape",
             "backspace" => "Backspace",
-            "arrowup" => "ArrowUp",
-            "arrowdown" => "ArrowDown",
-            "arrowleft" => "ArrowLeft",
-            "arrowright" => "ArrowRight",
+            "up" | "arrowup" => "ArrowUp",
+            "down" | "arrowdown" => "ArrowDown",
+            "left" | "arrowleft" => "ArrowLeft",
+            "right" | "arrowright" => "ArrowRight",
             "home" => "Home",
             "end" => "End",
             "pageup" => "PageUp",
@@ -347,15 +404,13 @@ impl GpuiShellView {
         
         // Check app cursor key mode from active terminal
         let app_cursor = self.terminal_manager().active_terminal_ref()
-            .map(|t| t.emulator().app_cursor_keys())
+            .map(|t| t.with_term(|term| term.mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR)))
             .unwrap_or(false);
         let input = keys::to_pty_with_mode(normalized_key, ctrl, shift, alt, app_cursor);
 
         // Only send to PTY - PTY will echo back, no local echo needed
         if let Some(terminal) = self.terminal_manager_mut().active_terminal() {
-            if terminal.is_active() {
-                let _ = terminal.send_input(&input);
-            }
+            terminal.send_input(&input);
         }
         
         // Don't request re-render here - the 60fps polling loop will trigger re-render when PTY output arrives
@@ -374,11 +429,8 @@ impl Render for GpuiShellView {
         let workspaces = self.model.workspace_items.clone();
         let model_ref = &self.model;
 
-        // Poll ALL workspace terminal managers for PTY output
-        let mut had_output = false;
-        for tm in self.workspace_terminals.values_mut() {
-            had_output |= tm.poll_all();
-        }
+        let cell_w = crate::gpui_terminal::CELL_WIDTH;
+        let cell_h = crate::gpui_terminal::CELL_HEIGHT;
 
         // Resize terminals — skip during drag to avoid content loss
         if self.resize_drag.is_none() {
@@ -389,20 +441,35 @@ impl Render for GpuiShellView {
             let content_h = vp.height.as_f32() - status_bar_h;
             self.terminal_manager_mut().resize_all_panes(
                 content_w, content_h,
-                crate::gpui_terminal::CELL_WIDTH,
-                crate::gpui_terminal::CELL_HEIGHT,
+                cell_w,
+                cell_h,
             );
         }
 
 
         
+        // Register IME input handler for Chinese/Japanese/Korean input
+        let view_entity = cx.entity().clone();
+        let focus_for_ime = self.focus_handle.clone();
+
         // Main layout - limux/mori style dark theme
         div()
             .track_focus(&self.focus_handle)
+            // Canvas to register IME handler during paint phase
+            .child(gpui::canvas(
+                move |bounds, _window, _cx| bounds,
+                move |bounds, _, window, cx| {
+                    window.handle_input(
+                        &focus_for_ime,
+                        gpui::ElementInputHandler::new(bounds, view_entity),
+                        cx,
+                    );
+                },
+            ).size_full().absolute())
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x1e1e2e))
+            .bg(rgb(0x1d1f21))
             .text_color(rgb(0xffffff))
             .on_key_down(cx.listener(|this, event, window, cx| {
                 this.on_global_key_down(event, window, cx);
@@ -421,9 +488,8 @@ impl Render for GpuiShellView {
                 }
                 let sidebar_w = if this.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
                 let (col, row) = Self::pixel_to_cell(event.position, sidebar_w);
-                if let Some(term) = this.terminal_manager_mut().active_terminal() {
-                    term.emulator_mut().set_selection_start(col, row);
-                }
+                // TODO: integrate alacritty selection
+                let _ = (col, row);
                 this.selecting = true;
                 cx.notify();
             }))
@@ -446,9 +512,8 @@ impl Render for GpuiShellView {
                 if !this.selecting { return; }
                 let sidebar_w = if this.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
                 let (col, row) = Self::pixel_to_cell(event.position, sidebar_w);
-                if let Some(term) = this.terminal_manager_mut().active_terminal() {
-                    term.emulator_mut().set_selection_end(col, row);
-                }
+                // TODO: integrate alacritty selection
+                let _ = (col, row);
                 cx.notify();
             }))
             // Mouse: end selection or resize drag on button up
@@ -464,10 +529,26 @@ impl Render for GpuiShellView {
                     gpui::ScrollDelta::Pixels(pt) => -pt.y.as_f32() / crate::gpui_terminal::CELL_HEIGHT,
                 };
                 if let Some(term) = this.terminal_manager_mut().active_terminal() {
-                    if lines > 0.0 {
-                        term.emulator_mut().scroll_up(lines.ceil() as usize);
-                    } else if lines < 0.0 {
-                        term.emulator_mut().scroll_down((-lines).ceil() as usize);
+                    // Check if TUI app has mouse reporting enabled
+                    let mouse_mode = term.with_term(|t| {
+                        t.mode().contains(alacritty_terminal::term::TermMode::MOUSE_MODE)
+                    });
+                    if mouse_mode {
+                        // Forward scroll as mouse button events to PTY
+                        // Button 64 = scroll up, 65 = scroll down (SGR encoding)
+                        let count = lines.abs().ceil() as usize;
+                        let button = if lines > 0.0 { 64 } else { 65 };
+                        for _ in 0..count {
+                            let seq = format!("\x1b[<{};1;1M\x1b[<{};1;1m", button, button);
+                            term.send_input(seq.as_bytes());
+                        }
+                    } else {
+                        // No mouse mode: scroll our scrollback buffer
+                        if lines > 0.0 {
+                            term.scroll_up(lines.ceil() as usize);
+                        } else if lines < 0.0 {
+                            term.scroll_down((-lines).ceil() as usize);
+                        }
                     }
                 }
                 cx.notify();
@@ -557,7 +638,7 @@ impl Render for GpuiShellView {
                                                 .bg(bg_color)
                                                 .cursor_pointer()
                                                 .hover(|d| d.bg(rgb(0x252530)))
-                                                .when(is_active, |d| d.border_l_2().border_color(rgb(0x89b4fa)))
+                                                .when(is_active, |d| d.border_l_2().border_color(rgb(0x585b70)))
                                                 // Click: switch workspace; double-click: rename
                                                 .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
                                                     if event.click_count() >= 2 {
@@ -671,11 +752,11 @@ impl Render for GpuiShellView {
                                 let content_w = vp.width.as_f32() - sidebar_w;
                                 let status_bar_h = 28.0_f32;
                                 let content_h = vp.height.as_f32() - status_bar_h;
-                                let cursor_blink_on = (self.cursor_blink_frame / 30) % 2 == 0;
+                                let cursor_blink_on = true; // cursor always visible, no blink
                                 if let Some(layout) = self.terminal_manager_mut().active_layout().cloned() {
                                     render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, cx)
                                 } else {
-                                    div().flex_1().bg(rgb(0x1e1e2e)).child("No terminal").into_any_element()
+                                    div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
                                 }
                             })
                     ),
@@ -716,6 +797,69 @@ impl Render for GpuiShellView {
     }
 }
 
+/// IME input handler — enables Chinese/Japanese/Korean input
+#[cfg(feature = "gpui")]
+impl gpui::EntityInputHandler for GpuiShellView {
+    fn text_for_range(
+        &mut self, _range: std::ops::Range<usize>, _adjusted: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window, _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self, _ignore: bool, _window: &mut Window, _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection { range: 0..0, reversed: false })
+    }
+
+    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
+        None
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
+    fn replace_text_in_range(
+        &mut self, _range: Option<std::ops::Range<usize>>, text: &str,
+        _window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() { return; }
+
+        // If renaming workspace, send text to rename field instead of terminal
+        if let Some((_, ref mut rename_text)) = self.renaming_workspace {
+            rename_text.push_str(text);
+            cx.notify();
+            return;
+        }
+
+        // Send to terminal PTY
+        if let Some(term) = self.terminal_manager_mut().active_terminal() {
+            term.send_input(text.as_bytes());
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self, _range: Option<std::ops::Range<usize>>, _new_text: &str,
+        _selected: Option<std::ops::Range<usize>>, _window: &mut Window, _cx: &mut Context<Self>,
+    ) {
+        // IME composition in progress — we don't show inline preview for terminal
+    }
+
+    fn bounds_for_range(
+        &mut self, _range: std::ops::Range<usize>, _element_bounds: Bounds<Pixels>,
+        _window: &mut Window, _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        None
+    }
+
+    fn character_index_for_point(
+        &mut self, _point: gpui::Point<Pixels>, _window: &mut Window, _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 #[cfg(feature = "gpui")]
 impl GpuiShellView {
     fn refresh_model(&mut self) {
@@ -732,6 +876,7 @@ impl GpuiShellView {
         let ctrl = keystroke.modifiers.control;
         let shift = keystroke.modifiers.shift;
         let alt = keystroke.modifiers.alt;
+
         let key = &keystroke.key;
 
         let modifier = if ctrl && shift {
@@ -784,16 +929,7 @@ impl GpuiShellView {
                     return;
                 }
                 _ => {
-                    // Type characters into rename field
-                    if !ctrl && !alt && key.len() == 1 {
-                        text.push_str(key);
-                        cx.notify();
-                        return;
-                    } else if keystr == "space" {
-                        text.push(' ');
-                        cx.notify();
-                        return;
-                    }
+                    // Character input handled by replace_text_in_range (IME handler)
                     return;
                 }
             }
@@ -846,21 +982,9 @@ impl GpuiShellView {
                 }
                 "ctrl+c" => {
                     // If there's a selection, copy it; otherwise send Ctrl+C to PTY
-                    let has_selection = self.terminal_manager_mut().active_terminal_ref()
-                        .map(|t| !t.emulator().selection().is_empty())
-                        .unwrap_or(false);
-                    if has_selection {
-                        self.copy_selection(cx);
-                        // Clear selection after copy
-                        if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                            term.emulator_mut().selection_mut().clear();
-                        }
-                        cx.notify();
-                        return;
-                    }
-                    // No selection: send Ctrl+C (interrupt) to PTY
+                    // Send Ctrl+C (interrupt) to PTY
                     if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                        let _ = term.send_input(&[0x03]);
+                        term.send_input(&[0x03]);
                     }
                     cx.notify();
                     return;
@@ -873,19 +997,19 @@ impl GpuiShellView {
                 // Terminal pane operations
                 "ctrl+d" => {
                     self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-                    let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+                    self.spawn_terminal_in_active();
                     cx.notify();
                     return;
                 }
                 "ctrl+shift+d" => {
                     self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
-                    let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+                    self.spawn_terminal_in_active();
                     cx.notify();
                     return;
                 }
                 "ctrl+t" => {
                     self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
-                    let _ = self.terminal_manager_mut().spawn_in_active(Self::default_profile());
+                    self.spawn_terminal_in_active();
                     cx.notify();
                     return;
                 }
@@ -929,8 +1053,7 @@ impl GpuiShellView {
                 // Terminal operations
                 "ctrl+k" => {
                     if let Some(terminal) = self.terminal_manager_mut().active_terminal() {
-                        let _ = terminal.send_input(&[0x0c]); // Ctrl+L to shell
-                        terminal.clear_scrollback();
+                        terminal.send_input(&[0x0c]); // Ctrl+L to shell
                         cx.notify();
                     }
                     return;
@@ -1024,12 +1147,13 @@ impl GpuiShellView {
                 cx.notify();
                 return;
             }
-            s if s.starts_with("arrow") || s.starts_with("f1") 
-                || s.starts_with("f2") || s.starts_with("f3") || s.starts_with("f4") 
-                || s.starts_with("f5") || s.starts_with("f6") || s.starts_with("f7") 
-                || s.starts_with("f8") || s.starts_with("f9") || s.starts_with("f10") 
-                || s.starts_with("f11") || s.starts_with("f12") || s.starts_with("page") 
-                || s.starts_with("home") || s.starts_with("end") || s.starts_with("insert") 
+            s if s == "up" || s == "down" || s == "left" || s == "right"
+                || s.starts_with("arrow") || s.starts_with("f1")
+                || s.starts_with("f2") || s.starts_with("f3") || s.starts_with("f4")
+                || s.starts_with("f5") || s.starts_with("f6") || s.starts_with("f7")
+                || s.starts_with("f8") || s.starts_with("f9") || s.starts_with("f10")
+                || s.starts_with("f11") || s.starts_with("f12") || s.starts_with("page")
+                || s.starts_with("home") || s.starts_with("end") || s.starts_with("insert")
                 || s.starts_with("delete") => {
                 self.handle_terminal_input(key, ctrl, shift, alt);
                 cx.notify();
@@ -1038,12 +1162,8 @@ impl GpuiShellView {
             _ => {}
         }
 
-        // Regular character input — send to PTY
-        if key.len() == 1 {
-            self.handle_terminal_input(key, ctrl, shift, alt);
-            cx.notify();
-            return;
-        }
+        // Regular character input is handled by EntityInputHandler::replace_text_in_range
+        // (both English and Chinese/IME input go through that path to avoid double-sending)
     }
 }
 
@@ -1075,9 +1195,9 @@ fn render_context_menu(
         .top(px(y))
         .w(px(menu_w))
         .rounded(px(8.0))
-        .bg(rgb(0x1e1e2e))
+        .bg(rgb(0x282a2e))
         .border_1()
-        .border_color(rgb(0x313244))
+        .border_color(rgb(0x373b41))
         .shadow_lg()
         .py_1()
         .flex()
@@ -1087,7 +1207,7 @@ fn render_context_menu(
         let label = item.label;
         let enabled = item.enabled;
 
-        let text_color = if enabled { rgb(0xcdd6f4) } else { rgb(0x45475a) };
+        let text_color = if enabled { rgb(0xc5c8c6) } else { rgb(0x4a4d4e) };
 
         let row = div()
             .id(gpui::ElementId::Name(label.into()))
@@ -1098,7 +1218,7 @@ fn render_context_menu(
             .flex()
             .justify_between()
             .items_center()
-            .when(enabled, |d| d.hover(|d| d.bg(rgb(0x313244))))
+            .when(enabled, |d| d.hover(|d| d.bg(rgb(0x373b41))))
             .when(enabled, |d| {
                 d.on_click(cx.listener(move |this, _event, _window, cx| {
                     this.execute_context_menu_action(label, cx);
@@ -1113,7 +1233,7 @@ fn render_context_menu(
             .children(item.shortcut.map(|kb| {
                 div()
                     .text_xs()
-                    .text_color(rgb(0x585b70))
+                    .text_color(rgb(0x696d70))
                     .child(kb)
             }));
 
@@ -1125,7 +1245,7 @@ fn render_context_menu(
                     .mx_2()
                     .my_1()
                     .h(px(1.0))
-                    .bg(rgb(0x313244)),
+                    .bg(rgb(0x373b41)),
             );
         }
     }
@@ -1160,6 +1280,7 @@ fn render_layout(
     match layout {
         TabLayout::Single(pane_id) => {
             let is_active = active_pane_id == Some(pane_id);
+            let has_multiple_panes = manager.total_panes() > 1;
 
             // Build per-pane tab strip + terminal content
             let (tab_strip, content) = if let Some(pane) = manager.get_pane(pane_id) {
@@ -1184,9 +1305,9 @@ fn render_layout(
                             .py(px(4.0))
                             .text_xs()
                             .text_color(if is_tab_active { rgb(0xcdd6f4) } else { rgb(0x6c7086) })
-                            .bg(if is_tab_active { rgb(0x313244) } else { rgb(0x1e1e2e) })
+                            .bg(if is_tab_active { rgb(0x1a1a2a) } else { rgb(0x0c0c16) })
                             .border_b_2()
-                            .border_color(if is_tab_active { rgb(0x89b4fa) } else { rgb(0x1e1e2e) })
+                            .border_color(if is_tab_active { rgb(0x585b70) } else { rgb(0x0c0c16) })
                             .hover(|d| d.bg(rgb(0x313244)))
                             .child(title)
                             .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -1222,7 +1343,7 @@ fn render_layout(
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.terminal_manager_mut().set_active_pane(&pid_new);
                                 this.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
-                                let _ = this.terminal_manager_mut().spawn_in_active(GpuiShellView::default_profile());
+                                this.spawn_terminal_in_active();
                                 cx.notify();
                             })),
                     )
@@ -1240,7 +1361,7 @@ fn render_layout(
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.terminal_manager_mut().set_active_pane(&pid_sr);
                                 this.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-                                let _ = this.terminal_manager_mut().spawn_in_active(GpuiShellView::default_profile());
+                                this.spawn_terminal_in_active();
                                 cx.notify();
                             })),
                     )
@@ -1258,7 +1379,7 @@ fn render_layout(
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.terminal_manager_mut().set_active_pane(&pid_sd);
                                 this.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
-                                let _ = this.terminal_manager_mut().spawn_in_active(GpuiShellView::default_profile());
+                                this.spawn_terminal_in_active();
                                 cx.notify();
                             })),
                     )
@@ -1289,18 +1410,18 @@ fn render_layout(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .bg(rgb(0x1e1e2e))
+                    .bg(rgb(0x0c0c16))
                     .border_b_1()
-                    .border_color(rgb(0x313244))
+                    .border_color(rgb(0x1a1a2a))
                     .child(tabs_row)
                     .child(actions_row)
                     .into_any_element();
 
-                let term = pane.active_terminal_ref();
-                let em = term.emulator();
-                let cur = term.cursor();
-                let cur_shape = em.cursor_shape();
-                let content = crate::gpui_terminal::render_terminal(em, cur, cursor_blink_on, cur_shape).into_any_element();
+                let content = if let Some(term) = pane.active_terminal_ref() {
+                    crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on).into_any_element()
+                } else {
+                    div().flex_1().bg(rgb(0x1d1f21)).child("Starting...").into_any_element()
+                };
                 (tab_strip, content)
             } else {
                 (
@@ -1316,10 +1437,10 @@ fn render_layout(
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .bg(rgb(0x1e1e2e))
-                // Active pane: subtle top accent line only
-                .when(is_active, |d| d.border_t_2().border_color(rgb(0x89b4fa)))
-                .when(!is_active, |d| d.border_t_1().border_color(rgb(0x252530)))
+                .bg(rgb(0x1d1f21))
+                // Active pane indicator: only show when multiple panes exist
+                .when(is_active && has_multiple_panes, |d| d.border_t_2().border_color(rgb(0x45475a)))
+                .when(!is_active && has_multiple_panes, |d| d.border_t_1().border_color(rgb(0x252530)))
                 // Tab strip at top (limux style)
                 .child(tab_strip)
                 // Terminal content
@@ -1484,16 +1605,17 @@ pub fn run(app: &amux_ui::DesktopApp) {
                     loop {
                         Timer::after(std::time::Duration::from_millis(16)).await;
                         let result = this.update(cx, |this: &mut GpuiShellView, cx: &mut Context<GpuiShellView>| {
-                            let mut has_pty = false;
-                            for tm in this.workspace_terminals.values_mut() {
-                                has_pty |= tm.poll_all();
-                            }
                             let has_drag = this.resize_drag.is_some();
                             // Cursor blink: toggle every ~30 frames (500ms at 60fps)
                             this.cursor_blink_frame = this.cursor_blink_frame.wrapping_add(1);
-                            let blink_notify = this.cursor_blink_frame % 30 == 0;
-                            if has_pty || has_drag || blink_notify {
+                            // Always notify — alacritty's event loop updates Term in background,
+                            // we need to re-render to pick up changes. Throttle to ~15fps when idle.
+                            if has_drag || this.cursor_blink_frame % 4 == 0 {
                                 cx.notify();
+                            }
+                            // Auto-save layouts every ~5 seconds (300 frames at 60fps)
+                            if this.cursor_blink_frame % 300 == 0 {
+                                this.save_all_layouts();
                             }
                         });
                         if result.is_err() {

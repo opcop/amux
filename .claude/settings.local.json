@@ -11,7 +11,8 @@
       "Bash(rustup show:*)",
       "Skill(browse)",
       "WebSearch",
-      "Bash(cargo search:*)"
+      "Bash(cargo search:*)",
+      "Bash(cargo tree:*)"
     ]
   }
 }
