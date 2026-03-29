@@ -95,8 +95,14 @@ pub fn render_alacritty_terminal(
     term: &amux_platform::terminal::alacritty_view::AlacrittyTerminal,
     cursor_blink_on: bool,
     metrics: &CellMetrics,
+    is_active_pane: bool,
 ) -> impl IntoElement {
-    let data = collect_render_data(term, cursor_blink_on);
+    let mut data = collect_render_data(term, cursor_blink_on);
+    // Active pane: beam cursor (竖线) — visual indicator of which pane is focused.
+    // Inactive pane: block cursor (方块).
+    if data.cursor_visible {
+        data.cursor_shape = if is_active_pane { 1 } else { 0 }; // 1=beam, 0=block
+    }
     let m = metrics.clone();
 
     let total_w = data.cols as f32 * metrics.width;
@@ -124,6 +130,8 @@ struct RenderData {
     /// 0=block, 1=beam, 2=underline
     cursor_shape: u8,
     cursor_color: Rgba,
+    /// Selection: vec of (row, start_col, end_col) for highlighted cells
+    selection_ranges: Vec<(usize, usize, usize)>,
     cursor_text_color: Rgba,
     default_bg: Rgba,
 }
@@ -164,6 +172,8 @@ struct PrepaintData {
     bg_rects: Vec<PaintRect>,
     /// Block/box drawing character rectangles
     special_rects: Vec<PaintRect>,
+    /// Selection highlight rectangles
+    selection_rects: Vec<PaintRect>,
     /// Shaped text lines with positions
     text_lines: Vec<PaintText>,
     /// Cursor overlay rectangles (paint last)
@@ -256,6 +266,24 @@ fn collect_render_data(
             _ => 0,
         };
 
+        // Extract selection ranges for highlighting
+        let mut selection_ranges = Vec::new();
+        if let Some(ref sel) = t.selection {
+            if let Some(range) = sel.to_range(t) {
+                use alacritty_terminal::index::Line;
+                let sel_start = range.start;
+                let sel_end = range.end;
+                for line in sel_start.line.0..=sel_end.line.0 {
+                    if line < 0 { continue; }
+                    let r = line as usize;
+                    if r >= rows { continue; }
+                    let c_start = if line == sel_start.line.0 { sel_start.column.0 } else { 0 };
+                    let c_end = if line == sel_end.line.0 { sel_end.column.0 } else { cols.saturating_sub(1) };
+                    selection_ranges.push((r, c_start, c_end));
+                }
+            }
+        }
+
         RenderData {
             grid,
             rows,
@@ -267,6 +295,7 @@ fn collect_render_data(
             cursor_color,
             cursor_text_color,
             default_bg,
+            selection_ranges,
         }
     })
 }
@@ -290,8 +319,22 @@ fn prepaint_terminal(
 
     let mut bg_rects = Vec::with_capacity(data.rows * 4);
     let mut special_rects = Vec::with_capacity(64);
+    let mut selection_rects = Vec::new();
     let mut text_lines = Vec::with_capacity(data.rows * 8);
     let mut cursor_rects = Vec::new();
+
+    // Build selection highlight rects
+    let selection_bg = Rgba { r: 0.2, g: 0.35, b: 0.6, a: 1.0 }; // blue highlight
+    for &(row, c_start, c_end) in &data.selection_ranges {
+        let x = bounds.origin.x + px(c_start as f32 * cell_w);
+        let y = bounds.origin.y + px(row as f32 * cell_h);
+        let w = ((c_end + 1).saturating_sub(c_start)) as f32 * cell_w;
+        selection_rects.push(PaintRect {
+            origin: point(x, y),
+            size: size(px(w), px(cell_h)),
+            color: selection_bg,
+        });
+    }
 
     // Apply block cursor colors directly to the grid cell.
     // For wide (CJK) characters, also color the continuation cell so the
@@ -500,6 +543,7 @@ fn prepaint_terminal(
     PrepaintData {
         bg_rects,
         special_rects,
+        selection_rects,
         text_lines,
         cursor_rects,
         line_height,
@@ -517,12 +561,17 @@ fn paint_terminal(data: PrepaintData, window: &mut Window, cx: &mut gpui::App) {
         paint_rect(rect, window);
     }
 
-    // Layer 2: Block/box drawing characters
+    // Layer 2: Selection highlight (under text, over bg)
+    for rect in &data.selection_rects {
+        paint_rect(rect, window);
+    }
+
+    // Layer 3: Block/box drawing characters
     for rect in &data.special_rects {
         paint_rect(rect, window);
     }
 
-    // Layer 3: Text glyphs
+    // Layer 4: Text glyphs
     for line in &data.text_lines {
         let _ = line.shaped.paint(
             line.origin,

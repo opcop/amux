@@ -22,6 +22,8 @@ pub enum SplitDirection {
 /// A terminal tab inside a pane
 pub struct PaneTab {
     pub title: String,
+    /// User set a custom title (overrides terminal-reported title)
+    pub custom_title: bool,
     pub terminal: Option<AlacrittyTerminal>,
 }
 
@@ -38,6 +40,7 @@ impl TerminalPane {
             id,
             tabs: vec![PaneTab {
                 title: "Terminal".to_string(),
+                custom_title: false,
                 terminal: None,
             }],
             active_tab: 0,
@@ -58,6 +61,7 @@ impl TerminalPane {
     pub fn add_tab(&mut self, title: String) -> usize {
         self.tabs.push(PaneTab {
             title,
+            custom_title: false,
             terminal: None,
         });
         self.active_tab = self.tabs.len() - 1;
@@ -87,9 +91,15 @@ impl TerminalPane {
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                let title = t.terminal.as_ref()
-                    .and_then(|term| term.title())
-                    .unwrap_or_else(|| t.title.clone());
+                let title = if t.custom_title {
+                    // User-defined title takes priority
+                    t.title.clone()
+                } else {
+                    // Use terminal-reported title, fallback to default
+                    t.terminal.as_ref()
+                        .and_then(|term| term.title())
+                        .unwrap_or_else(|| t.title.clone())
+                };
                 (i, title, i == self.active_tab)
             })
             .collect()

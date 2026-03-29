@@ -142,6 +142,8 @@ pub fn parse_command(input: &str, active_pane_id: Option<PaneId>) -> Result<AppC
             distro: (*distro).into(),
             path: (*path).into(),
         })),
+        ["workspace", "close"] => Ok(AppCommand::CloseWorkspace { id: None }),
+        ["workspace", "close", id] => Ok(AppCommand::CloseWorkspace { id: Some((*id).into()) }),
         ["pane", "split-right"] => {
             let pane_id = active_pane_id.ok_or_else(|| "no active pane".to_string())?;
             Ok(AppCommand::Ui(UiAction::SplitPane {

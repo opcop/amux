@@ -42,6 +42,8 @@ pub(crate) struct GpuiShellView {
     cursor_blink_frame: u32,
     /// Workspace rename state: (workspace_id, current_text)
     renaming_workspace: Option<(String, String)>,
+    /// Tab rename state: (pane_id, tab_index, current_text)
+    renaming_tab: Option<(String, usize, String)>,
     /// Cached Vibe Coding tool availability: vec of (tool_id, label, env)
     detected_vibe_tools: Vec<(&'static str, &'static str, &'static str)>,
     /// Whether WSL is available (cached at startup, Windows only)
@@ -213,6 +215,7 @@ impl GpuiShellView {
             resize_drag: None,
             cursor_blink_frame: 0,
             renaming_workspace: None,
+            renaming_tab: None,
             detected_vibe_tools: Self::detect_all_vibe_tools(),
             zoomed_pane: None,
             workspace_order: ws_order,
@@ -677,9 +680,18 @@ impl GpuiShellView {
         }
     }
 
-    /// Copy selected text to clipboard (TODO: integrate alacritty selection)
-    fn copy_selection(&self, _cx: &mut Context<Self>) {
-        // Selection will be re-implemented with alacritty's selection system
+    /// Copy selected text to clipboard via alacritty's selection.
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(term) = self.terminal_manager_mut().active_terminal() {
+            let text = term.with_term(|t| t.selection_to_string());
+            if let Some(text) = text {
+                if !text.is_empty() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }
+            // Clear selection after copy
+            term.with_term_mut(|t| { t.selection = None; });
+        }
     }
 
     /// Paste from clipboard into terminal
@@ -926,12 +938,22 @@ impl Render for GpuiShellView {
                 if this.resize_drag.is_some() {
                     return;
                 }
-                let (mouse_mode, sgr) = this.active_term_mouse_mode();
+                let (mouse_mode, _) = this.active_term_mouse_mode();
                 let (col, row) = this.pixel_to_term_cell(event.position);
 
                 if mouse_mode {
                     this.send_mouse_event(0, col, row, true);
                 } else {
+                    // Start text selection via alacritty
+                    use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Direction};
+                    use alacritty_terminal::selection::{Selection, SelectionType};
+                    let point = AlacPoint::new(Line(row as i32), Column(col));
+                    let side = Direction::Left;
+                    if let Some(term) = this.terminal_manager_mut().active_terminal() {
+                        term.with_term_mut(|t| {
+                            t.selection = Some(Selection::new(SelectionType::Simple, point, side));
+                        });
+                    }
                     this.selecting = true;
                 }
                 cx.notify();
@@ -953,20 +975,40 @@ impl Render for GpuiShellView {
                 }
                 let (mouse_mode, _) = this.active_term_mouse_mode();
                 if mouse_mode && event.pressed_button == Some(gpui::MouseButton::Left) {
-                    // Forward drag (button 32 = motion with left held in SGR)
                     let (col, row) = this.pixel_to_term_cell(event.position);
                     this.send_mouse_event(32, col, row, true);
                 } else if this.selecting {
-                    // TODO: integrate alacritty selection
+                    // Extend selection
+                    use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Direction};
+                    let (col, row) = this.pixel_to_term_cell(event.position);
+                    let point = AlacPoint::new(Line(row as i32), Column(col));
+                    let side = Direction::Right;
+                    if let Some(term) = this.terminal_manager_mut().active_terminal() {
+                        term.with_term_mut(|t| {
+                            if let Some(ref mut sel) = t.selection {
+                                sel.update(point, side);
+                            }
+                        });
+                    }
                 }
                 cx.notify();
             }))
-            // Mouse: left button up — forward to PTY or end selection
+            // Mouse: left button up — forward to PTY or finalize selection + auto-copy
             .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
                 let (mouse_mode, _) = this.active_term_mouse_mode();
                 if mouse_mode {
                     let (col, row) = this.pixel_to_term_cell(event.position);
                     this.send_mouse_event(0, col, row, false);
+                } else if this.selecting {
+                    // Copy selected text to clipboard
+                    if let Some(term) = this.terminal_manager_mut().active_terminal() {
+                        let text = term.with_term(|t| t.selection_to_string());
+                        if let Some(text) = text {
+                            if !text.is_empty() {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                            }
+                        }
+                    }
                 }
                 this.selecting = false;
                 this.resize_drag = None;
@@ -1089,12 +1131,15 @@ impl Render for GpuiShellView {
                                             let ws_name = item.name.clone();
                                             let drag_name = item.name.clone();
                                             let drag_id = item.id.clone();
+                                            let ws_id_del = item.id.clone();
+                                            let can_delete = workspaces.len() > 1;
                                             let is_renaming = self.renaming_workspace.as_ref()
                                                 .map(|(id, _)| id == &item.id)
                                                 .unwrap_or(false);
 
                                             div()
                                                 .id(gpui::ElementId::Name(format!("ws-{}", item.id).into()))
+                                                .group(format!("ws-group-{}", item.id))
                                                 .flex()
                                                 .items_center()
                                                 .px_3()
@@ -1105,7 +1150,7 @@ impl Render for GpuiShellView {
                                                 .bg(bg_color)
                                                 .cursor_grab()
                                                 .hover(|d| d.bg(rgb(0x252530)))
-                                                .when(is_active, |d| d.border_l_2().border_color(rgb(0x585b70)))
+                                                .when(is_active, |d| d.border_l_2().border_color(rgb(0x89b4fa)))
                                                 // Drag to reorder
                                                 .on_drag(
                                                     DragWorkspace { workspace_id: drag_id, name: drag_name, index: ws_idx },
@@ -1149,11 +1194,53 @@ impl Render for GpuiShellView {
                                                         .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
                                                         .into_any_element()
                                                 } else {
+                                                    let group_name = format!("ws-group-{}", item.id);
                                                     div()
-                                                        .text_sm()
-                                                        .text_color(text_color)
-                                                        .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                                                        .child(item.name.clone())
+                                                        .flex()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .flex_1()
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .overflow_hidden()
+                                                                .whitespace_nowrap()
+                                                                .text_sm()
+                                                                .text_color(text_color)
+                                                                .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                                                                .child(item.name.clone())
+                                                        )
+                                                        // Delete button: only visible on hover, hidden if last workspace
+                                                        .when(can_delete, |d| {
+                                                            d.child(
+                                                                div()
+                                                                    .id(gpui::ElementId::Name(format!("ws-del-{}", ws_id_del).into()))
+                                                                    .px(px(3.0))
+                                                                    .rounded(px(3.0))
+                                                                    .text_xs()
+                                                                    .text_color(rgb(0x181818)) // invisible by default
+                                                                    .group_hover(&group_name, |d| {
+                                                                        d.text_color(rgb(0x585b70))
+                                                                    })
+                                                                    .hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
+                                                                    .child("✕")
+                                                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                                                        let _ = this.app.run_command(&format!("workspace close {}", ws_id_del));
+                                                                        // Remove terminal manager for deleted workspace
+                                                                        this.workspace_terminals.remove(&ws_id_del);
+                                                                        this.workspace_order.retain(|id| id != &ws_id_del);
+                                                                        this.refresh_model();
+                                                                        // Switch to another workspace if we deleted the active one
+                                                                        if this.active_workspace_id == ws_id_del {
+                                                                            if let Some(first) = this.model.workspace_items.first() {
+                                                                                let new_id = first.id.clone();
+                                                                                this.switch_workspace_terminal(&new_id);
+                                                                            }
+                                                                        }
+                                                                        cx.notify();
+                                                                    }))
+                                                            )
+                                                        })
                                                         .into_any_element()
                                                 })
                                         })),
@@ -1237,9 +1324,9 @@ impl Render for GpuiShellView {
                                 if let Some(ref zpid) = self.zoomed_pane {
                                     let zpid = zpid.clone();
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &self.renaming_tab, cx)
                                 } else if let Some(layout) = self.terminal_manager_mut().active_layout().cloned() {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, cx)
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &self.renaming_tab, cx)
                                 } else {
                                     div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
                                 }
@@ -1295,7 +1382,7 @@ impl gpui::EntityInputHandler for GpuiShellView {
     fn selected_text_range(
         &mut self, _ignore: bool, _window: &mut Window, _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        Some(UTF16Selection { range: 0..0, reversed: false })
+        None // Don't report selection — prevents GPUI from drawing a stray text caret
     }
 
     fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
@@ -1310,8 +1397,14 @@ impl gpui::EntityInputHandler for GpuiShellView {
     ) {
         if text.is_empty() { return; }
 
-        // If renaming workspace, send text to rename field instead of terminal
+        // If renaming workspace, send text to rename field
         if let Some((_, ref mut rename_text)) = self.renaming_workspace {
+            rename_text.push_str(text);
+            cx.notify();
+            return;
+        }
+        // If renaming tab, send text to rename field
+        if let Some((_, _, ref mut rename_text)) = self.renaming_tab {
             rename_text.push_str(text);
             cx.notify();
             return;
@@ -1413,6 +1506,38 @@ impl GpuiShellView {
                     // Character input handled by replace_text_in_range (IME handler)
                     return;
                 }
+            }
+        }
+
+        // Tab rename handling
+        if let Some((ref pane_id, tab_idx, ref mut text)) = self.renaming_tab {
+            match keystr.as_str() {
+                "enter" => {
+                    let pid = amux_platform::terminal::manager::PaneId(pane_id.clone());
+                    let new_name = text.clone();
+                    if !new_name.is_empty() {
+                        if let Some(pane) = self.terminal_manager_mut().get_pane_mut(&pid) {
+                            if let Some(tab) = pane.tabs.get_mut(tab_idx) {
+                                tab.title = new_name;
+                                tab.custom_title = true;
+                            }
+                        }
+                    }
+                    self.renaming_tab = None;
+                    cx.notify();
+                    return;
+                }
+                "escape" => {
+                    self.renaming_tab = None;
+                    cx.notify();
+                    return;
+                }
+                "backspace" => {
+                    text.pop();
+                    cx.notify();
+                    return;
+                }
+                _ => return,
             }
         }
 
@@ -1783,6 +1908,7 @@ fn render_layout(
     cursor_blink_on: bool,
     metrics: &crate::gpui_terminal::CellMetrics,
     is_zoomed: bool,
+    renaming_tab: &Option<(String, usize, String)>,
     cx: &mut Context<GpuiShellView>,
 ) -> gpui::AnyElement {
     use amux_platform::terminal::manager::{PaneId, TabLayout};
@@ -1828,11 +1954,12 @@ fn render_layout(
                             .py(px(4.0))
                             .text_xs()
                             .cursor_grab()
-                            .text_color(if is_tab_active { rgb(0xcdd6f4) } else { rgb(0x6c7086) })
-                            .bg(if is_tab_active { rgb(0x1a1a2a) } else { rgb(0x0c0c16) })
+                            .text_color(if is_tab_active { rgb(0xcdd6f4) } else { rgb(0x7f849c) })
+                            .bg(if is_tab_active { rgb(0x1e1e2e) } else { rgb(0x11111b) })
                             .border_b_2()
-                            .border_color(if is_tab_active { rgb(0x585b70) } else { rgb(0x0c0c16) })
-                            .hover(|d| d.bg(rgb(0x313244)))
+                            .border_color(if is_tab_active { rgb(0x89b4fa) } else { rgb(0x11111b) })
+                            .when(is_tab_active, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                            .hover(|d| d.bg(rgb(0x252530)))
                             .on_drag(
                                 DragTab {
                                     source_pane: pid_drag,
@@ -1844,18 +1971,50 @@ fn render_layout(
                                     cx.new(|_| drag.clone())
                                 },
                             )
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.terminal_manager_mut().set_active_pane(&pid_click);
-                                this.terminal_manager_mut().set_active_tab_in_pane(idx);
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .flex_1()
-                                    .child(title)
-                            )
+                            .on_click({
+                                let pid_rename = pid_click.clone();
+                                let rename_title = title.clone();
+                                cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
+                                    if event.click_count() >= 2 {
+                                        // Double-click: start inline rename
+                                        this.renaming_tab = Some((pid_rename.0.clone(), idx, String::new()));
+                                    } else {
+                                        // Single click: switch tab
+                                        this.terminal_manager_mut().set_active_pane(&pid_click);
+                                        this.terminal_manager_mut().set_active_tab_in_pane(idx);
+                                    }
+                                    cx.notify();
+                                })
+                            })
+                            .child({
+                                let is_tab_renaming = renaming_tab.as_ref()
+                                    .map(|(p, i, _): &(String, usize, String)| p == &pid_for_tabs.0 && *i == idx)
+                                    .unwrap_or(false);
+                                if is_tab_renaming {
+                                    let rename_text = renaming_tab.as_ref()
+                                        .map(|(_, _, t): &(String, usize, String)| t.clone())
+                                        .unwrap_or_default();
+                                    div()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .text_sm()
+                                        .text_color(rgb(0xcdd6f4))
+                                        .bg(rgb(0x313244))
+                                        .rounded(px(2.0))
+                                        .border_1()
+                                        .border_color(rgb(0x89b4fa))
+                                        .px_1()
+                                        .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .flex_1()
+                                        .child(title)
+                                        .into_any_element()
+                                }
+                            })
                             .when(can_close_tab, |d| {
                                 d.child(
                                     div()
@@ -1888,8 +2047,8 @@ fn render_layout(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .px_1()
+                    .gap(px(2.0))
+                    .px_2()
                     // + New Tab
                     .child(
                         div()
@@ -1993,9 +2152,9 @@ fn render_layout(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .bg(rgb(0x0c0c16))
+                    .bg(rgb(0x11111b))
                     .border_b_1()
-                    .border_color(rgb(0x1a1a2a))
+                    .border_color(rgb(0x252530))
                     .child(tabs_row)
                     .child(actions_row)
                     // Zoom indicator: absolutely centered over the entire tab strip
@@ -2013,12 +2172,12 @@ fn render_layout(
                                 // Don't block clicks on tabs/buttons underneath
                                 .child(
                                     div()
-                                        .px(px(10.0))
+                                        .px_2()
                                         .py(px(2.0))
-                                        .rounded(px(10.0))
-                                        .bg(rgb(0x1a1a2e))
+                                        .rounded(px(8.0))
+                                        .bg(rgb(0x1e1e2e))
                                         .border_1()
-                                        .border_color(rgb(0x313244))
+                                        .border_color(rgb(0x45475a))
                                         .flex()
                                         .flex_row()
                                         .items_center()
@@ -2028,12 +2187,12 @@ fn render_layout(
                                                 .w(px(6.0))
                                                 .h(px(6.0))
                                                 .rounded(px(3.0))
-                                                .bg(rgb(0x89b4fa))
+                                                .bg(rgb(0xa6e3a1)) // green for "zoomed" state
                                         )
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0x89b4fa))
+                                                .text_color(rgb(0xa6adc8))
                                                 .child("ZOOMED")
                                         )
                                 )
@@ -2042,7 +2201,7 @@ fn render_layout(
                     .into_any_element();
 
                 let content = if let Some(term) = pane.active_terminal_ref() {
-                    crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics).into_any_element()
+                    crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active).into_any_element()
                 } else {
                     div().flex_1().bg(rgb(0x1d1f21)).child("Starting...").into_any_element()
                 };
@@ -2064,15 +2223,14 @@ fn render_layout(
                 .overflow_hidden()
                 .bg(rgb(0x1d1f21))
                 // Active pane indicator: only show when multiple panes exist
-                .when(is_active && has_multiple_panes, |d| d.border_t_2().border_color(rgb(0x45475a)))
-                .when(!is_active && has_multiple_panes, |d| d.border_t_1().border_color(rgb(0x252530)))
+                // No extra border — active pane is indicated by tab strip's blue underline
                 // Tab strip at top (limux style)
                 .child(tab_strip)
                 // Terminal content
                 .child(content)
                 // Drag-and-drop: visual feedback when dragging a tab over this pane
                 .drag_over::<DragTab>(|style, _, _, _| {
-                    style.border_2().border_color(rgb(0x89b4fa))
+                    style.border_t_2().border_color(rgb(0x585b70))
                 })
                 // Drag-and-drop: accept a dropped tab
                 .on_drop(cx.listener(move |this, drag: &DragTab, _window, cx| {
@@ -2113,7 +2271,7 @@ fn render_layout(
                 .w(px(left_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, cx));
+                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-h-{}", split_id).into()))
@@ -2144,7 +2302,7 @@ fn render_layout(
                 .w(px(right_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, cx));
+                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, cx));
 
             div()
                 .w(px(avail_w))
@@ -2174,7 +2332,7 @@ fn render_layout(
                 .w_full()
                 .h(px(top_h))
                 .overflow_hidden()
-                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, cx));
+                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-v-{}", split_id).into()))
@@ -2205,7 +2363,7 @@ fn render_layout(
                 .w_full()
                 .h(px(bottom_h))
                 .overflow_hidden()
-                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, cx));
+                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, cx));
 
             div()
                 .w(px(avail_w))

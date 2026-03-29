@@ -1,5 +1,5 @@
 #[cfg(feature = "gpui")]
-use gpui::{rgb, FontWeight, IntoElement, div, prelude::*};
+use gpui::{rgb, px, FontWeight, IntoElement, div, prelude::*};
 
 /// Runtime status bar data collected from actual terminal state
 #[cfg(feature = "gpui")]
@@ -22,25 +22,31 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
         .justify_between()
         .items_center()
         .px_3()
-        .py_1()
-        .bg(rgb(0x0a0a14))
+        .h(px(26.0))
+        .bg(rgb(0x11111b))
         .border_t_1()
-        .border_color(rgb(0x1a1a2a))
+        .border_color(rgb(0x252530))
         .text_xs()
-        .text_color(rgb(0x7f849c))
+        .text_color(rgb(0x6c7086))
         // Left section
         .child(
             div()
                 .flex()
-                .gap_4()
+                .gap_3()
                 .items_center()
-                // Workspace name
+                // Workspace indicator
                 .child(
                     div()
                         .flex()
-                        .gap_1()
+                        .gap(px(6.0))
                         .items_center()
-                        .child(div().w_1().h_1().rounded_full().bg(rgb(0x89b4fa)))
+                        .child(
+                            div()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded_full()
+                                .bg(rgb(0xa6e3a1))  // green dot = active
+                        )
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -48,23 +54,41 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                                 .child(workspace.clone()),
                         ),
                 )
+                // Separator
+                .child(div().w_px().h(px(12.0)).bg(rgb(0x313244)))
                 // Pane/Tab counts
                 .child(
                     div()
-                        .text_color(rgb(0x585b70))
-                        .child(format!("panes:{} tabs:{}", pane_count, tab_count)),
+                        .flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div().text_color(rgb(0x7f849c))
+                                .child(format!("{} panes", pane_count))
+                        )
+                        .child(
+                            div().text_color(rgb(0x585b70)).child("·")
+                        )
+                        .child(
+                            div().text_color(rgb(0x7f849c))
+                                .child(format!("{} tabs", tab_count))
+                        ),
                 ),
         )
         // Right section
         .child(
             div()
                 .flex()
-                .gap_4()
+                .gap_3()
                 .items_center()
                 .child(
                     div()
-                        .text_color(rgb(0x585b70))
-                        .child(format!("shell: {}", shell)),
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(3.0))
+                        .bg(rgb(0x1e1e2e))
+                        .text_color(rgb(0x7f849c))
+                        .child(shell.clone()),
                 ),
         )
 }

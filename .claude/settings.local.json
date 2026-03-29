@@ -12,7 +12,14 @@
       "Skill(browse)",
       "WebSearch",
       "Bash(cargo search:*)",
-      "Bash(cargo tree:*)"
+      "Bash(cargo tree:*)",
+      "Bash(rustc --print target-triple)",
+      "Bash(rustc -vV)",
+      "Bash(echo $PATH)",
+      "Bash(bash -ilc \"command -v claude >/dev/null 2>&1\")",
+      "Bash(bash -ilc \"command -v opencode >/dev/null 2>&1\")",
+      "Bash(bash -ilc \"command -v codex >/dev/null 2>&1\")",
+      "Bash(git checkout:*)"
     ]
   }
 }
