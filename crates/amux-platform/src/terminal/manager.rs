@@ -25,6 +25,10 @@ pub struct PaneTab {
     /// User set a custom title (overrides terminal-reported title)
     pub custom_title: bool,
     pub terminal: Option<AlacrittyTerminal>,
+    /// Activity indicator: set when new output detected, cleared when user views the tab
+    pub has_activity: bool,
+    /// Last known cursor line (for activity detection)
+    last_cursor_line: i32,
 }
 
 /// A pane with its own tab strip (like limux)
@@ -42,6 +46,8 @@ impl TerminalPane {
                 title: "Terminal".to_string(),
                 custom_title: false,
                 terminal: None,
+                has_activity: false,
+                last_cursor_line: 0,
             }],
             active_tab: 0,
         }
@@ -63,6 +69,8 @@ impl TerminalPane {
             title,
             custom_title: false,
             terminal: None,
+            has_activity: false,
+            last_cursor_line: 0,
         });
         self.active_tab = self.tabs.len() - 1;
         self.active_tab
@@ -86,21 +94,20 @@ impl TerminalPane {
     }
 
     /// Tab titles for rendering
-    pub fn tab_titles(&self) -> Vec<(usize, String, bool)> {
+    /// Returns (index, title, is_active, has_activity) for each tab.
+    pub fn tab_titles(&self) -> Vec<(usize, String, bool, bool)> {
         self.tabs
             .iter()
             .enumerate()
             .map(|(i, t)| {
                 let title = if t.custom_title {
-                    // User-defined title takes priority
                     t.title.clone()
                 } else {
-                    // Use terminal-reported title, fallback to default
                     t.terminal.as_ref()
                         .and_then(|term| term.title())
                         .unwrap_or_else(|| t.title.clone())
                 };
-                (i, title, i == self.active_tab)
+                (i, title, i == self.active_tab, t.has_activity)
             })
             .collect()
     }
@@ -467,6 +474,27 @@ impl TerminalManager {
 
     // === Resize ===
 
+    /// Reset all split ratios to 0.5 (equal split).
+    pub fn equalize_splits(&mut self) {
+        Self::reset_ratios(&mut self.layout);
+    }
+
+    fn reset_ratios(layout: &mut PaneLayout) {
+        match layout {
+            PaneLayout::Single(_) => {}
+            PaneLayout::Horizontal { left, right, ratio } => {
+                *ratio = 0.5;
+                Self::reset_ratios(left);
+                Self::reset_ratios(right);
+            }
+            PaneLayout::Vertical { top, bottom, ratio } => {
+                *ratio = 0.5;
+                Self::reset_ratios(top);
+                Self::reset_ratios(bottom);
+            }
+        }
+    }
+
     pub fn update_split_ratio(&mut self, first_pane_id: &PaneId, new_ratio: f32) {
         Self::update_ratio_in_layout(&mut self.layout, first_pane_id, new_ratio);
     }
@@ -491,6 +519,48 @@ impl TerminalManager {
                     || Self::update_ratio_in_layout(bottom, target_second, new_ratio)
             }
         }
+    }
+
+    // === Activity detection ===
+
+    /// Check all terminals for new output. Mark inactive pane tabs that have activity.
+    /// Called from the polling loop.
+    pub fn poll_activity(&mut self) {
+        use alacritty_terminal::grid::Dimensions;
+        let active_pane_id = self.active_pane.clone();
+        for (pane_id, pane) in &mut self.panes {
+            let is_active_pane = *pane_id == active_pane_id;
+            for (tab_idx, tab) in pane.tabs.iter_mut().enumerate() {
+                let is_active_tab = tab_idx == pane.active_tab && is_active_pane;
+                if let Some(ref term) = tab.terminal {
+                    let cursor_line = term.with_term(|t| {
+                        t.renderable_content().cursor.point.line.0
+                    });
+                    if cursor_line != tab.last_cursor_line {
+                        tab.last_cursor_line = cursor_line;
+                        if !is_active_tab {
+                            tab.has_activity = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clear activity flag for the active pane's active tab.
+    pub fn clear_active_activity(&mut self) {
+        if let Some(pane) = self.panes.get_mut(&self.active_pane) {
+            if let Some(tab) = pane.tabs.get_mut(pane.active_tab) {
+                tab.has_activity = false;
+            }
+        }
+    }
+
+    /// Check if any pane in this manager has activity (for workspace-level notification).
+    pub fn has_any_activity(&self) -> bool {
+        self.panes.values().any(|pane| {
+            pane.tabs.iter().any(|tab| tab.has_activity)
+        })
     }
 
     // === Layout / query ===

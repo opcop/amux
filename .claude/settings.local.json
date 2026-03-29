@@ -19,7 +19,10 @@
       "Bash(bash -ilc \"command -v claude >/dev/null 2>&1\")",
       "Bash(bash -ilc \"command -v opencode >/dev/null 2>&1\")",
       "Bash(bash -ilc \"command -v codex >/dev/null 2>&1\")",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(ldd --version)",
+      "Bash(ldd /mnt/d/repository/arden/Ai/ide/amux/target/release/amux-desktop)",
+      "Bash(chmod:*)"
     ]
   }
 }

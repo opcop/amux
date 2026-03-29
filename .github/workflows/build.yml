@@ -1,0 +1,153 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libvulkan-dev \
+            pkg-config cmake
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build -p amux-desktop --features gpui-linux --release
+
+      - name: Strip & package
+        run: |
+          strip target/release/amux-desktop
+          mkdir -p dist/amux-linux-x86_64
+          cp target/release/amux-desktop dist/amux-linux-x86_64/amux
+          cp -r assets/icons dist/amux-linux-x86_64/
+          cp assets/amux.desktop dist/amux-linux-x86_64/
+          cd dist && tar -czf amux-linux-x86_64.tar.gz amux-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amux-linux-x86_64
+          path: dist/amux-linux-x86_64.tar.gz
+
+  build-macos:
+    runs-on: macos-14  # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build -p amux-desktop --features gpui --release
+
+      - name: Package .app bundle
+        run: |
+          mkdir -p dist/AMUX.app/Contents/MacOS
+          mkdir -p dist/AMUX.app/Contents/Resources
+          cp target/release/amux-desktop dist/AMUX.app/Contents/MacOS/amux
+          strip dist/AMUX.app/Contents/MacOS/amux
+          cp assets/icons/amux-icon.svg dist/AMUX.app/Contents/Resources/
+          cat > dist/AMUX.app/Contents/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>amux</string>
+              <key>CFBundleIdentifier</key><string>com.amux.terminal</string>
+              <key>CFBundleName</key><string>AMUX</string>
+              <key>CFBundleVersion</key><string>0.1.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          cd dist && tar -czf amux-macos-aarch64.tar.gz AMUX.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amux-macos-aarch64
+          path: dist/amux-macos-aarch64.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build -p amux-desktop --features gpui --release
+
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Path dist\amux-windows-x86_64 -Force
+          Copy-Item target\release\amux-desktop.exe dist\amux-windows-x86_64\amux.exe
+          Copy-Item -Recurse assets\icons dist\amux-windows-x86_64\icons
+          Compress-Archive -Path dist\amux-windows-x86_64\* -DestinationPath dist\amux-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amux-windows-x86_64
+          path: dist/amux-windows-x86_64.zip
+
+  # Auto-create GitHub Release when tag is pushed
+  release:
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/amux-linux-x86_64/amux-linux-x86_64.tar.gz
+            artifacts/amux-macos-aarch64/amux-macos-aarch64.tar.gz
+            artifacts/amux-windows-x86_64/amux-windows-x86_64.zip
+          generate_release_notes: true

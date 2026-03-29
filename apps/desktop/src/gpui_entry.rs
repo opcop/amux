@@ -382,10 +382,23 @@ impl GpuiShellView {
         }
     }
 
-    /// Switch the active workspace terminal
+    /// Switch the active workspace terminal.
+    /// Auto-runs startup commands if the workspace is empty and has a startup file.
     fn switch_workspace_terminal(&mut self, workspace_id: &str) {
         self.ensure_workspace_terminal(workspace_id);
         self.active_workspace_id = workspace_id.to_string();
+
+        // Auto-run startup if workspace is empty and has a startup file
+        if self.is_workspace_empty() {
+            let ws_name = self.model.workspace_items.iter()
+                .find(|w| w.id == workspace_id)
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| workspace_id.to_string());
+            let path = Self::startup_file_path(&ws_name);
+            if path.exists() {
+                self.run_startup_commands();
+            }
+        }
     }
 
     /// Get the default shell program and args for the current platform
@@ -492,14 +505,209 @@ impl GpuiShellView {
         }
     }
 
-    /// Get layout storage path
-    fn layout_file_path() -> std::path::PathBuf {
+    /// Get the ~/.amux base directory
+    fn amux_dir() -> std::path::PathBuf {
         let home = if cfg!(target_os = "windows") {
             std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())
         } else {
             std::env::var("HOME").unwrap_or_else(|_| ".".into())
         };
-        std::path::PathBuf::from(home).join(".amux").join("layouts.json")
+        std::path::PathBuf::from(home).join(".amux")
+    }
+
+    /// Get layout storage path
+    fn layout_file_path() -> std::path::PathBuf {
+        Self::amux_dir().join("layouts.json")
+    }
+
+    /// Get startup file path for a workspace
+    fn startup_file_path(workspace_name: &str) -> std::path::PathBuf {
+        let safe_name = workspace_name.replace(['/', '\\', ':', ' '], "_");
+        Self::amux_dir().join("workspaces").join(format!("{}.startup", safe_name))
+    }
+
+    /// Parse a .startup file into pane commands.
+    /// Format:
+    ///   [pane:1 title=My Title]
+    ///   cd /some/dir
+    ///   command arg1 arg2
+    ///   [pane:2]
+    ///   another-command
+    /// Returns vec of (pane_number, custom_title, vec_of_commands)
+    fn parse_startup_file(path: &std::path::Path) -> Vec<(usize, Option<String>, Vec<String>)> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let mut result: Vec<(usize, Option<String>, Vec<String>)> = Vec::new();
+        let mut current_pane: usize = 1;
+        let mut current_title: Option<String> = None;
+        let mut current_cmds: Vec<String> = Vec::new();
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            // Check for [pane:N] or [pane:N title=xxx] header
+            if trimmed.starts_with("[pane:") && trimmed.ends_with(']') {
+                // Save previous pane
+                if !current_cmds.is_empty() {
+                    result.push((current_pane, current_title.take(), current_cmds.clone()));
+                    current_cmds.clear();
+                }
+                let inner = &trimmed[6..trimmed.len() - 1]; // "1 title=xxx" or "1"
+                if let Some(space_pos) = inner.find(' ') {
+                    current_pane = inner[..space_pos].parse().unwrap_or(1);
+                    // Parse key=value attributes
+                    let attrs = &inner[space_pos + 1..];
+                    if let Some(t) = attrs.strip_prefix("title=") {
+                        let t = t.trim();
+                        if !t.is_empty() {
+                            current_title = Some(t.to_string());
+                        }
+                    }
+                } else {
+                    current_pane = inner.parse().unwrap_or(1);
+                    current_title = None;
+                }
+            } else {
+                current_cmds.push(trimmed.to_string());
+            }
+        }
+        // Save last pane
+        if !current_cmds.is_empty() {
+            result.push((current_pane, current_title, current_cmds));
+        }
+        result
+    }
+
+    /// Check if workspace is "empty" (single pane, single tab, no splits).
+    fn is_workspace_empty(&self) -> bool {
+        let mgr = self.terminal_manager();
+        mgr.total_panes() == 1 && mgr.total_tabs() <= 1
+    }
+
+    /// Execute startup commands for the active workspace.
+    /// Creates panes as needed and sends commands to each.
+    fn run_startup_commands(&mut self) {
+        let ws_name = self.model.active_workspace_name
+            .clone()
+            .unwrap_or_else(|| self.active_workspace_id.clone());
+        let path = Self::startup_file_path(&ws_name);
+        let pane_cmds = Self::parse_startup_file(&path);
+        if pane_cmds.is_empty() {
+            return;
+        }
+
+        let (shell, shell_args) = Self::default_shell();
+        let cwd = Self::default_cwd();
+
+        for (i, (pane_num, custom_title, cmds)) in pane_cmds.iter().enumerate() {
+            // First pane already exists, subsequent panes need split
+            if i > 0 {
+                let direction = if i % 2 == 1 {
+                    SplitDirection::Horizontal
+                } else {
+                    SplitDirection::Vertical
+                };
+                self.terminal_manager_mut().split_active_pane(direction);
+                self.spawn_terminal_in_active();
+            }
+
+            // Send commands to the active terminal
+            if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                for cmd in cmds {
+                    let input = format!("{}\r", cmd);
+                    term.send_input(input.as_bytes());
+                }
+            }
+
+            // Set tab title: custom_title > last command name > pane:N
+            let active_id = self.terminal_manager().active_pane_id().cloned();
+            if let Some(ref pid) = active_id {
+                if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
+                    if let Some(tab) = pane.tabs.get_mut(pane.active_tab) {
+                        let title = if let Some(t) = custom_title {
+                            t.clone()
+                        } else if let Some(last_cmd) = cmds.last() {
+                            last_cmd.split_whitespace().next()
+                                .unwrap_or("Terminal").to_string()
+                        } else {
+                            format!("pane:{}", pane_num)
+                        };
+                        tab.title = title;
+                        tab.custom_title = custom_title.is_some();
+                    }
+                }
+            }
+        }
+
+        // Equalize splits after creating all panes
+        self.terminal_manager_mut().equalize_splits();
+    }
+
+    /// Open the startup file for editing in a new split pane.
+    fn edit_startup_file(&mut self) {
+        let ws_name = self.model.active_workspace_name
+            .clone()
+            .unwrap_or_else(|| self.active_workspace_id.clone());
+        let path = Self::startup_file_path(&ws_name);
+
+        // Create directory and template file if it doesn't exist
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let template = format!(
+                "# Startup commands for workspace: {}\n\
+                 # Each [pane:N] section creates a new terminal pane.\n\
+                 # Use [pane:N title=Name] to set a custom tab title.\n\
+                 # Lines are sent as commands to the shell.\n\
+                 #\n\
+                 # Example:\n\
+                 # [pane:1 title=Build]\n\
+                 # cd /my/project\n\
+                 # cargo watch -x check\n\
+                 #\n\
+                 # [pane:2 title=AI]\n\
+                 # cd /my/project\n\
+                 # claude\n",
+                ws_name
+            );
+            let _ = std::fs::write(&path, template);
+        }
+
+        // Open in a split pane with the user's editor
+        self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+            if cfg!(target_os = "windows") { "notepad".to_string() }
+            else { "nano".to_string() }
+        });
+        let cmd = format!("{} {}", editor, path.to_string_lossy());
+        let sh = if cfg!(target_os = "windows") {
+            let (ps, _) = Self::default_shell();
+            ps
+        } else {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+        };
+        let args = if cfg!(target_os = "windows") {
+            vec!["-NoLogo".to_string(), "-Command".to_string(), cmd]
+        } else {
+            vec!["-ilc".to_string(), cmd]
+        };
+        let _ = self.terminal_manager_mut().spawn_in_active(&sh, &args, None);
+
+        // Rename tab
+        let active_id = self.terminal_manager().active_pane_id().cloned();
+        if let Some(ref pid) = active_id {
+            if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
+                if let Some(tab) = pane.tabs.last_mut() {
+                    tab.title = "Startup Config".to_string();
+                    tab.custom_title = true;
+                }
+            }
+        }
     }
 
     /// Save all workspace layouts to disk
@@ -751,6 +959,20 @@ impl GpuiShellView {
                 .with_icon("WSL"));
         }
 
+        // Workspace startup commands
+        {
+            let ws_name = self.model.active_workspace_name
+                .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+            let has_startup = Self::startup_file_path(&ws_name).exists();
+            if let Some(last) = items.last_mut() {
+                last.separator_after = true;
+            }
+            if has_startup {
+                items.push(ContextMenuItem::action("Run Startup", None, true));
+            }
+            items.push(ContextMenuItem::action("Edit Startup", None, true));
+        }
+
         // Vibe Coding tools — from cached detection
         if !self.detected_vibe_tools.is_empty() {
             if let Some(last) = items.last_mut() {
@@ -799,6 +1021,12 @@ impl GpuiShellView {
                 if let Some(term) = self.terminal_manager_mut().active_terminal() {
                     let _ = term.send_input(&[0x0c]);
                 }
+            }
+            "Run Startup" => {
+                self.run_startup_commands();
+            }
+            "Edit Startup" => {
+                self.edit_startup_file();
             }
             l if l.starts_with("Launch Claude")   => self.launch_vibe_tool_env("claude", l.contains("WSL")),
             l if l.starts_with("Launch Codex")    => self.launch_vibe_tool_env("codex", l.contains("WSL")),
@@ -910,7 +1138,7 @@ impl Render for GpuiShellView {
         // Main layout - limux/mori style dark theme
         div()
             .track_focus(&self.focus_handle)
-            // Canvas to register IME handler during paint phase
+            // Register IME handler with a zero-size canvas (invisible, no stray cursor)
             .child(gpui::canvas(
                 move |bounds, _window, _cx| bounds,
                 move |bounds, _, window, cx| {
@@ -920,7 +1148,7 @@ impl Render for GpuiShellView {
                         cx,
                     );
                 },
-            ).size_full().absolute())
+            ).w(px(0.0)).h(px(0.0)).absolute())
             .flex()
             .flex_col()
             .size_full()
@@ -1123,6 +1351,10 @@ impl Render for GpuiShellView {
                                         .overflow_hidden()
                                         .children(workspaces.iter().enumerate().map(|(ws_idx, item)| {
                                             let is_active = item.is_active;
+                                            let has_ws_activity = !is_active && self.workspace_terminals
+                                                .get(&item.id)
+                                                .map(|tm| tm.has_any_activity())
+                                                .unwrap_or(false);
                                             let bg_color = if is_active { rgb(0x252530) } else { rgb(0x181818) };
                                             let text_color = if is_active { rgb(0xcdd6f4) } else { rgb(0x7f849c) };
                                             let ws_id = item.id.clone();
@@ -1199,7 +1431,15 @@ impl Render for GpuiShellView {
                                                         .flex()
                                                         .flex_row()
                                                         .items_center()
+                                                        .gap(px(6.0))
                                                         .flex_1()
+                                                        // Activity dot for inactive workspaces
+                                                        .when(has_ws_activity, |d| {
+                                                            d.child(
+                                                                div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
+                                                                    .bg(rgb(0xa6e3a1)).flex_shrink_0()
+                                                            )
+                                                        })
                                                         .child(
                                                             div()
                                                                 .flex_1()
@@ -1635,6 +1875,11 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
+                "ctrl+shift+e" => {
+                    self.terminal_manager_mut().equalize_splits();
+                    cx.notify();
+                    return;
+                }
                 // Pane navigation
                 "ctrl+left" => {
                     let _ = self.app.run_command("switch pane prev");
@@ -1932,7 +2177,7 @@ fn render_layout(
                     .gap_px()
                     .flex_1()
                     .overflow_hidden()
-                    .children(tabs.into_iter().map(|(idx, title, is_tab_active)| {
+                    .children(tabs.into_iter().map(|(idx, title, is_tab_active, has_activity)| {
                         let pid_click = pid_for_tabs.clone();
                         let pid_close_tab = pid_for_tabs.clone();
                         let pid_drag = pid_for_tabs.clone();
@@ -2007,12 +2252,24 @@ fn render_layout(
                                         .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
                                         .into_any_element()
                                 } else {
-                                    div()
+                                    let mut tab_content = div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(4.0))
                                         .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .flex_1()
-                                        .child(title)
-                                        .into_any_element()
+                                        .flex_1();
+                                    // Activity indicator: green dot for unread output
+                                    if has_activity && !is_tab_active {
+                                        tab_content = tab_content.child(
+                                            div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
+                                                .bg(rgb(0xa6e3a1)).flex_shrink_0()
+                                        );
+                                    }
+                                    tab_content = tab_content.child(
+                                        div().whitespace_nowrap().child(title)
+                                    );
+                                    tab_content.into_any_element()
                                 }
                             })
                             .when(can_close_tab, |d| {
@@ -2415,6 +2672,14 @@ pub fn run(app: &amux_ui::DesktopApp) {
                             // we need to re-render to pick up changes. Throttle to ~15fps when idle.
                             if has_drag || this.cursor_blink_frame % 4 == 0 {
                                 cx.notify();
+                            }
+                            // Poll terminal activity for all workspaces (~15fps)
+                            if this.cursor_blink_frame % 4 == 0 {
+                                for tm in this.workspace_terminals.values_mut() {
+                                    tm.poll_activity();
+                                }
+                                // Clear activity for the active tab since user is looking at it
+                                this.terminal_manager_mut().clear_active_activity();
                             }
                             // Auto-save layouts every ~5 seconds (300 frames at 60fps)
                             if this.cursor_blink_frame % 300 == 0 {

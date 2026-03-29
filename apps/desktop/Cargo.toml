@@ -6,7 +6,10 @@ license.workspace = true
 
 [features]
 default = []
-gpui = ["amux-ui/gpui", "dep:gpui", "dep:gpui_platform", "dep:smol", "gpui_platform/wayland", "gpui_platform/x11"]
+# Base GPUI feature (all platforms)
+gpui = ["amux-ui/gpui", "dep:gpui", "dep:gpui_platform", "dep:smol"]
+# Linux-specific: enable both Wayland and X11 backends
+gpui-linux = ["gpui", "gpui_platform/wayland", "gpui_platform/x11"]
 
 [dependencies]
 amux-core = { path = "../../crates/amux-core" }
