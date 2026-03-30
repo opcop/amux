@@ -896,17 +896,87 @@ impl GpuiShellView {
         let text = cx.read_from_clipboard()
             .and_then(|item| item.text().map(|s| s.to_string()));
         if let Some(text) = text {
-            if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                let bracketed = term.with_term(|t| {
-                    t.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
-                });
-                if bracketed {
-                    term.send_input(b"\x1b[200~");
+            self.send_paste_text(&text);
+        }
+    }
+
+    /// Smart paste: if clipboard has an image, save it and insert the file path
+    /// formatted for the current AI tool. If clipboard has text, paste normally.
+    fn smart_paste(&mut self, cx: &mut Context<Self>) {
+        let item = match cx.read_from_clipboard() {
+            Some(item) => item,
+            None => return,
+        };
+
+        // Check for image first
+        for entry in item.entries() {
+            if let gpui::ClipboardEntry::Image(image) = entry {
+                if !image.bytes.is_empty() {
+                    if let Some(path) = self.save_clipboard_image(image) {
+                        // Detect which AI tool is running and format accordingly
+                        let formatted = self.format_image_path_for_tool(&path);
+                        self.send_paste_text(&formatted);
+                    }
+                    return;
                 }
-                term.send_input(text.as_bytes());
-                if bracketed {
-                    term.send_input(b"\x1b[201~");
-                }
+            }
+        }
+
+        // Fallback to text paste
+        if let Some(text) = item.text() {
+            self.send_paste_text(&text);
+        }
+    }
+
+    /// Format the image path for the current terminal context.
+    /// On Windows: always provide both Windows and WSL paths, since the terminal
+    /// might be running a WSL program (claude, opencode) via wsl.exe.
+    fn format_image_path_for_tool(&self, path: &str) -> String {
+        if cfg!(target_os = "windows") && path.len() >= 2 && path.as_bytes()[1] == b':' {
+            // Windows path detected — convert to WSL format since most Vibe Coding
+            // tools run inside WSL. WSL can also read Windows paths via /mnt/,
+            // so the WSL path works everywhere.
+            Self::windows_path_to_wsl(path)
+        } else {
+            path.to_string()
+        }
+    }
+
+    /// Save a clipboard image to ~/.amux/screenshots/ and return the path string.
+    fn save_clipboard_image(&self, image: &gpui::Image) -> Option<String> {
+        let dir = Self::amux_dir().join("screenshots");
+        std::fs::create_dir_all(&dir).ok()?;
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let ext = match image.format {
+            gpui::ImageFormat::Png => "png",
+            gpui::ImageFormat::Jpeg => "jpg",
+            gpui::ImageFormat::Gif => "gif",
+            gpui::ImageFormat::Webp => "webp",
+            gpui::ImageFormat::Bmp => "bmp",
+            _ => "png",
+        };
+        let filename = format!("screenshot_{}.{}", timestamp, ext);
+        let path = dir.join(&filename);
+        std::fs::write(&path, &image.bytes).ok()?;
+        Some(path.to_string_lossy().to_string())
+    }
+
+    /// Send text to active terminal with bracketed paste support.
+    fn send_paste_text(&mut self, text: &str) {
+        if let Some(term) = self.terminal_manager_mut().active_terminal() {
+            let bracketed = term.with_term(|t| {
+                t.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+            });
+            if bracketed {
+                term.send_input(b"\x1b[200~");
+            }
+            term.send_input(text.as_bytes());
+            if bracketed {
+                term.send_input(b"\x1b[201~");
             }
         }
     }
@@ -1150,6 +1220,10 @@ impl Render for GpuiShellView {
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _window, cx| {
                 if this.renaming_workspace.is_some() {
                     this.renaming_workspace = None;
+                    cx.notify();
+                }
+                if this.renaming_tab.is_some() {
+                    this.renaming_tab = None;
                     cx.notify();
                 }
                 if this.resize_drag.is_some() {
@@ -1811,7 +1885,7 @@ impl GpuiShellView {
                     return;
                 }
                 "ctrl+shift+v" => {
-                    self.paste_clipboard(cx);
+                    self.smart_paste(cx);
                     cx.notify();
                     return;
                 }

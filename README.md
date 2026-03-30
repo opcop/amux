@@ -74,6 +74,9 @@ Full mouse event forwarding — click, drag, scroll all work inside TUI apps (Op
 ### Pixel-Perfect Rendering
 Canvas-based terminal rendering with dynamic font metrics. No hardcoded cell widths. Chinese/Japanese/Korean characters render correctly. Underline, italic, and strikethrough text decorations are supported.
 
+### Screenshot Paste
+Take a screenshot with any tool (Win+Shift+S, Snipaste, etc.), then press `Ctrl+Shift+V` in a terminal pane. AMUX detects the image in the clipboard, saves it to `~/.amux/screenshots/`, and inserts the file path directly into the terminal. On Windows with WSL, the path is automatically converted to `/mnt/...` format so AI tools like Claude Code can read it immediately. No more saving files manually and typing paths.
+
 ### Activity Notifications
 Running a long AI task in another pane? A green dot appears on the tab when there's new output. Working in another workspace? The dot appears on the workspace name in the sidebar. You'll never miss when your task finishes.
 
@@ -127,6 +130,7 @@ cargo build -p amux-desktop --features gpui --release
 | `Ctrl+PageUp/Down` | Switch tab |
 | `Ctrl+Shift+Left/Right` | Resize split |
 | `Ctrl+K` | Clear terminal |
+| `Ctrl+Shift+V` | Smart paste (image → save + insert path) |
 | `Ctrl+Q` | Quit |
 | Middle-click | Paste |
 | Double-click tab | Rename tab |
