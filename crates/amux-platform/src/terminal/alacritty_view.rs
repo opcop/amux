@@ -94,12 +94,12 @@ pub struct AlacrittyTerminal {
 
 impl Drop for AlacrittyTerminal {
     fn drop(&mut self) {
-        // Signal the event loop to shut down
+        // Signal the event loop to shut down. The thread will exit on its own
+        // after processing the Shutdown message. We don't join here to avoid
+        // blocking the UI thread if the event loop is stuck on a PTY read.
         let _ = self.event_loop_sender.send(Msg::Shutdown);
-        // Wait for the event loop thread to finish (with a timeout via take)
-        if let Some(handle) = self.event_loop_handle.take() {
-            let _ = handle.join();
-        }
+        // Detach the thread handle — it will clean up when it exits.
+        drop(self.event_loop_handle.take());
     }
 }
 

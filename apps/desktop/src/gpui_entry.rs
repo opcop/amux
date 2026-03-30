@@ -1058,7 +1058,7 @@ impl GpuiShellView {
         let mut items = vec![
             ContextMenuItem::action("Copy", Some("Ctrl+Shift+C"), has_selection),
             ContextMenuItem::action("Paste", Some("Ctrl+V"), true).separator(),
-            ContextMenuItem::action("Split Right", Some("Ctrl+\\"), true),
+            ContextMenuItem::action("Split Right", Some("Ctrl+Shift+\\"), true),
             ContextMenuItem::action("Split Down", Some("Ctrl+Shift+D"), true).separator(),
             ContextMenuItem::action("New Tab", Some("Ctrl+Shift+T"), true),
             ContextMenuItem::action("Close Pane", Some("Ctrl+Shift+W"), self.terminal_manager().total_panes() > 1).separator(),
@@ -2050,6 +2050,12 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
+                "ctrl+shift+\\" => {
+                    self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
+                    self.spawn_terminal_in_active();
+                    cx.notify();
+                    return;
+                }
                 "ctrl+shift+d" => {
                     self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
                     self.spawn_terminal_in_active();
@@ -2075,6 +2081,23 @@ impl GpuiShellView {
                 }
                 "ctrl+shift+e" => {
                     self.terminal_manager_mut().equalize_splits();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+m" => {
+                    self.sidebar_state.collapsed = !self.sidebar_state.collapsed;
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+p" => {
+                    let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+s" => {
+                    // Open terminal search
+                    self.search_state = Some((String::new(), 0));
                     cx.notify();
                     return;
                 }
@@ -2105,19 +2128,6 @@ impl GpuiShellView {
             match keystr.as_str() {
                 "ctrl+v" => {
                     self.paste_clipboard(cx);
-                    cx.notify();
-                    return;
-                }
-                "ctrl+m" => {
-                    self.sidebar_state.collapsed = !self.sidebar_state.collapsed;
-                    cx.notify();
-                    return;
-                }
-                // Pane split: Ctrl+D now forwards to PTY (EOF/delete-char).
-                // Use Ctrl+\ for horizontal split instead.
-                "ctrl+\\" => {
-                    self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-                    self.spawn_terminal_in_active();
                     cx.notify();
                     return;
                 }
@@ -2898,10 +2908,11 @@ pub fn run(app: &amux_ui::DesktopApp) {
 
                             // Check if any terminal has new output (dirty flag from PTY wakeup)
                             let mut any_dirty = false;
-                            for tm in this.workspace_terminals.values() {
+                            'outer: for tm in this.workspace_terminals.values() {
                                 for term in tm.all_terminals() {
                                     if term.take_dirty() {
                                         any_dirty = true;
+                                        break 'outer;
                                     }
                                 }
                             }

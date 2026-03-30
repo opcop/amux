@@ -339,6 +339,34 @@ fn collect_render_data(
 /// Shape text and collect paint operations.
 /// Runs during GPUI's prepaint phase (CPU-only work).
 #[cfg(feature = "gpui")]
+/// Shape text prefix to get precise cursor X within a narrow run.
+/// Returns the pixel offset from bounds origin.
+#[cfg(feature = "gpui")]
+fn shape_cursor_x(
+    narrow_text: &str,
+    text_idx: usize,
+    narrow_start: usize,
+    cell_w: f32,
+    bold: bool,
+    italic: bool,
+    text_system: &std::sync::Arc<gpui::WindowTextSystem>,
+    font_size: Pixels,
+) -> Pixels {
+    if text_idx == 0 {
+        px(narrow_start as f32 * cell_w)
+    } else {
+        let prefix: String = narrow_text.chars().take(text_idx).collect();
+        let prun = gpui::TextRun {
+            len: prefix.len(),
+            font: make_font_styled(bold, italic),
+            color: Hsla::default(),
+            background_color: None, underline: None, strikethrough: None,
+        };
+        let ps = text_system.shape_line(SharedString::from(prefix), font_size, &[prun], None);
+        px(narrow_start as f32 * cell_w) + ps.width()
+    }
+}
+
 fn prepaint_terminal(
     mut data: RenderData,
     bounds: Bounds<Pixels>,
@@ -502,7 +530,9 @@ fn prepaint_terminal(
                 let ul_style = match underline {
                     UnderlineKind::None => None,
                     UnderlineKind::Curly => Some(gpui::UnderlineStyle { thickness: px(1.0), color: Some(fg_hsla), wavy: true }),
+                    // GPUI doesn't support true double underline; approximate with thicker line
                     UnderlineKind::Double => Some(gpui::UnderlineStyle { thickness: px(2.0), color: Some(fg_hsla), wavy: false }),
+                    // Dotted/Dashed rendered as single — GPUI has no dash style support
                     _ => Some(gpui::UnderlineStyle { thickness: px(1.0), color: Some(fg_hsla), wavy: false }),
                 };
                 gpui::TextRun {
@@ -544,20 +574,10 @@ fn prepaint_terminal(
                         && data.cursor_col <= narrow_start + narrow_text.len()
                     {
                         cursor_x_found = true;
-                        let text_idx = data.cursor_col - narrow_start;
-                        if text_idx == 0 {
-                            cursor_shaped_x = px(narrow_start as f32 * cell_w);
-                        } else {
-                            let prefix: String = narrow_text.chars().take(text_idx).collect();
-                            let prun = gpui::TextRun {
-                                len: prefix.len(),
-                                font: make_font_styled(bold, italic),
-                                color: Hsla::default(),
-                                background_color: None, underline: None, strikethrough: None,
-                            };
-                            let ps = text_system.shape_line(SharedString::from(prefix), font_size, &[prun], None);
-                            cursor_shaped_x = px(narrow_start as f32 * cell_w) + ps.width();
-                        }
+                        cursor_shaped_x = shape_cursor_x(
+                            &narrow_text, data.cursor_col - narrow_start, narrow_start,
+                            cell_w, bold, italic, &text_system, font_size,
+                        );
                     }
 
                     // Flush pending narrow run
@@ -610,20 +630,10 @@ fn prepaint_terminal(
                 && data.cursor_col <= narrow_start + narrow_text.len()
             {
                 cursor_x_found = true;
-                let text_idx = data.cursor_col - narrow_start;
-                if text_idx == 0 {
-                    cursor_shaped_x = px(narrow_start as f32 * cell_w);
-                } else {
-                    let prefix: String = narrow_text.chars().take(text_idx).collect();
-                    let prun = gpui::TextRun {
-                        len: prefix.len(),
-                        font: make_font_styled(bold, italic),
-                        color: Hsla::default(),
-                        background_color: None, underline: None, strikethrough: None,
-                    };
-                    let ps = text_system.shape_line(SharedString::from(prefix), font_size, &[prun], None);
-                    cursor_shaped_x = px(narrow_start as f32 * cell_w) + ps.width();
-                }
+                cursor_shaped_x = shape_cursor_x(
+                    &narrow_text, data.cursor_col - narrow_start, narrow_start,
+                    cell_w, bold, italic, &text_system, font_size,
+                );
             }
 
             // Flush remaining narrow run
@@ -977,18 +987,18 @@ fn push_special_char(
             rects.push(PaintRect { origin: point(x, y), size: size(px(w), px(h)), color: bg });
             let hw = w * 0.5;
             let hh = (h * 0.5).ceil();
-            // Bits: TL=8, TR=4, BL=2, BR=1
+            // Bits: UL=0b0100, UR=0b1000, BL=0b0001, BR=0b0010
             let bits: u8 = match ch {
                 '\u{2596}' => 0b0001, // ▖ Lower left
                 '\u{2597}' => 0b0010, // ▗ Lower right
                 '\u{2598}' => 0b0100, // ▘ Upper left
-                '\u{2599}' => 0b0111, // ▙ Upper left + lower half
-                '\u{259A}' => 0b0110, // ▚ Upper left + lower right (diagonal)
-                '\u{259B}' => 0b1110, // ▛ Upper half + lower left
-                '\u{259C}' => 0b1101, // ▜ Upper half + lower right
+                '\u{2599}' => 0b0111, // ▙ UL + BL + BR
+                '\u{259A}' => 0b0110, // ▚ UL + BR
+                '\u{259B}' => 0b1101, // ▛ UL + UR + BL
+                '\u{259C}' => 0b1110, // ▜ UL + UR + BR
                 '\u{259D}' => 0b1000, // ▝ Upper right
-                '\u{259E}' => 0b1001, // ▞ Upper right + lower left (diagonal)
-                '\u{259F}' => 0b1011, // ▟ Upper right + lower half
+                '\u{259E}' => 0b1001, // ▞ UR + BL
+                '\u{259F}' => 0b1011, // ▟ UR + BL + BR
                 _ => 0,
             };
             if bits & 0b0100 != 0 { // Upper left
