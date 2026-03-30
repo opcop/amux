@@ -98,11 +98,15 @@ pub fn render_alacritty_terminal(
     is_active_pane: bool,
 ) -> impl IntoElement {
     let mut data = collect_render_data(term, cursor_blink_on);
-    // Active pane indicator: override default block cursor → beam for active pane.
-    // Only when cursor is visible AND shape is block (0 = shell default).
-    // TUI apps that set beam/underline/hidden are NOT affected.
-    if data.cursor_visible && data.cursor_shape == 0 && is_active_pane {
+    if is_active_pane {
+        // Active pane: always show cursor (beam style).
+        // Some TUI apps (Claude Code via WSL) hide the terminal cursor but
+        // expect it to be visible. Force-show as beam for active pane.
+        data.cursor_visible = true;
         data.cursor_shape = 1; // beam
+    } else if data.cursor_visible && data.cursor_shape == 0 {
+        // Inactive pane with default block cursor: keep block (visual distinction)
+        // TUI apps that set their own shape are not affected.
     }
     let m = metrics.clone();
 
