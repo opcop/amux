@@ -44,6 +44,8 @@ pub(crate) struct GpuiShellView {
     renaming_workspace: Option<(String, String)>,
     /// Tab rename state: (pane_id, tab_index, current_text)
     renaming_tab: Option<(String, usize, String)>,
+    /// Terminal search state: (query_text, match_index)
+    search_state: Option<(String, usize)>,
     /// Cached Vibe Coding tool availability: vec of (tool_id, label, env)
     detected_vibe_tools: Vec<(&'static str, &'static str, &'static str)>,
     /// Whether WSL is available (cached at startup, Windows only)
@@ -207,6 +209,7 @@ impl GpuiShellView {
             cursor_blink_frame: 0,
             renaming_workspace: None,
             renaming_tab: None,
+            search_state: None,
             terminals_spawned: false,
             detected_vibe_tools: Vec::new(),
             tools_detected: false,
@@ -863,6 +866,61 @@ impl GpuiShellView {
         for w in &self.model.workspace_items {
             if !self.workspace_order.contains(&w.id) {
                 self.workspace_order.push(w.id.clone());
+            }
+        }
+    }
+
+    /// Jump to the next/previous search match in the active terminal.
+    fn search_navigate(&mut self, forward: bool) {
+        use alacritty_terminal::index::{Direction, Side, Point as APoint, Line, Column};
+        use alacritty_terminal::term::search::RegexSearch;
+
+        let query = match &self.search_state {
+            Some((q, _)) if !q.is_empty() => q.clone(),
+            _ => return,
+        };
+
+        // Escape regex special chars for literal search
+        let escaped: String = query.chars().flat_map(|c| {
+            if "\\^$.|?*+()[]{}".contains(c) {
+                vec!['\\', c]
+            } else {
+                vec![c]
+            }
+        }).collect();
+        let mut regex = match RegexSearch::new(&escaped) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        if let Some(term) = self.terminal_manager_mut().active_terminal() {
+            let result = term.with_term(|t| {
+                let direction = if forward { Direction::Right } else { Direction::Left };
+                let origin = t.renderable_content().cursor.point;
+                t.search_next(&mut regex, origin, direction, Side::Left, None)
+            });
+            if let Some(m) = result {
+                term.with_term_mut(|t| {
+                    // Scroll to bring match into view
+                    let line_i32 = m.start().line.0;
+                    if line_i32 < 0 {
+                        let needed = (-line_i32) as usize;
+                        let display_offset = t.grid().display_offset();
+                        if needed > display_offset {
+                            t.scroll_display(alacritty_terminal::grid::Scroll::Delta(
+                                (needed - display_offset) as i32
+                            ));
+                        }
+                    } else if t.grid().display_offset() > 0 {
+                        // Match is on screen but we're scrolled up — scroll to bottom
+                        t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                    }
+                    // Highlight the match via selection
+                    use alacritty_terminal::selection::{Selection, SelectionType};
+                    let mut sel = Selection::new(SelectionType::Simple, *m.start(), Side::Left);
+                    sel.update(*m.end(), Side::Right);
+                    t.selection = Some(sel);
+                });
             }
         }
     }
@@ -1669,6 +1727,50 @@ impl Render for GpuiShellView {
                     // The actual menu (rendered on top of the overlay)
                     .child(render_context_menu(menu.position, items, vp.width, vp.height, cx))
             })
+            // Search bar overlay (top-right)
+            .when_some(self.search_state.clone(), |this, (query, _idx)| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(4.0))
+                        .right(px(16.0))
+                        .w(px(320.0))
+                        .px_3()
+                        .py(px(6.0))
+                        .rounded(px(8.0))
+                        .bg(rgb(0x1e1e2e))
+                        .border_1()
+                        .border_color(rgb(0x45475a))
+                        .shadow_lg()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div().text_xs().text_color(rgb(0x585b70)).child("Find:")
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .px_2()
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(0x11111b))
+                                .border_1()
+                                .border_color(rgb(0x313244))
+                                .text_sm()
+                                .text_color(rgb(0xcdd6f4))
+                                .min_h(px(20.0))
+                                .child(if query.is_empty() {
+                                    div().text_color(rgb(0x585b70)).child("Type to search...").into_any_element()
+                                } else {
+                                    div().child(format!("{}▎", query)).into_any_element()
+                                })
+                        )
+                        .child(
+                            div().text_xs().text_color(rgb(0x585b70)).child("Enter/Shift+Enter  Esc close")
+                        )
+                )
+            })
     }
 }
 
@@ -1709,6 +1811,15 @@ impl gpui::EntityInputHandler for GpuiShellView {
         // If renaming tab, send text to rename field
         if let Some((_, _, ref mut rename_text)) = self.renaming_tab {
             rename_text.push_str(text);
+            cx.notify();
+            return;
+        }
+        // If searching, append to search query and auto-navigate
+        if let Some((ref mut query, _)) = self.search_state {
+            query.push_str(text);
+            let q = query.clone();
+            drop(query);
+            self.search_navigate(true);
             cx.notify();
             return;
         }
@@ -1844,6 +1955,51 @@ impl GpuiShellView {
             }
         }
 
+        // Terminal search handling
+        if let Some((ref mut query, ref mut _match_idx)) = self.search_state {
+            match keystr.as_str() {
+                "escape" | "ctrl+f" => {
+                    // Clear selection and close search
+                    if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                        term.with_term_mut(|t| { t.selection = None; });
+                    }
+                    self.search_state = None;
+                    cx.notify();
+                    return;
+                }
+                "enter" => {
+                    self.search_navigate(true);
+                    cx.notify();
+                    return;
+                }
+                "shift+enter" => {
+                    self.search_navigate(false);
+                    cx.notify();
+                    return;
+                }
+                "backspace" => {
+                    query.pop();
+                    if !query.is_empty() {
+                        // Auto-search on each keystroke
+                        let q = query.clone();
+                        drop(query);
+                        self.search_navigate(true);
+                    } else {
+                        // Clear selection when query is empty
+                        if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                            term.with_term_mut(|t| { t.selection = None; });
+                        }
+                    }
+                    cx.notify();
+                    return;
+                }
+                _ => {
+                    // Character input handled by IME handler
+                    return;
+                }
+            }
+        }
+
         // Command palette handling
         if self.model.command_palette_open {
             match keystr.as_str() {
@@ -1940,6 +2096,12 @@ impl GpuiShellView {
                 }
                 "ctrl+shift+e" => {
                     self.terminal_manager_mut().equalize_splits();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+f" => {
+                    // Open terminal search
+                    self.search_state = Some((String::new(), 0));
                     cx.notify();
                     return;
                 }
