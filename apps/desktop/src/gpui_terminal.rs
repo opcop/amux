@@ -98,9 +98,8 @@ pub fn render_alacritty_terminal(
     is_active_pane: bool,
 ) -> impl IntoElement {
     let mut data = collect_render_data(term, cursor_blink_on);
-    // Active pane: beam cursor for shell prompts (block → beam).
-    // Only when cursor is visible and shape is default block.
-    // TUI apps that hide cursor (Claude Code) or set their own shape are untouched.
+
+    // Active pane: beam cursor, inactive: block cursor
     if is_active_pane && data.cursor_visible && data.cursor_shape == 0 {
         data.cursor_shape = 1; // beam
     }
@@ -337,24 +336,7 @@ fn prepaint_terminal(
         });
     }
 
-    // Apply block cursor colors directly to the grid cell.
-    // For wide (CJK) characters, also color the continuation cell so the
-    // cursor background spans the full 2-cell width of the character.
-    if data.cursor_visible
-        && data.cursor_shape == 0
-        && data.cursor_row < data.rows
-        && data.cursor_col < data.cols
-    {
-        let cell = &mut data.grid[data.cursor_row][data.cursor_col];
-        cell.fg = data.cursor_text_color;
-        cell.bg = data.cursor_color;
-        // If this is a wide char, extend cursor bg to the continuation cell
-        if data.cursor_col + 1 < data.cols
-            && data.grid[data.cursor_row][data.cursor_col + 1].wide_continuation
-        {
-            data.grid[data.cursor_row][data.cursor_col + 1].bg = data.cursor_color;
-        }
-    }
+    // Block cursor colors are applied inline in the bg_rects loop below.
 
     for row in 0..data.rows {
         let y = bounds.origin.y + px(row as f32 * cell_h);
@@ -372,11 +354,52 @@ fn prepaint_terminal(
             }
             let x = bounds.origin.x + px(start_col as f32 * cell_w);
             let w = (col - start_col) as f32 * cell_w;
-            bg_rects.push(PaintRect {
-                origin: point(x, y),
-                size: size(px(w), px(cell_h)),
-                color: bg,
-            });
+            // Block cursor: if this rect spans the cursor position, split it
+            // to insert the cursor-colored cell.
+            let has_block_cursor = data.cursor_visible
+                && data.cursor_shape == 0
+                && row == data.cursor_row
+                && start_col <= data.cursor_col
+                && col > data.cursor_col;
+
+            if has_block_cursor {
+                let cc = data.cursor_col;
+                // Part before cursor
+                if cc > start_col {
+                    let w_before = (cc - start_col) as f32 * cell_w;
+                    bg_rects.push(PaintRect {
+                        origin: point(x, y),
+                        size: size(px(w_before), px(cell_h)),
+                        color: bg,
+                    });
+                }
+                // Cursor cell
+                let cx = bounds.origin.x + px(cc as f32 * cell_w);
+                let cursor_w = if cc + 1 < data.cols
+                    && data.grid[row][cc + 1].wide_continuation { 2.0 } else { 1.0 };
+                bg_rects.push(PaintRect {
+                    origin: point(cx, y),
+                    size: size(px(cursor_w * cell_w), px(cell_h)),
+                    color: data.cursor_color,
+                });
+                // Part after cursor
+                let after_col = cc + 1;
+                if after_col < col {
+                    let x_after = bounds.origin.x + px(after_col as f32 * cell_w);
+                    let w_after = (col - after_col) as f32 * cell_w;
+                    bg_rects.push(PaintRect {
+                        origin: point(x_after, y),
+                        size: size(px(w_after), px(cell_h)),
+                        color: bg,
+                    });
+                }
+            } else {
+                bg_rects.push(PaintRect {
+                    origin: point(x, y),
+                    size: size(px(w), px(cell_h)),
+                    color: bg,
+                });
+            }
         }
 
         // ── Phase 2: Text runs + special chars ──
@@ -584,7 +607,7 @@ fn paint_terminal(data: PrepaintData, window: &mut Window, cx: &mut gpui::App) {
         );
     }
 
-    // Layer 4: Cursor overlay
+    // Layer 4: Cursor overlay (beam/underline)
     for rect in &data.cursor_rects {
         paint_rect(rect, window);
     }
