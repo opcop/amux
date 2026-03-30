@@ -48,6 +48,10 @@ pub(crate) struct GpuiShellView {
     detected_vibe_tools: Vec<(&'static str, &'static str, &'static str)>,
     /// Whether WSL is available (cached at startup, Windows only)
     wsl_detected: bool,
+    /// Whether PTY processes have been spawned (deferred from constructor)
+    terminals_spawned: bool,
+    /// Whether startup tool detection has completed
+    tools_detected: bool,
     /// Zoomed pane: when set, only this pane is rendered at full size
     zoomed_pane: Option<amux_platform::terminal::manager::PaneId>,
     /// Custom workspace display order (vec of workspace IDs).
@@ -172,34 +176,21 @@ impl GpuiShellView {
             .map(|w| w.id.clone())
             .unwrap_or_else(|| "default".to_string());
 
-        // Restore or create terminal managers for all workspaces
+        // Restore layout structures (fast — no PTY spawning yet)
         let mut workspace_terminals = std::collections::HashMap::new();
         let layouts = Self::load_all_layouts();
         for ws in &model.workspace_items {
-            let mut tm = if let Some(json) = layouts.get(&ws.id) {
+            let tm = if let Some(json) = layouts.get(&ws.id) {
                 TerminalManager::restore_layout(json).unwrap_or_else(TerminalManager::new)
             } else {
                 TerminalManager::new()
             };
-            // Spawn PTY in each pane that doesn't have one
-            let (shell, args) = Self::default_shell();
-            let cwd = Self::default_cwd();
-            let pane_ids: Vec<_> = tm.active_layout()
-                .map(|l| l.pane_ids())
-                .unwrap_or_default();
-            for pane_id in pane_ids {
-                let _ = tm.spawn_in_pane(&pane_id, &shell, &args, cwd.as_deref());
-            }
             workspace_terminals.insert(ws.id.clone(), tm);
         }
-        // Ensure active workspace has a terminal
         if !workspace_terminals.contains_key(&active_ws_id) {
-            let mut tm = TerminalManager::new();
-            let (shell, args) = Self::default_shell();
-            let cwd = Self::default_cwd();
-            let _ = tm.spawn_in_active(&shell, &args, cwd.as_deref());
-            workspace_terminals.insert(active_ws_id.clone(), tm);
+            workspace_terminals.insert(active_ws_id.clone(), TerminalManager::new());
         }
+        // PTY processes will be spawned on the first render frame (deferred for fast startup)
 
         let ws_order: Vec<String> = model.workspace_items.iter().map(|w| w.id.clone()).collect();
         Self {
@@ -216,14 +207,12 @@ impl GpuiShellView {
             cursor_blink_frame: 0,
             renaming_workspace: None,
             renaming_tab: None,
-            detected_vibe_tools: Self::detect_all_vibe_tools(),
+            terminals_spawned: false,
+            detected_vibe_tools: Vec::new(),
+            tools_detected: false,
             zoomed_pane: None,
             workspace_order: ws_order,
-            wsl_detected: if cfg!(target_os = "windows") {
-                Self::wsl_available()
-            } else {
-                false
-            },
+            wsl_detected: false, // detected lazily in background
         }
     }
 
@@ -404,7 +393,7 @@ impl GpuiShellView {
     /// Get the default shell program and args for the current platform
     fn default_shell() -> (String, Vec<String>) {
         if cfg!(target_os = "windows") {
-            let shell = if std::process::Command::new("pwsh.exe").arg("--version").output().is_ok() {
+            let shell = if Self::silent_command("pwsh.exe").arg("--version").output().is_ok() {
                 "pwsh.exe"
             } else {
                 "powershell.exe"
@@ -429,13 +418,25 @@ impl GpuiShellView {
 
     // ─── WSL-aware tool detection ───────────────────────────────
 
+    /// Create a Command that won't flash a console window on Windows.
+    fn silent_command(program: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new(program);
+        cmd.stdout(std::process::Stdio::null())
+           .stderr(std::process::Stdio::null());
+        // On Windows, prevent the subprocess from creating a visible console window
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        cmd
+    }
+
     /// Check if WSL is available (Windows only, always false on other platforms).
     fn wsl_available() -> bool {
         if !cfg!(target_os = "windows") { return false; }
-        std::process::Command::new("wsl.exe")
+        Self::silent_command("wsl.exe")
             .arg("--status")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
@@ -444,33 +445,25 @@ impl GpuiShellView {
     /// Check if a binary exists in WSL (Windows only, always false on other platforms).
     fn wsl_has_tool(bin: &str) -> bool {
         if !cfg!(target_os = "windows") { return false; }
-        std::process::Command::new("wsl.exe")
+        Self::silent_command("wsl.exe")
             .args(["--", "which", bin])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
     }
 
     /// Check if a binary exists on the native platform.
-    /// On Linux/Mac, uses a login shell (`bash -ilc`) so that ~/.bashrc / ~/.zshrc
-    /// PATH entries (nvm, cargo, .local/bin, etc.) are all loaded.
     fn native_has_tool(bin: &str) -> bool {
         if cfg!(target_os = "windows") {
-            std::process::Command::new("where").arg(bin)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+            Self::silent_command("where")
+                .arg(bin)
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
         } else {
-            // Use login shell — it loads the user's full PATH from profile/rc files
             let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            std::process::Command::new(&sh)
+            Self::silent_command(&sh)
                 .args(["-ilc", &format!("command -v {} >/dev/null 2>&1", bin)])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
@@ -2460,7 +2453,13 @@ fn render_layout(
                 let content = if let Some(term) = pane.active_terminal_ref() {
                     crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active).into_any_element()
                 } else {
-                    div().flex_1().bg(rgb(0x1d1f21)).child("Starting...").into_any_element()
+                    div().flex_1().flex().items_center().justify_center()
+                        .bg(rgb(0x1d1f21))
+                        .child(
+                            div().flex().flex_col().items_center().gap_2()
+                                .child(div().text_sm().text_color(rgb(0x585b70)).child("Starting terminal..."))
+                        )
+                        .into_any_element()
                 };
                 (tab_strip, content)
             } else {
@@ -2672,6 +2671,29 @@ pub fn run(app: &amux_ui::DesktopApp) {
                             // we need to re-render to pick up changes. Throttle to ~15fps when idle.
                             if has_drag || this.cursor_blink_frame % 4 == 0 {
                                 cx.notify();
+                            }
+                            // Deferred startup: spawn PTY processes on first frame
+                            if !this.terminals_spawned {
+                                this.terminals_spawned = true;
+                                let (shell, args) = GpuiShellView::default_shell();
+                                let cwd = GpuiShellView::default_cwd();
+                                let ws_ids: Vec<String> = this.workspace_terminals.keys().cloned().collect();
+                                for ws_id in ws_ids {
+                                    if let Some(tm) = this.workspace_terminals.get_mut(&ws_id) {
+                                        let pane_ids: Vec<_> = tm.active_layout()
+                                            .map(|l| l.pane_ids()).unwrap_or_default();
+                                        for pid in pane_ids {
+                                            let _ = tm.spawn_in_pane(&pid, &shell, &args, cwd.as_deref());
+                                        }
+                                    }
+                                }
+                                cx.notify(); // trigger re-render to show terminal content
+                            }
+                            // Deferred tool detection: run on third frame
+                            if !this.tools_detected && this.cursor_blink_frame >= 3 {
+                                this.tools_detected = true;
+                                this.detected_vibe_tools = GpuiShellView::detect_all_vibe_tools();
+                                this.wsl_detected = GpuiShellView::wsl_available();
                             }
                             // Poll terminal activity for all workspaces (~15fps)
                             if this.cursor_blink_frame % 4 == 0 {

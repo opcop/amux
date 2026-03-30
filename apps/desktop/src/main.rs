@@ -1,3 +1,6 @@
+// Hide the console window on Windows when running as a GUI app
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 #[cfg(feature = "gpui")]
 mod gpui_command_bar;
 #[cfg(feature = "gpui")]
