@@ -98,10 +98,14 @@ pub fn render_alacritty_terminal(
     is_active_pane: bool,
 ) -> impl IntoElement {
     let mut data = collect_render_data(term, cursor_blink_on);
-    // Active pane: beam cursor (竖线) — visual indicator of which pane is focused.
-    // Inactive pane: block cursor (方块).
-    if data.cursor_visible {
-        data.cursor_shape = if is_active_pane { 1 } else { 0 }; // 1=beam, 0=block
+    // Only override cursor shape for plain shell (block → beam for active pane).
+    // TUI apps (Claude Code, vim, etc.) set their own cursor shape via CSI —
+    // if the app set beam or underline, respect it; only override the default block.
+    if data.cursor_visible && data.cursor_shape == 0 {
+        // Default block cursor → beam for active pane, keep block for inactive
+        if is_active_pane {
+            data.cursor_shape = 1; // beam
+        }
     }
     let m = metrics.clone();
 

@@ -23,7 +23,9 @@
       "Bash(ldd --version)",
       "Bash(ldd /mnt/d/repository/arden/Ai/ide/amux/target/release/amux-desktop)",
       "Bash(chmod:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git add:*)",
+      "Bash(git push:*)"
     ]
   }
 }
