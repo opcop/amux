@@ -1056,13 +1056,12 @@ impl GpuiShellView {
         let has_selection = false; // TODO: integrate alacritty selection
 
         let mut items = vec![
-            ContextMenuItem::action("Copy", Some("Ctrl+C"), has_selection),
+            ContextMenuItem::action("Copy", Some("Ctrl+Shift+C"), has_selection),
             ContextMenuItem::action("Paste", Some("Ctrl+V"), true).separator(),
-            ContextMenuItem::action("Split Right", Some("Ctrl+D"), true),
+            ContextMenuItem::action("Split Right", Some("Ctrl+\\"), true),
             ContextMenuItem::action("Split Down", Some("Ctrl+Shift+D"), true).separator(),
-            ContextMenuItem::action("New Tab", Some("Ctrl+T"), true),
-            ContextMenuItem::action("Close Pane", Some("Ctrl+W"), self.terminal_manager().total_panes() > 1).separator(),
-            ContextMenuItem::action("Clear", Some("Ctrl+K"), true),
+            ContextMenuItem::action("New Tab", Some("Ctrl+Shift+T"), true),
+            ContextMenuItem::action("Close Pane", Some("Ctrl+Shift+W"), self.terminal_manager().total_panes() > 1).separator(),
             if self.zoomed_pane.is_some() {
                 ContextMenuItem::action("Restore Pane", Some("Ctrl+Shift+F"), true).separator()
             } else {
@@ -1293,14 +1292,21 @@ impl Render for GpuiShellView {
                 if mouse_mode {
                     this.send_mouse_event(0, col, row, true);
                 } else {
-                    // Start text selection via alacritty
                     use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Direction};
                     use alacritty_terminal::selection::{Selection, SelectionType};
                     let point = AlacPoint::new(Line(row as i32), Column(col));
+                    let clicks = event.click_count;
+                    let sel_type = if clicks >= 3 {
+                        SelectionType::Lines
+                    } else if clicks == 2 {
+                        SelectionType::Semantic
+                    } else {
+                        SelectionType::Simple
+                    };
                     let side = Direction::Left;
                     if let Some(term) = this.terminal_manager_mut().active_terminal() {
                         term.with_term_mut(|t| {
-                            t.selection = Some(Selection::new(SelectionType::Simple, point, side));
+                            t.selection = Some(Selection::new(sel_type, point, side));
                         });
                     }
                     this.selecting = true;
@@ -2031,10 +2037,9 @@ impl GpuiShellView {
             }
         }
 
-        // Ctrl shortcuts - these need to be checked FIRST before character input
-        if ctrl {
+        // Ctrl+Shift shortcuts — UI operations that don't conflict with shell readline
+        if ctrl && shift {
             match keystr.as_str() {
-                // Copy / Paste
                 "ctrl+shift+c" => {
                     self.copy_selection(cx);
                     cx.notify();
@@ -2045,48 +2050,22 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
-                "ctrl+c" => {
-                    // If there's a selection, copy it; otherwise send Ctrl+C to PTY
-                    // Send Ctrl+C (interrupt) to PTY
-                    if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                        term.send_input(&[0x03]);
-                    }
-                    cx.notify();
-                    return;
-                }
-                "ctrl+v" => {
-                    self.paste_clipboard(cx);
-                    cx.notify();
-                    return;
-                }
-                // Terminal pane operations
-                "ctrl+d" => {
-                    self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-                    self.spawn_terminal_in_active();
-                    cx.notify();
-                    return;
-                }
                 "ctrl+shift+d" => {
                     self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
                     self.spawn_terminal_in_active();
                     cx.notify();
                     return;
                 }
-                "ctrl+t" => {
+                "ctrl+shift+t" => {
                     self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
                     self.spawn_terminal_in_active();
                     cx.notify();
                     return;
                 }
-                "ctrl+w" => {
+                "ctrl+shift+w" => {
                     if self.terminal_manager_mut().close_active_pane() {
                         cx.notify();
                     }
-                    return;
-                }
-                "ctrl+m" => {
-                    self.sidebar_state.collapsed = !self.sidebar_state.collapsed;
-                    cx.notify();
                     return;
                 }
                 "ctrl+shift+f" => {
@@ -2099,9 +2078,46 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
-                "ctrl+f" => {
-                    // Open terminal search
-                    self.search_state = Some((String::new(), 0));
+                "ctrl+shift+n" => {
+                    let _ = self.app.run_command("new workspace");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+left" => {
+                    let _ = self.app.run_command("pane resize-left");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+right" => {
+                    let _ = self.app.run_command("pane resize-right");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Ctrl shortcuts — only intercept keys that don't conflict with shell/readline
+        if ctrl && !shift {
+            match keystr.as_str() {
+                "ctrl+v" => {
+                    self.paste_clipboard(cx);
+                    cx.notify();
+                    return;
+                }
+                "ctrl+m" => {
+                    self.sidebar_state.collapsed = !self.sidebar_state.collapsed;
+                    cx.notify();
+                    return;
+                }
+                // Pane split: Ctrl+D now forwards to PTY (EOF/delete-char).
+                // Use Ctrl+\ for horizontal split instead.
+                "ctrl+\\" => {
+                    self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
+                    self.spawn_terminal_in_active();
                     cx.notify();
                     return;
                 }
@@ -2116,27 +2132,6 @@ impl GpuiShellView {
                     let _ = self.app.run_command("switch pane next");
                     self.refresh_model();
                     cx.notify();
-                    return;
-                }
-                // Split resize
-                "ctrl+shift+left" => {
-                    let _ = self.app.run_command("pane resize-left");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+right" => {
-                    let _ = self.app.run_command("pane resize-right");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                // Terminal operations
-                "ctrl+k" => {
-                    if let Some(terminal) = self.terminal_manager_mut().active_terminal() {
-                        terminal.send_input(&[0x0c]); // Ctrl+L to shell
-                        cx.notify();
-                    }
                     return;
                 }
                 "ctrl+q" => {
@@ -2162,13 +2157,7 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
-                // Workspace
-                "ctrl+shift+n" => {
-                    let _ = self.app.run_command("new workspace");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
+                // Tab/workspace switching
                 "ctrl+pageup" => {
                     let _ = self.app.run_command("switch tab prev");
                     self.refresh_model();
@@ -2211,19 +2200,25 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
-                "ctrl+p" => {
-                    let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
-                    self.refresh_model();
+                // All other Ctrl+key → forward to PTY (readline: Ctrl+A/E/B/F/D/U/K/W/P/N/etc.)
+                _ => {
+                    self.handle_terminal_input(key, ctrl, shift, alt);
                     cx.notify();
                     return;
                 }
-                _ => {}
             }
         }
 
-        // Terminal input keys (no Ctrl modifier)
+        // Alt+key → forward to PTY (readline word navigation: Alt+B/F/D, Alt+Backspace, etc.)
+        if alt && !ctrl {
+            self.handle_terminal_input(key, ctrl, shift, alt);
+            cx.notify();
+            return;
+        }
+
+        // Terminal special keys (non-modifier or with any modifier)
         match keystr.as_str() {
-            "enter" | "tab" | "backspace" | "escape" | "space" => {
+            "enter" | "tab" | "backspace" | "escape" => {
                 self.handle_terminal_input(key, ctrl, shift, alt);
                 cx.notify();
                 return;
@@ -2899,9 +2894,20 @@ pub fn run(app: &amux_ui::DesktopApp) {
                             let has_drag = this.resize_drag.is_some();
                             // Cursor blink: toggle every ~30 frames (500ms at 60fps)
                             this.cursor_blink_frame = this.cursor_blink_frame.wrapping_add(1);
-                            // Always notify — alacritty's event loop updates Term in background,
-                            // we need to re-render to pick up changes. Throttle to ~15fps when idle.
-                            if has_drag || this.cursor_blink_frame % 4 == 0 {
+                            let cursor_blink_toggle = this.cursor_blink_frame % 30 == 0;
+
+                            // Check if any terminal has new output (dirty flag from PTY wakeup)
+                            let mut any_dirty = false;
+                            for tm in this.workspace_terminals.values() {
+                                for term in tm.all_terminals() {
+                                    if term.take_dirty() {
+                                        any_dirty = true;
+                                    }
+                                }
+                            }
+
+                            // Only re-render when needed: new output, cursor blink, or drag
+                            if any_dirty || cursor_blink_toggle || has_drag || this.selecting {
                                 cx.notify();
                             }
                             // Deferred startup: spawn PTY processes on first frame

@@ -25,7 +25,9 @@
       "Bash(chmod:*)",
       "Bash(git commit:*)",
       "Bash(git add:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(/tmp/analysis.md:*)",
+      "Bash(find /mnt/d/repository/arden/Ai/ide/amux -path */alacritty_terminal*/event_loop* -name *.rs)"
     ]
   }
 }

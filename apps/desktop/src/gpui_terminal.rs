@@ -140,6 +140,17 @@ struct RenderData {
 }
 
 #[cfg(feature = "gpui")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnderlineKind {
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+#[cfg(feature = "gpui")]
 #[derive(Clone)]
 struct RenderCell {
     ch: char,
@@ -147,8 +158,9 @@ struct RenderCell {
     bg: Rgba,
     bold: bool,
     italic: bool,
-    underline: bool,
+    underline: UnderlineKind,
     strikethrough: bool,
+    hidden: bool,
     wide_continuation: bool,
 }
 
@@ -161,8 +173,9 @@ impl Default for RenderCell {
             bg: rgb(0x1d1f21),
             bold: false,
             italic: false,
-            underline: false,
+            underline: UnderlineKind::None,
             strikethrough: false,
+            hidden: false,
             wide_continuation: false,
         }
     }
@@ -234,9 +247,30 @@ fn collect_render_data(
             if row < rows && col < cols {
                 let cell = &indexed.cell;
                 let flags = cell.flags;
-                let fg =
-                    convert_color(&cell.fg, &default_fg, true, flags.contains(CellFlags::DIM));
-                let bg = convert_color(&cell.bg, &default_bg, false, false);
+                let is_dim = flags.contains(CellFlags::DIM);
+                let mut fg =
+                    convert_color(&cell.fg, &default_fg, true, is_dim);
+                let mut bg = convert_color(&cell.bg, &default_bg, false, false);
+
+                // REVERSE video: swap fg and bg
+                if flags.contains(CellFlags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+
+                // Underline kind
+                let underline = if flags.contains(CellFlags::UNDERCURL) {
+                    UnderlineKind::Curly
+                } else if flags.contains(CellFlags::DOUBLE_UNDERLINE) {
+                    UnderlineKind::Double
+                } else if flags.contains(CellFlags::DOTTED_UNDERLINE) {
+                    UnderlineKind::Dotted
+                } else if flags.contains(CellFlags::DASHED_UNDERLINE) {
+                    UnderlineKind::Dashed
+                } else if flags.contains(CellFlags::UNDERLINE) {
+                    UnderlineKind::Single
+                } else {
+                    UnderlineKind::None
+                };
 
                 grid[row][col] = RenderCell {
                     ch: cell.c,
@@ -244,12 +278,9 @@ fn collect_render_data(
                     bg,
                     bold: flags.contains(CellFlags::BOLD),
                     italic: flags.contains(CellFlags::ITALIC),
-                    underline: flags.intersects(
-                        CellFlags::UNDERLINE | CellFlags::DOUBLE_UNDERLINE
-                        | CellFlags::UNDERCURL | CellFlags::DOTTED_UNDERLINE
-                        | CellFlags::DASHED_UNDERLINE
-                    ),
+                    underline,
                     strikethrough: flags.contains(CellFlags::STRIKEOUT),
+                    hidden: flags.contains(CellFlags::HIDDEN),
                     wide_continuation: flags.contains(CellFlags::WIDE_CHAR_SPACER),
                 };
             }
@@ -341,7 +372,14 @@ fn prepaint_terminal(
 
     // Block cursor colors are applied inline in the bg_rects loop below.
 
+    // Cursor X is computed during Phase 2 text layout for the cursor row,
+    // matching the exact run boundaries and shaped widths used for text rendering.
+    // Fallback: grid-aligned position.
+    let mut cursor_shaped_x = px(data.cursor_col as f32 * cell_w);
+    let mut cursor_x_found = false;
+
     for row in 0..data.rows {
+        let is_cursor_row = data.cursor_visible && row == data.cursor_row;
         let y = bounds.origin.y + px(row as f32 * cell_h);
 
         // ── Phase 1: Background quads ──
@@ -367,17 +405,17 @@ fn prepaint_terminal(
 
             if has_block_cursor {
                 let cc = data.cursor_col;
+                let cx = bounds.origin.x + cursor_shaped_x;
                 // Part before cursor
                 if cc > start_col {
-                    let w_before = (cc - start_col) as f32 * cell_w;
+                    let w_before = cx - x;
                     bg_rects.push(PaintRect {
                         origin: point(x, y),
-                        size: size(px(w_before), px(cell_h)),
+                        size: size(w_before, px(cell_h)),
                         color: bg,
                     });
                 }
                 // Cursor cell
-                let cx = bounds.origin.x + px(cc as f32 * cell_w);
                 let cursor_w = if cc + 1 < data.cols
                     && data.grid[row][cc + 1].wide_continuation { 2.0 } else { 1.0 };
                 bg_rects.push(PaintRect {
@@ -388,11 +426,11 @@ fn prepaint_terminal(
                 // Part after cursor
                 let after_col = cc + 1;
                 if after_col < col {
-                    let x_after = bounds.origin.x + px(after_col as f32 * cell_w);
-                    let w_after = (col - after_col) as f32 * cell_w;
+                    let x_after = cx + px(cursor_w * cell_w);
+                    let w_after = bounds.origin.x + px(col as f32 * cell_w) - x_after;
                     bg_rects.push(PaintRect {
                         origin: point(x_after, y),
-                        size: size(px(w_after), px(cell_h)),
+                        size: size(w_after, px(cell_h)),
                         color: bg,
                     });
                 }
@@ -441,28 +479,38 @@ fn prepaint_terminal(
             }
 
             // Build text runs, breaking at wide chars and style changes.
-            // Each run has uniform (fg, bold, italic, underline, strikethrough).
+            // Each run has uniform (fg, bold, italic, underline, strikethrough, hidden).
             // Wide (CJK) chars are shaped individually at exact grid positions.
             let fg = cell.fg;
             let bold = cell.bold;
             let italic = cell.italic;
             let underline = cell.underline;
             let strikethrough = cell.strikethrough;
+            let hidden = cell.hidden;
             let mut narrow_start = col;
             let mut narrow_text = String::new();
             let mut has_visible = false; // track if run has non-space chars
 
             // Helper: build TextRun with current style
-            let build_run = |text_len: usize, fg: Rgba, bold: bool, italic: bool, underline: bool, strikethrough: bool| -> gpui::TextRun {
-                let fg_hsla = rgba_to_hsla(fg);
+            let build_run = |text_len: usize, fg: Rgba, bold: bool, italic: bool, underline: UnderlineKind, strikethrough: bool, hidden: bool| -> gpui::TextRun {
+                // Hidden text: render as invisible (fg = transparent)
+                let fg_hsla = if hidden {
+                    Hsla { h: 0.0, s: 0.0, l: 0.0, a: 0.0 }
+                } else {
+                    rgba_to_hsla(fg)
+                };
+                let ul_style = match underline {
+                    UnderlineKind::None => None,
+                    UnderlineKind::Curly => Some(gpui::UnderlineStyle { thickness: px(1.0), color: Some(fg_hsla), wavy: true }),
+                    UnderlineKind::Double => Some(gpui::UnderlineStyle { thickness: px(2.0), color: Some(fg_hsla), wavy: false }),
+                    _ => Some(gpui::UnderlineStyle { thickness: px(1.0), color: Some(fg_hsla), wavy: false }),
+                };
                 gpui::TextRun {
                     len: text_len,
                     font: make_font_styled(bold, italic),
                     color: fg_hsla,
                     background_color: None,
-                    underline: if underline {
-                        Some(gpui::UnderlineStyle { thickness: px(1.0), color: Some(fg_hsla), wavy: false })
-                    } else { None },
+                    underline: ul_style,
                     strikethrough: if strikethrough {
                         Some(gpui::StrikethroughStyle { thickness: px(1.0), color: Some(fg_hsla) })
                     } else { None },
@@ -477,6 +525,7 @@ fn prepaint_terminal(
                 }
                 if c.fg != fg || c.bold != bold || c.italic != italic
                     || c.underline != underline || c.strikethrough != strikethrough
+                    || c.hidden != hidden
                 {
                     break;
                 }
@@ -488,9 +537,32 @@ fn prepaint_terminal(
                     && data.grid[row][col + 1].wide_continuation;
 
                 if is_wide {
+                    // Cursor detection: check if cursor falls in the narrow run being flushed
+                    if is_cursor_row && !cursor_x_found
+                        && !narrow_text.is_empty()
+                        && data.cursor_col >= narrow_start
+                        && data.cursor_col <= narrow_start + narrow_text.len()
+                    {
+                        cursor_x_found = true;
+                        let text_idx = data.cursor_col - narrow_start;
+                        if text_idx == 0 {
+                            cursor_shaped_x = px(narrow_start as f32 * cell_w);
+                        } else {
+                            let prefix: String = narrow_text.chars().take(text_idx).collect();
+                            let prun = gpui::TextRun {
+                                len: prefix.len(),
+                                font: make_font_styled(bold, italic),
+                                color: Hsla::default(),
+                                background_color: None, underline: None, strikethrough: None,
+                            };
+                            let ps = text_system.shape_line(SharedString::from(prefix), font_size, &[prun], None);
+                            cursor_shaped_x = px(narrow_start as f32 * cell_w) + ps.width();
+                        }
+                    }
+
                     // Flush pending narrow run
                     if has_visible {
-                        let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough);
+                        let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
                         let shaped = text_system.shape_line(
                             SharedString::from(narrow_text.clone()), font_size, &[run], None,
                         );
@@ -500,11 +572,17 @@ fn prepaint_terminal(
                     narrow_text.clear();
                     has_visible = false;
 
+                    // Cursor detection: cursor on this wide char
+                    if is_cursor_row && !cursor_x_found && col == data.cursor_col {
+                        cursor_x_found = true;
+                        cursor_shaped_x = px(col as f32 * cell_w);
+                    }
+
                     // Shape wide char individually at exact grid position
                     let ch = if c.ch == '\0' { ' ' } else { c.ch };
                     if ch != ' ' {
                         let ch_str = ch.to_string();
-                        let run = build_run(ch_str.len(), fg, bold, italic, underline, strikethrough);
+                        let run = build_run(ch_str.len(), fg, bold, italic, underline, strikethrough, hidden);
                         let shaped = text_system.shape_line(
                             SharedString::from(ch_str), font_size, &[run], None,
                         );
@@ -525,9 +603,32 @@ fn prepaint_terminal(
                 }
             }
 
+            // Cursor detection: check if cursor falls in the remaining narrow run
+            if is_cursor_row && !cursor_x_found
+                && !narrow_text.is_empty()
+                && data.cursor_col >= narrow_start
+                && data.cursor_col <= narrow_start + narrow_text.len()
+            {
+                cursor_x_found = true;
+                let text_idx = data.cursor_col - narrow_start;
+                if text_idx == 0 {
+                    cursor_shaped_x = px(narrow_start as f32 * cell_w);
+                } else {
+                    let prefix: String = narrow_text.chars().take(text_idx).collect();
+                    let prun = gpui::TextRun {
+                        len: prefix.len(),
+                        font: make_font_styled(bold, italic),
+                        color: Hsla::default(),
+                        background_color: None, underline: None, strikethrough: None,
+                    };
+                    let ps = text_system.shape_line(SharedString::from(prefix), font_size, &[prun], None);
+                    cursor_shaped_x = px(narrow_start as f32 * cell_w) + ps.width();
+                }
+            }
+
             // Flush remaining narrow run
             if has_visible {
-                let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough);
+                let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
                 let shaped = text_system.shape_line(
                     SharedString::from(narrow_text), font_size, &[run], None,
                 );
@@ -538,9 +639,11 @@ fn prepaint_terminal(
     }
 
     // ── Phase 3: Cursor overlay (beam/underline) ──
+    // Reuse pre-computed cursor_shaped_x for precise positioning.
     if data.cursor_visible && data.cursor_shape > 0 {
-        let cx = bounds.origin.x + px(data.cursor_col as f32 * cell_w);
+        let cx = bounds.origin.x + cursor_shaped_x;
         let cy = bounds.origin.y + px(data.cursor_row as f32 * cell_h);
+
         // Wide char: underline spans 2 cells, beam stays at left edge
         let is_wide = data.cursor_row < data.rows
             && data.cursor_col + 1 < data.cols
@@ -740,7 +843,7 @@ fn indexed_to_rgba(idx: u8) -> Rgba {
 
 /// Check if a character should be rendered as geometric quads instead of text.
 fn is_special_render_char(ch: char) -> bool {
-    matches!(ch, '\u{2500}'..='\u{256C}' | '\u{2580}'..='\u{2593}')
+    matches!(ch, '\u{2500}'..='\u{256C}' | '\u{2580}'..='\u{259F}')
 }
 
 /// Push paint rectangles for block drawing characters (U+2580–U+2593).
@@ -857,6 +960,49 @@ fn push_special_char(
                 size: size(px(w), px(h)),
                 color: shade,
             });
+        }
+        // ▔ Upper one eighth block
+        '\u{2594}' => {
+            rects.push(PaintRect { origin: point(x, y), size: size(px(w), px(h)), color: bg });
+            rects.push(PaintRect { origin: point(x, y), size: size(px(w), px(h * 0.125)), color: fg });
+        }
+        // ▕ Right one eighth block
+        '\u{2595}' => {
+            rects.push(PaintRect { origin: point(x, y), size: size(px(w), px(h)), color: bg });
+            rects.push(PaintRect { origin: point(x + px(w * 0.875), y), size: size(px(w * 0.125), px(h)), color: fg });
+        }
+        // Quadrant blocks (U+2596–U+259F)
+        // Each quadrant occupies one quarter of the cell: TL, TR, BL, BR
+        ch @ '\u{2596}'..='\u{259F}' => {
+            rects.push(PaintRect { origin: point(x, y), size: size(px(w), px(h)), color: bg });
+            let hw = w * 0.5;
+            let hh = (h * 0.5).ceil();
+            // Bits: TL=8, TR=4, BL=2, BR=1
+            let bits: u8 = match ch {
+                '\u{2596}' => 0b0001, // ▖ Lower left
+                '\u{2597}' => 0b0010, // ▗ Lower right
+                '\u{2598}' => 0b0100, // ▘ Upper left
+                '\u{2599}' => 0b0111, // ▙ Upper left + lower half
+                '\u{259A}' => 0b0110, // ▚ Upper left + lower right (diagonal)
+                '\u{259B}' => 0b1110, // ▛ Upper half + lower left
+                '\u{259C}' => 0b1101, // ▜ Upper half + lower right
+                '\u{259D}' => 0b1000, // ▝ Upper right
+                '\u{259E}' => 0b1001, // ▞ Upper right + lower left (diagonal)
+                '\u{259F}' => 0b1011, // ▟ Upper right + lower half
+                _ => 0,
+            };
+            if bits & 0b0100 != 0 { // Upper left
+                rects.push(PaintRect { origin: point(x, y), size: size(px(hw), px(hh)), color: fg });
+            }
+            if bits & 0b1000 != 0 { // Upper right
+                rects.push(PaintRect { origin: point(x + px(hw), y), size: size(px(hw), px(hh)), color: fg });
+            }
+            if bits & 0b0001 != 0 { // Lower left
+                rects.push(PaintRect { origin: point(x, y + px(h - hh)), size: size(px(hw), px(hh)), color: fg });
+            }
+            if bits & 0b0010 != 0 { // Lower right
+                rects.push(PaintRect { origin: point(x + px(hw), y + px(h - hh)), size: size(px(hw), px(hh)), color: fg });
+            }
         }
         // Box drawing characters (U+2500–U+256C)
         ch if ch >= '\u{2500}' && ch <= '\u{256C}' => {

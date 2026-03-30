@@ -212,6 +212,13 @@ impl TerminalManager {
         pane.active_terminal_ref()
     }
 
+    /// Iterate over all terminals across all panes and tabs (immutable)
+    pub fn all_terminals(&self) -> impl Iterator<Item = &AlacrittyTerminal> {
+        self.panes.values()
+            .flat_map(|pane| pane.tabs.iter())
+            .filter_map(|tab| tab.terminal.as_ref())
+    }
+
     pub fn active_pane_id(&self) -> Option<&PaneId> {
         Some(&self.active_pane)
     }

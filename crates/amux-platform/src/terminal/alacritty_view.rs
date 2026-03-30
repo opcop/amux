@@ -19,6 +19,10 @@ use alacritty_terminal::tty;
 #[derive(Clone)]
 pub struct AmuEventProxy {
     pub title: Arc<Mutex<Option<String>>>,
+    pub bell: Arc<std::sync::atomic::AtomicBool>,
+    pub child_exited: Arc<std::sync::atomic::AtomicBool>,
+    /// Set true when PTY has new output — cleared by `take_dirty()`
+    pub dirty: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl EventListener for AmuEventProxy {
@@ -28,6 +32,15 @@ impl EventListener for AmuEventProxy {
                 if let Ok(mut t) = self.title.lock() {
                     *t = Some(title);
                 }
+            }
+            AlacrittyEvent::Bell => {
+                self.bell.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            AlacrittyEvent::Exit => {
+                self.child_exited.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            AlacrittyEvent::Wakeup => {
+                self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             _ => {}
         }
@@ -74,7 +87,20 @@ pub struct AlacrittyTerminal {
     rows: u16,
     cell_width: u16,
     cell_height: u16,
-    _event_loop_handle: JoinHandle<(EventLoop<tty::Pty, AmuEventProxy>, alacritty_terminal::event_loop::State)>,
+    event_loop_handle: Option<JoinHandle<(EventLoop<tty::Pty, AmuEventProxy>, alacritty_terminal::event_loop::State)>>,
+    /// Channel sender to signal shutdown to the event loop
+    event_loop_sender: EventLoopSender,
+}
+
+impl Drop for AlacrittyTerminal {
+    fn drop(&mut self) {
+        // Signal the event loop to shut down
+        let _ = self.event_loop_sender.send(Msg::Shutdown);
+        // Wait for the event loop thread to finish (with a timeout via take)
+        if let Some(handle) = self.event_loop_handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl AlacrittyTerminal {
@@ -90,6 +116,9 @@ impl AlacrittyTerminal {
     ) -> Result<Self, String> {
         let event_proxy = AmuEventProxy {
             title: Arc::new(Mutex::new(None)),
+            bell: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            child_exited: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            dirty: Arc::new(std::sync::atomic::AtomicBool::new(true)), // dirty on creation
         };
 
         let size = TermSize { cols, rows, cell_width, cell_height };
@@ -102,6 +131,17 @@ impl AlacrittyTerminal {
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
         env.insert("TERM_PROGRAM".to_string(), "amux".to_string());
+        // Inherit locale from parent or default to UTF-8
+        if let Ok(lang) = std::env::var("LANG") {
+            env.insert("LANG".to_string(), lang);
+        } else {
+            env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+        }
+        for var in &["LC_ALL", "LC_CTYPE", "LC_MESSAGES"] {
+            if let Ok(val) = std::env::var(var) {
+                env.insert(var.to_string(), val);
+            }
+        }
         // Set LS_COLORS without background colors — only foreground colors
         env.insert("LS_COLORS".to_string(),
             "di=1;34:ln=1;36:so=1;35:pi=33:ex=1;32:bd=1;33:cd=1;33:su=1;31:sg=1;33:tw=1;34:ow=1;34:*.tar=1;31:*.gz=1;31:*.zip=1;31:*.rpm=1;31:*.deb=1;31".to_string()
@@ -110,7 +150,7 @@ impl AlacrittyTerminal {
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(shell.to_string(), args.to_vec())),
             working_directory: cwd.map(|s| std::path::PathBuf::from(s)),
-            drain_on_exit: false,
+            drain_on_exit: true,
             env,
             #[cfg(target_os = "windows")]
             escape_args: true,
@@ -129,7 +169,8 @@ impl AlacrittyTerminal {
             false,
         ).map_err(|e| format!("failed to create event loop: {}", e))?;
 
-        let notifier = Notifier(event_loop.channel());
+        let sender = event_loop.channel();
+        let notifier = Notifier(sender.clone());
         let handle = event_loop.spawn();
 
         Ok(Self {
@@ -140,7 +181,8 @@ impl AlacrittyTerminal {
             rows,
             cell_width,
             cell_height,
-            _event_loop_handle: handle,
+            event_loop_handle: Some(handle),
+            event_loop_sender: sender,
         })
     }
 
@@ -185,6 +227,21 @@ impl AlacrittyTerminal {
     /// Get terminal title
     pub fn title(&self) -> Option<String> {
         self.event_proxy.title.lock().ok().and_then(|t| t.clone())
+    }
+
+    /// Check and clear bell flag (visual bell support)
+    pub fn take_bell(&self) -> bool {
+        self.event_proxy.bell.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Check and clear dirty flag (true = PTY had new output since last check)
+    pub fn take_dirty(&self) -> bool {
+        self.event_proxy.dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Check if child process has exited
+    pub fn child_exited(&self) -> bool {
+        self.event_proxy.child_exited.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get current dimensions
