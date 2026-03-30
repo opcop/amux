@@ -97,9 +97,13 @@ pub fn render_alacritty_terminal(
     metrics: &CellMetrics,
     is_active_pane: bool,
 ) -> impl IntoElement {
-    let data = collect_render_data(term, cursor_blink_on);
-    // Cursor shape is fully controlled by the terminal app (shell, vim, Claude Code, etc.)
-    // via CSI escape sequences. We don't override it.
+    let mut data = collect_render_data(term, cursor_blink_on);
+    // Active pane indicator: override default block cursor → beam for active pane.
+    // Only when cursor is visible AND shape is block (0 = shell default).
+    // TUI apps that set beam/underline/hidden are NOT affected.
+    if data.cursor_visible && data.cursor_shape == 0 && is_active_pane {
+        data.cursor_shape = 1; // beam
+    }
     let m = metrics.clone();
 
     let total_w = data.cols as f32 * metrics.width;
