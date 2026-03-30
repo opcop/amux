@@ -618,6 +618,23 @@ impl TerminalManager {
         serde_json::to_string(&state).unwrap_or_default()
     }
 
+    /// Ensure all pane IDs in the layout have corresponding pane entries.
+    /// Creates missing panes so rendering never hits "Empty pane".
+    pub fn heal_layout(&mut self) {
+        let layout_ids = self.layout.pane_ids();
+        for id in &layout_ids {
+            if !self.panes.contains_key(id) {
+                self.panes.insert(id.clone(), TerminalPane::new(id.clone()));
+            }
+        }
+        // Also ensure active_pane is valid
+        if !self.panes.contains_key(&self.active_pane) {
+            if let Some(first) = layout_ids.first() {
+                self.active_pane = first.clone();
+            }
+        }
+    }
+
     /// Restore layout from JSON, creating empty panes for each pane ID
     pub fn restore_layout(json: &str) -> Option<Self> {
         let state: LayoutState = serde_json::from_str(json).ok()?;

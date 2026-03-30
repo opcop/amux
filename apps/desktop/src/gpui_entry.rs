@@ -59,6 +59,9 @@ pub(crate) struct GpuiShellView {
     /// Custom workspace display order (vec of workspace IDs).
     /// Applied after every model refresh to preserve user's drag ordering.
     workspace_order: Vec<String>,
+    /// Per-pane screen bounds: (x, y, w, h) in window pixels.
+    /// Computed during render_layout, used by mouse handlers for hit-testing.
+    pane_bounds: std::collections::HashMap<String, (f32, f32, f32, f32)>,
 }
 
 /// Right-click context menu
@@ -182,11 +185,12 @@ impl GpuiShellView {
         let mut workspace_terminals = std::collections::HashMap::new();
         let layouts = Self::load_all_layouts();
         for ws in &model.workspace_items {
-            let tm = if let Some(json) = layouts.get(&ws.id) {
+            let mut tm = if let Some(json) = layouts.get(&ws.id) {
                 TerminalManager::restore_layout(json).unwrap_or_else(TerminalManager::new)
             } else {
                 TerminalManager::new()
             };
+            tm.heal_layout();
             workspace_terminals.insert(ws.id.clone(), tm);
         }
         if !workspace_terminals.contains_key(&active_ws_id) {
@@ -215,6 +219,7 @@ impl GpuiShellView {
             tools_detected: false,
             zoomed_pane: None,
             workspace_order: ws_order,
+            pane_bounds: std::collections::HashMap::new(),
             wsl_detected: false, // detected lazily in background
         }
     }
@@ -306,13 +311,25 @@ impl GpuiShellView {
         })
     }
 
-    /// Convert pixel position to terminal cell (col, row), accounting for sidebar and tab strip.
+    /// Convert pixel position to terminal cell (col, row) for the active pane.
+    /// Uses cached pane_bounds from render_layout for correct multi-pane coordinates.
     fn pixel_to_term_cell(&self, pos: gpui::Point<gpui::Pixels>) -> (usize, usize) {
+        let (cw, ch) = self.cell_dims();
+        let cw = cw.max(1.0);
+        let ch = ch.max(1.0);
+
+        // Look up active pane's screen bounds
+        if let Some(pid) = self.terminal_manager().active_pane_id() {
+            if let Some(&(px_x, px_y, _pw, _ph)) = self.pane_bounds.get(&pid.0) {
+                let x = (pos.x.as_f32() - px_x).max(0.0);
+                let y = (pos.y.as_f32() - px_y).max(0.0);
+                return ((x / cw) as usize, (y / ch) as usize);
+            }
+        }
+
+        // Fallback: assume single pane after sidebar + tab strip
         let sidebar_w = if self.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
         let tab_strip_h = 28.0_f32;
-        let (cw, ch) = self.cell_dims();
-        let cw = cw.max(1.0); // guard divide-by-zero
-        let ch = ch.max(1.0);
         let x = (pos.x.as_f32() - sidebar_w).max(0.0);
         let y = (pos.y.as_f32() - tab_strip_h).max(0.0);
         ((x / cw) as usize, (y / ch) as usize)
@@ -361,16 +378,25 @@ impl GpuiShellView {
             .expect("just ensured workspace exists")
     }
 
-    /// Ensure a workspace has a terminal manager, creating one if needed
+    /// Ensure a workspace has a terminal manager, creating one if needed.
+    /// Also heals layout/pane inconsistencies for existing managers.
     fn ensure_workspace_terminal(&mut self, workspace_id: &str) {
         if !self.workspace_terminals.contains_key(workspace_id) {
             let mut tm = TerminalManager::new();
-            {
             let (shell, args) = Self::default_shell();
             let cwd = Self::default_cwd();
             let _ = tm.spawn_in_active(&shell, &args, cwd.as_deref());
-        }
             self.workspace_terminals.insert(workspace_id.to_string(), tm);
+        } else if let Some(tm) = self.workspace_terminals.get_mut(workspace_id) {
+            // Heal any layout/pane mismatches and spawn terminals for empty panes
+            tm.heal_layout();
+            let (shell, args) = Self::default_shell();
+            let cwd = Self::default_cwd();
+            let pane_ids: Vec<_> = tm.active_layout()
+                .map(|l| l.pane_ids()).unwrap_or_default();
+            for pid in pane_ids {
+                let _ = tm.spawn_in_pane(&pid, &shell, &args, cwd.as_deref());
+            }
         }
     }
 
@@ -1275,6 +1301,23 @@ impl Render for GpuiShellView {
             }))
             // Mouse: left button down — forward to PTY or start selection
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _window, cx| {
+                if this.resize_drag.is_some() {
+                    return;
+                }
+                // Ignore clicks in the sidebar region — those are handled by
+                // workspace/tab click handlers, not terminal selection.
+                // MUST check before clearing rename state, otherwise double-click
+                // rename on a workspace gets set by the workspace handler then
+                // immediately cleared here via event bubbling.
+                let sidebar_w = if this.sidebar_state.collapsed {
+                    SIDEBAR_WIDTH_COLLAPSED
+                } else {
+                    SIDEBAR_WIDTH_EXPANDED
+                };
+                if event.position.x.as_f32() < sidebar_w {
+                    return;
+                }
+                // Click outside sidebar: dismiss any active rename/search
                 if this.renaming_workspace.is_some() {
                     this.renaming_workspace = None;
                     cx.notify();
@@ -1282,9 +1325,6 @@ impl Render for GpuiShellView {
                 if this.renaming_tab.is_some() {
                     this.renaming_tab = None;
                     cx.notify();
-                }
-                if this.resize_drag.is_some() {
-                    return;
                 }
                 let (mouse_mode, _) = this.active_term_mouse_mode();
                 let (col, row) = this.pixel_to_term_cell(event.position);
@@ -1525,18 +1565,22 @@ impl Render for GpuiShellView {
                                                     this.reorder_workspace(drag.index, &ws_id_drop);
                                                     cx.notify();
                                                 }))
-                                                // Click: switch workspace; double-click: rename
-                                                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
-                                                    if event.click_count() >= 2 {
-                                                        this.renaming_workspace = Some((ws_id_dbl.clone(), ws_name.clone()));
-                                                        cx.notify();
-                                                    } else if this.renaming_workspace.is_none() {
-                                                        let _ = this.app.activate_workspace(&ws_id);
-                                                        this.switch_workspace_terminal(&ws_id);
-                                                        this.refresh_model();
-                                                        cx.notify();
+                                                // Double-click: rename; single-click: switch workspace.
+                                                // Use on_mouse_down so double-click is detected BEFORE
+                                                // re-render invalidates the element's click tracking.
+                                                .on_mouse_down(gpui::MouseButton::Left, cx.listener(
+                                                    move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                                                        if event.click_count >= 2 {
+                                                            this.renaming_workspace = Some((ws_id_dbl.clone(), ws_name.clone()));
+                                                            cx.notify();
+                                                        } else if this.renaming_workspace.is_none() {
+                                                            let _ = this.app.activate_workspace(&ws_id);
+                                                            this.switch_workspace_terminal(&ws_id);
+                                                            this.refresh_model();
+                                                            cx.notify();
+                                                        }
                                                     }
-                                                }))
+                                                ))
                                                 .child(if is_renaming {
                                                     // Inline rename input
                                                     let rename_text = self.renaming_workspace.as_ref()
@@ -1687,13 +1731,23 @@ impl Render for GpuiShellView {
                                 let status_bar_h = 28.0_f32;
                                 let content_h = vp.height.as_f32() - status_bar_h;
                                 let cursor_blink_on = true;
+                                // Compute pane bounds for mouse hit-testing
+                                self.pane_bounds.clear();
+                                let origin_x = sidebar_w;
+                                let origin_y = 0.0_f32;
+                                // Clone layout + refs before passing pane_bounds mutably
+                                let zoomed = self.zoomed_pane.clone();
+                                let layout_cloned = self.terminal_manager_mut().active_layout().cloned();
+                                let renaming_tab = self.renaming_tab.clone();
+                                // Get the manager pointer before the mutable borrow of pane_bounds.
+                                // SAFETY: pane_bounds and workspace_terminals are disjoint fields.
+                                let pb = &mut self.pane_bounds as *mut std::collections::HashMap<String, (f32, f32, f32, f32)>;
                                 // Zoom mode: render only the zoomed pane at full size
-                                if let Some(ref zpid) = self.zoomed_pane {
-                                    let zpid = zpid.clone();
+                                if let Some(zpid) = zoomed {
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &self.renaming_tab, cx)
-                                } else if let Some(layout) = self.terminal_manager_mut().active_layout().cloned() {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &self.renaming_tab, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, cx)
+                                } else if let Some(layout) = layout_cloned {
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, cx)
                                 } else {
                                     div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
                                 }
@@ -2384,16 +2438,26 @@ fn render_layout(
     metrics: &crate::gpui_terminal::CellMetrics,
     is_zoomed: bool,
     renaming_tab: &Option<(String, usize, String)>,
+    origin_x: f32,
+    origin_y: f32,
+    pane_bounds: &mut std::collections::HashMap<String, (f32, f32, f32, f32)>,
     cx: &mut Context<GpuiShellView>,
 ) -> gpui::AnyElement {
     use amux_platform::terminal::manager::{PaneId, TabLayout};
 
     match layout {
         TabLayout::Single(pane_id) => {
+            // Record this pane's screen bounds for mouse hit-testing.
+            // Tab strip (28px) is at the top; terminal content starts below it.
+            let tab_strip_h = 28.0_f32;
+            pane_bounds.insert(pane_id.0.clone(), (origin_x, origin_y + tab_strip_h, avail_w, (avail_h - tab_strip_h).max(0.0)));
             let is_active = active_pane_id == Some(pane_id);
             let has_multiple_panes = manager.total_panes() > 1;
 
             // Build per-pane tab strip + terminal content
+            // get_pane may return None if layout references a pane that doesn't
+            // exist in the panes map (e.g., corrupted saved layout). In that case,
+            // we skip the pane and render a placeholder.
             let (tab_strip, content) = if let Some(pane) = manager.get_pane(pane_id) {
                 let tabs = pane.tab_titles();
                 let pid_for_tabs = pane_id.clone();
@@ -2741,7 +2805,10 @@ fn render_layout(
                         cx.notify();
                     })
                 })
-                .on_click(cx.listener(move |this, _event, _window, cx| {
+                // Switch active pane on mouse_down (not click) so it happens
+                // BEFORE the root div's mouse_down handler reads active_terminal().
+                // This ensures text selection targets the correct pane.
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _event: &gpui::MouseDownEvent, _window, cx| {
                     this.terminal_manager_mut().set_active_pane(&pid);
                     cx.notify();
                 }))
@@ -2764,7 +2831,7 @@ fn render_layout(
                 .w(px(left_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, cx));
+                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-h-{}", split_id).into()))
@@ -2795,7 +2862,7 @@ fn render_layout(
                 .w(px(right_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, cx));
+                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, cx));
 
             div()
                 .w(px(avail_w))
@@ -2825,7 +2892,7 @@ fn render_layout(
                 .w_full()
                 .h(px(top_h))
                 .overflow_hidden()
-                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, cx));
+                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-v-{}", split_id).into()))
@@ -2856,7 +2923,7 @@ fn render_layout(
                 .w_full()
                 .h(px(bottom_h))
                 .overflow_hidden()
-                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, cx));
+                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, cx));
 
             div()
                 .w(px(avail_w))
