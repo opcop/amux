@@ -671,25 +671,21 @@ impl GpuiShellView {
             let _ = std::fs::write(&path, template);
         }
 
-        // Open in a split pane with the user's editor
+        if cfg!(target_os = "windows") {
+            // Windows: open with GUI editor directly (no terminal pane needed)
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "notepad".to_string());
+            let _ = std::process::Command::new(&editor)
+                .arg(&path)
+                .spawn();
+            return;
+        }
+
+        // Linux/Mac: open in a split pane with terminal editor
         self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-        let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
-            if cfg!(target_os = "windows") { "notepad".to_string() }
-            else { "nano".to_string() }
-        });
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
         let cmd = format!("{} {}", editor, path.to_string_lossy());
-        let sh = if cfg!(target_os = "windows") {
-            let (ps, _) = Self::default_shell();
-            ps
-        } else {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-        };
-        let args = if cfg!(target_os = "windows") {
-            vec!["-NoLogo".to_string(), "-Command".to_string(), cmd]
-        } else {
-            vec!["-ilc".to_string(), cmd]
-        };
-        let _ = self.terminal_manager_mut().spawn_in_active(&sh, &args, None);
+        let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let _ = self.terminal_manager_mut().spawn_in_active(&sh, &["-ilc".to_string(), cmd], None);
 
         // Rename tab
         let active_id = self.terminal_manager().active_pane_id().cloned();
