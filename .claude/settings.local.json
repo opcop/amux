@@ -27,7 +27,17 @@
       "Bash(git add:*)",
       "Bash(git push:*)",
       "Bash(/tmp/analysis.md:*)",
-      "Bash(find /mnt/d/repository/arden/Ai/ide/amux -path */alacritty_terminal*/event_loop* -name *.rs)"
+      "Bash(find /mnt/d/repository/arden/Ai/ide/amux -path */alacritty_terminal*/event_loop* -name *.rs)",
+      "Bash(find /mnt/d/repository/arden/ai/ide/amux/crates/amux-ui/src -type f -name *.rs)",
+      "Bash(find /mnt/d/repository/arden/ai/ide/amux/crates/amux-platform/src -type f -name *.rs)",
+      "Bash(wc -l /mnt/d/repository/arden/ai/ide/amux/crates/amux-*/src/*.rs)",
+      "Bash(for crate:*)",
+      "Bash(do echo:*)",
+      "Bash(wc -l /mnt/d/repository/arden/Ai/ide/amux/apps/desktop/src/*.rs)",
+      "Bash(wc -l /mnt/d/repository/arden/Ai/ide/amux/crates/*/src/**/*.rs)",
+      "Bash(find /mnt/d/repository/arden/Ai/ide/amux -path */alacritty* -name *.rs)",
+      "Bash(cargo metadata:*)",
+      "Bash(python3 -c \"import sys,json; m=json.load\\(sys.stdin\\); [print\\(p[''''manifest_path'''']\\) for p in m[''''packages''''] if ''''alacritty'''' in p[''''name'''']]\")"
     ]
   }
 }

@@ -27,6 +27,12 @@ pub struct PaneTab {
     pub terminal: Option<AlacrittyTerminal>,
     /// Activity indicator: set when new output detected, cleared when user views the tab
     pub has_activity: bool,
+    /// True when the terminal child process has exited
+    pub exited: bool,
+    /// Working directory at spawn time (used for session restore)
+    pub cwd: Option<String>,
+    /// Shell program and args used to spawn this terminal (for inheriting on split/new tab)
+    pub shell_cmd: Option<(String, Vec<String>)>,
     /// Last known cursor line (for activity detection)
     last_cursor_line: i32,
 }
@@ -47,6 +53,9 @@ impl TerminalPane {
                 custom_title: false,
                 terminal: None,
                 has_activity: false,
+                exited: false,
+                cwd: None,
+                shell_cmd: None,
                 last_cursor_line: 0,
             }],
             active_tab: 0,
@@ -56,6 +65,25 @@ impl TerminalPane {
     /// Get the active terminal
     pub fn active_terminal(&mut self) -> Option<&mut AlacrittyTerminal> {
         self.tabs.get_mut(self.active_tab)?.terminal.as_mut()
+    }
+
+    /// Check if the active tab's terminal has exited
+    pub fn active_tab_exited(&self) -> bool {
+        self.tabs.get(self.active_tab).is_some_and(|t| t.exited)
+    }
+
+    /// Get the active tab's current working directory.
+    /// Prefers live /proc/PID/cwd if available, falls back to saved spawn-time cwd.
+    pub fn active_tab_live_cwd(&self) -> Option<String> {
+        let tab = self.tabs.get(self.active_tab)?;
+        // Try reading live cwd from the running process
+        if let Some(ref term) = tab.terminal {
+            if let Some(live_cwd) = term.current_cwd() {
+                return Some(live_cwd);
+            }
+        }
+        // Fall back to saved cwd
+        tab.cwd.clone()
     }
 
     /// Get the active terminal (immutable)
@@ -70,6 +98,9 @@ impl TerminalPane {
             custom_title: false,
             terminal: None,
             has_activity: false,
+            exited: false,
+            cwd: None,
+            shell_cmd: None,
             last_cursor_line: 0,
         });
         self.active_tab = self.tabs.len() - 1;
@@ -94,8 +125,8 @@ impl TerminalPane {
     }
 
     /// Tab titles for rendering
-    /// Returns (index, title, is_active, has_activity) for each tab.
-    pub fn tab_titles(&self) -> Vec<(usize, String, bool, bool)> {
+    /// Returns (index, title, is_active, has_activity, exited) for each tab.
+    pub fn tab_titles(&self) -> Vec<(usize, String, bool, bool, bool)> {
         self.tabs
             .iter()
             .enumerate()
@@ -107,7 +138,7 @@ impl TerminalPane {
                         .and_then(|term| term.title())
                         .unwrap_or_else(|| t.title.clone())
                 };
-                (i, title, i == self.active_tab, t.has_activity)
+                (i, title, i == self.active_tab, t.has_activity, t.exited)
             })
             .collect()
     }
@@ -163,12 +194,33 @@ pub type TabLayout = PaneLayout;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TabId(pub String);
 
+/// Saved tab metadata for session persistence
+#[derive(Serialize, Deserialize)]
+struct SavedTab {
+    title: String,
+    custom_title: bool,
+    cwd: Option<String>,
+    /// Shell program and args (e.g. ["wsl.exe", "--cd", "/path"]) for restoring WSL tabs
+    #[serde(default)]
+    shell_cmd: Option<(String, Vec<String>)>,
+}
+
+/// Saved pane metadata for session persistence
+#[derive(Serialize, Deserialize)]
+struct SavedPane {
+    tabs: Vec<SavedTab>,
+    active_tab: usize,
+}
+
 /// Serializable layout state for persistence
 #[derive(Serialize, Deserialize)]
 struct LayoutState {
     layout: PaneLayout,
     active_pane: PaneId,
     next_pane_num: usize,
+    /// Per-pane tab state (None for backward compat with old layouts.json)
+    #[serde(default)]
+    pane_states: Option<HashMap<String, SavedPane>>,
 }
 
 /// Terminal manager — layout tree of panes, each pane has its own tabs
@@ -212,6 +264,26 @@ impl TerminalManager {
         pane.active_terminal_ref()
     }
 
+    /// Get the active pane's active tab's current working directory.
+    /// Reads live /proc/PID/cwd if available, falls back to saved spawn-time cwd.
+    pub fn active_cwd(&self) -> Option<String> {
+        self.panes.get(&self.active_pane)?.active_tab_live_cwd()
+    }
+
+    /// Get the active pane's active tab's shell command (program + args)
+    pub fn active_shell_cmd(&self) -> Option<(&str, &[String])> {
+        let pane = self.panes.get(&self.active_pane)?;
+        let tab = pane.tabs.get(pane.active_tab)?;
+        tab.shell_cmd.as_ref().map(|(s, a)| (s.as_str(), a.as_slice()))
+    }
+
+    /// Get the active terminal's title (set by the shell via OSC 0/2)
+    pub fn active_terminal_title(&self) -> Option<String> {
+        let pane = self.panes.get(&self.active_pane)?;
+        let tab = pane.tabs.get(pane.active_tab)?;
+        tab.terminal.as_ref()?.title()
+    }
+
     /// Iterate over all terminals across all panes and tabs (immutable)
     pub fn all_terminals(&self) -> impl Iterator<Item = &AlacrittyTerminal> {
         self.panes.values()
@@ -221,6 +293,10 @@ impl TerminalManager {
 
     pub fn active_pane_id(&self) -> Option<&PaneId> {
         Some(&self.active_pane)
+    }
+
+    pub fn active_pane_mut(&mut self) -> Option<&mut TerminalPane> {
+        self.panes.get_mut(&self.active_pane)
     }
 
     pub fn set_active_pane(&mut self, pane_id: &PaneId) {
@@ -297,20 +373,90 @@ impl TerminalManager {
 
     // === Spawn ===
 
+    /// Create an AlacrittyTerminal with CWD fallback: tries cwd first, then None on failure.
+    /// Returns (terminal, actual_cwd_used) so callers can record what worked.
+    fn create_terminal_with_fallback(
+        shell: &str, args: &[String], cwd: Option<&str>,
+    ) -> Result<(AlacrittyTerminal, Option<String>), String> {
+        match AlacrittyTerminal::new(120, 40, 8, 20, shell, args, cwd) {
+            Ok(t) => Ok((t, cwd.map(|s| s.to_string()))),
+            Err(e) if cwd.is_some() => {
+                eprintln!("[amux] spawn failed with cwd {:?}: {}, retrying with default", cwd, e);
+                let t = AlacrittyTerminal::new(120, 40, 8, 20, shell, args, None)?;
+                Ok((t, None))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Spawn a terminal in the active pane's active tab using AlacrittyTerminal
     pub fn spawn_in_active(&mut self, shell: &str, args: &[String], cwd: Option<&str>) -> Result<(), String> {
         self.spawn_in_pane(&self.active_pane.clone(), shell, args, cwd)
     }
 
-    /// Spawn a terminal in a specific pane's active tab
+    /// Spawn a terminal in a specific pane's active tab.
+    /// If cwd is invalid, automatically retries with no cwd (OS default).
     pub fn spawn_in_pane(&mut self, pane_id: &PaneId, shell: &str, args: &[String], cwd: Option<&str>) -> Result<(), String> {
         let pane = self.panes.get_mut(pane_id).ok_or("pane not found")?;
         let tab = pane.tabs.get_mut(pane.active_tab).ok_or("no active tab")?;
         if tab.terminal.is_some() {
             return Ok(()); // already has a terminal
         }
-        let term = AlacrittyTerminal::new(120, 40, 8, 20, shell, args, cwd)?;
+        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd)?;
         tab.terminal = Some(term);
+        tab.cwd = actual_cwd;
+        tab.shell_cmd = Some((shell.to_string(), args.to_vec()));
+        Ok(())
+    }
+
+    /// Spawn terminals for all tabs in a pane, using each tab's saved cwd if available.
+    /// Used during session restore to populate all tabs at once.
+    pub fn spawn_all_tabs_in_pane(&mut self, pane_id: &PaneId, shell: &str, args: &[String], default_cwd: Option<&str>) {
+        let pane = match self.panes.get_mut(pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+        for tab in &mut pane.tabs {
+            if tab.terminal.is_some() {
+                continue;
+            }
+            let cwd_owned = tab.cwd.clone();
+            let cwd = cwd_owned.as_deref().or(default_cwd);
+            // Use tab's saved shell_cmd if available (e.g. WSL), else use provided default
+            let (tab_shell, tab_args) = if let Some((ref s, ref a)) = tab.shell_cmd {
+                (s.as_str(), a.as_slice())
+            } else {
+                (shell, args)
+            };
+            let result = Self::create_terminal_with_fallback(tab_shell, tab_args, cwd);
+            let (term, used_cwd) = match result {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("[amux] spawn tab failed: {}", e);
+                    continue;
+                }
+            };
+            tab.terminal = Some(term);
+            tab.cwd = used_cwd;
+            if tab.shell_cmd.is_none() {
+                tab.shell_cmd = Some((tab_shell.to_string(), tab_args.to_vec()));
+            }
+        }
+    }
+
+    /// Restart the terminal in the active pane's active tab (replace dead terminal with new one).
+    /// If cwd is invalid, automatically retries with no cwd (OS default).
+    pub fn restart_active_terminal(&mut self, shell: &str, args: &[String], cwd: Option<&str>) -> Result<(), String> {
+        let pane = self.panes.get_mut(&self.active_pane).ok_or("pane not found")?;
+        let tab = pane.tabs.get_mut(pane.active_tab).ok_or("no active tab")?;
+        // Drop old terminal
+        tab.terminal = None;
+        tab.exited = false;
+        // Spawn new one with fallback
+        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd)?;
+        tab.terminal = Some(term);
+        tab.cwd = actual_cwd;
+        tab.shell_cmd = Some((shell.to_string(), args.to_vec()));
         Ok(())
     }
 
@@ -540,6 +686,13 @@ impl TerminalManager {
             for (tab_idx, tab) in pane.tabs.iter_mut().enumerate() {
                 let is_active_tab = tab_idx == pane.active_tab && is_active_pane;
                 if let Some(ref term) = tab.terminal {
+                    // Detect child process exit
+                    if term.child_exited() && !tab.exited {
+                        tab.exited = true;
+                        if !is_active_tab {
+                            tab.has_activity = true;
+                        }
+                    }
                     let cursor_line = term.with_term(|t| {
                         t.renderable_content().cursor.point.line.0
                     });
@@ -610,10 +763,24 @@ impl TerminalManager {
 
     /// Serialize the current layout to JSON
     pub fn save_layout(&self) -> String {
+        let mut pane_states = HashMap::new();
+        for (id, pane) in &self.panes {
+            let tabs: Vec<SavedTab> = pane.tabs.iter().map(|t| SavedTab {
+                title: t.title.clone(),
+                custom_title: t.custom_title,
+                cwd: t.cwd.clone(),
+                shell_cmd: t.shell_cmd.clone(),
+            }).collect();
+            pane_states.insert(id.0.clone(), SavedPane {
+                tabs,
+                active_tab: pane.active_tab,
+            });
+        }
         let state = LayoutState {
             layout: self.layout.clone(),
             active_pane: self.active_pane.clone(),
             next_pane_num: self.next_pane_num,
+            pane_states: Some(pane_states),
         };
         serde_json::to_string(&state).unwrap_or_default()
     }
@@ -644,7 +811,32 @@ impl TerminalManager {
         }
         let mut panes = HashMap::new();
         for id in &pane_ids {
-            panes.insert(id.clone(), TerminalPane::new(id.clone()));
+            // Restore tab state if saved, otherwise create default single tab
+            let pane = if let Some(ref ps) = state.pane_states {
+                if let Some(saved) = ps.get(&id.0) {
+                    let tabs: Vec<PaneTab> = saved.tabs.iter().map(|st| PaneTab {
+                        title: st.title.clone(),
+                        custom_title: st.custom_title,
+                        terminal: None,
+                        has_activity: false,
+                        exited: false,
+                        cwd: st.cwd.clone(),
+                        shell_cmd: st.shell_cmd.clone(),
+                        last_cursor_line: 0,
+                    }).collect();
+                    let active_tab = if saved.active_tab < tabs.len() { saved.active_tab } else { 0 };
+                    if tabs.is_empty() {
+                        TerminalPane::new(id.clone())
+                    } else {
+                        TerminalPane { id: id.clone(), tabs, active_tab }
+                    }
+                } else {
+                    TerminalPane::new(id.clone())
+                }
+            } else {
+                TerminalPane::new(id.clone())
+            };
+            panes.insert(id.clone(), pane);
         }
         // Validate active_pane exists in restored layout, fallback to first pane
         let active_pane = if pane_ids.contains(&state.active_pane) {

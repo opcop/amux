@@ -90,6 +90,8 @@ pub struct AlacrittyTerminal {
     event_loop_handle: Option<JoinHandle<(EventLoop<tty::Pty, AmuEventProxy>, alacritty_terminal::event_loop::State)>>,
     /// Channel sender to signal shutdown to the event loop
     event_loop_sender: EventLoopSender,
+    /// Child process PID (for reading /proc/PID/cwd on Linux)
+    child_pid: Option<u32>,
 }
 
 impl Drop for AlacrittyTerminal {
@@ -160,6 +162,12 @@ impl AlacrittyTerminal {
         let pty = tty::new(&pty_config, window_size, 0)
             .map_err(|e| format!("failed to create PTY: {}", e))?;
 
+        // Capture child PID before pty is moved into event loop
+        #[cfg(not(target_os = "windows"))]
+        let child_pid = Some(pty.child().id());
+        #[cfg(target_os = "windows")]
+        let child_pid: Option<u32> = None;
+
         // Spawn the event loop
         let event_loop = EventLoop::new(
             term.clone(),
@@ -183,6 +191,7 @@ impl AlacrittyTerminal {
             cell_height,
             event_loop_handle: Some(handle),
             event_loop_sender: sender,
+            child_pid,
         })
     }
 
@@ -242,6 +251,21 @@ impl AlacrittyTerminal {
     /// Check if child process has exited
     pub fn child_exited(&self) -> bool {
         self.event_proxy.child_exited.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get the current working directory of the child process by reading /proc/PID/cwd.
+    /// Returns None on Windows or if the process has exited.
+    pub fn current_cwd(&self) -> Option<String> {
+        #[cfg(not(target_os = "windows"))]
+        {
+            let pid = self.child_pid?;
+            let link = std::fs::read_link(format!("/proc/{}/cwd", pid)).ok()?;
+            Some(link.to_string_lossy().to_string())
+        }
+        #[cfg(target_os = "windows")]
+        {
+            None
+        }
     }
 
     /// Get current dimensions

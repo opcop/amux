@@ -10,13 +10,6 @@ use gpui::{
     Point, Rgba, SharedString, Size, Styled, Window,
 };
 
-// ─── Font Configuration ─────────────────────────────────────────
-
-/// Font family for terminal rendering
-pub const FONT_FAMILY: &str = "Cascadia Code";
-/// Font size in pixels
-pub const FONT_SIZE: f32 = 14.0;
-
 // ─── Cell Metrics ───────────────────────────────────────────────
 
 /// Cell dimensions measured from actual font metrics.
@@ -35,10 +28,10 @@ pub struct CellMetrics {
 /// Measure cell dimensions from the actual monospace font.
 /// Call once on first render and cache the result.
 #[cfg(feature = "gpui")]
-pub fn measure_cell_metrics(window: &mut Window) -> CellMetrics {
+pub fn measure_cell_metrics(window: &mut Window, font_family: &str, font_size_f32: f32, line_height_mult: f32) -> CellMetrics {
     let text_system = window.text_system();
-    let font_size = px(FONT_SIZE);
-    let font = make_font(false);
+    let font_size = px(font_size_f32);
+    let font = make_font(font_family, false);
 
     // Resolve font and get metrics
     let font_id = text_system.resolve_font(&font);
@@ -62,17 +55,16 @@ pub fn measure_cell_metrics(window: &mut Window) -> CellMetrics {
 
     CellMetrics {
         width: cell_width,
-        // Line height = font_size × 1.4, ceil to avoid sub-pixel gaps
-        height: (FONT_SIZE * 1.4).ceil(),
+        height: (font_size_f32 * line_height_mult).ceil(),
         descent: descent.as_f32(),
     }
 }
 
 /// Construct a terminal Font with optional bold/italic.
 #[cfg(feature = "gpui")]
-fn make_font_styled(bold: bool, italic: bool) -> Font {
+fn make_font_styled(font_family: &str, bold: bool, italic: bool) -> Font {
     Font {
-        family: SharedString::from(FONT_FAMILY),
+        family: SharedString::from(font_family.to_string()),
         weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },
         ..Default::default()
@@ -80,8 +72,8 @@ fn make_font_styled(bold: bool, italic: bool) -> Font {
 }
 
 #[cfg(feature = "gpui")]
-fn make_font(bold: bool) -> Font {
-    make_font_styled(bold, false)
+fn make_font(font_family: &str, bold: bool) -> Font {
+    make_font_styled(font_family, bold, false)
 }
 
 // ─── Public Render API ──────────────────────────────────────────
@@ -96,6 +88,8 @@ pub fn render_alacritty_terminal(
     cursor_blink_on: bool,
     metrics: &CellMetrics,
     is_active_pane: bool,
+    font_family: &str,
+    font_size: f32,
 ) -> impl IntoElement {
     let mut data = collect_render_data(term, cursor_blink_on);
 
@@ -107,12 +101,14 @@ pub fn render_alacritty_terminal(
         data.cursor_shape = 1; // beam
     }
     let m = metrics.clone();
+    let ff = font_family.to_string();
+    let fs = font_size;
 
     let total_w = data.cols as f32 * metrics.width;
     let total_h = data.rows as f32 * metrics.height;
 
     canvas(
-        move |bounds, window, _cx| prepaint_terminal(data, bounds, &m, window),
+        move |bounds, window, _cx| prepaint_terminal(data, bounds, &m, &ff, fs, window),
         move |_bounds, prepaint, window, cx| paint_terminal(prepaint, window, cx),
     )
     .w(px(total_w))
@@ -351,6 +347,7 @@ fn shape_cursor_x(
     italic: bool,
     text_system: &std::sync::Arc<gpui::WindowTextSystem>,
     font_size: Pixels,
+    font_family: &str,
 ) -> Pixels {
     if text_idx == 0 {
         px(narrow_start as f32 * cell_w)
@@ -358,7 +355,7 @@ fn shape_cursor_x(
         let prefix: String = narrow_text.chars().take(text_idx).collect();
         let prun = gpui::TextRun {
             len: prefix.len(),
-            font: make_font_styled(bold, italic),
+            font: make_font_styled(font_family, bold, italic),
             color: Hsla::default(),
             background_color: None, underline: None, strikethrough: None,
         };
@@ -371,10 +368,12 @@ fn prepaint_terminal(
     mut data: RenderData,
     bounds: Bounds<Pixels>,
     metrics: &CellMetrics,
+    font_family: &str,
+    font_size_f32: f32,
     window: &mut Window,
 ) -> PrepaintData {
     let text_system = window.text_system();
-    let font_size = px(FONT_SIZE);
+    let font_size = px(font_size_f32);
     let cell_w = metrics.width;
     let cell_h = metrics.height;
     let line_height = px(cell_h);
@@ -537,7 +536,7 @@ fn prepaint_terminal(
                 };
                 gpui::TextRun {
                     len: text_len,
-                    font: make_font_styled(bold, italic),
+                    font: make_font_styled(font_family, bold, italic),
                     color: fg_hsla,
                     background_color: None,
                     underline: ul_style,
@@ -576,7 +575,7 @@ fn prepaint_terminal(
                         cursor_x_found = true;
                         cursor_shaped_x = shape_cursor_x(
                             &narrow_text, data.cursor_col - narrow_start, narrow_start,
-                            cell_w, bold, italic, &text_system, font_size,
+                            cell_w, bold, italic, &text_system, font_size, font_family,
                         );
                     }
 
@@ -632,7 +631,7 @@ fn prepaint_terminal(
                 cursor_x_found = true;
                 cursor_shaped_x = shape_cursor_x(
                     &narrow_text, data.cursor_col - narrow_start, narrow_start,
-                    cell_w, bold, italic, &text_system, font_size,
+                    cell_w, bold, italic, &text_system, font_size, font_family,
                 );
             }
 

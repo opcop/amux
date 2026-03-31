@@ -8,7 +8,17 @@ mod gpui_command_palette;
 #[cfg(feature = "gpui")]
 mod gpui_components;
 #[cfg(feature = "gpui")]
+mod gpui_clipboard;
+mod gpui_config;
+#[cfg(feature = "gpui")]
 mod gpui_entry;
+#[cfg(feature = "gpui")]
+mod gpui_input_handler;
+#[cfg(feature = "gpui")]
+mod gpui_layout_renderer;
+#[cfg(feature = "gpui")]
+mod gpui_vibe_tools;
+mod gpui_workspace_persistence;
 #[cfg(feature = "gpui")]
 mod gpui_keyboard_shortcuts;
 #[cfg(feature = "gpui")]
@@ -55,7 +65,8 @@ fn main() {
 
     #[cfg(feature = "gpui")]
     {
-        gpui_entry::run(&app);
+        let config = gpui_config::AmuxConfig::load();
+        gpui_entry::run(&app, config);
     }
 
     #[cfg(not(feature = "gpui"))]

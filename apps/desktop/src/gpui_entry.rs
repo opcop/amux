@@ -13,6 +13,8 @@ use amux_platform::terminal::manager::{TerminalManager, SplitDirection};
 use crate::gpui_status_bar::{render_status_bar, StatusBarData};
 #[cfg(feature = "gpui")]
 use crate::gpui_workspace_sidebar::WorkspaceSidebarState;
+#[cfg(feature = "gpui")]
+use crate::gpui_layout_renderer::{render_context_menu, render_layout};
 
 
 #[cfg(feature = "gpui")]
@@ -22,78 +24,55 @@ const SIDEBAR_WIDTH_COLLAPSED: f32 = 28.0;
 
 #[cfg(feature = "gpui")]
 pub(crate) struct GpuiShellView {
-    app: DesktopApp,
-    model: GpuiWindowModel,
-    sidebar_state: WorkspaceSidebarState,
-    /// Per-workspace terminal managers
-    workspace_terminals: std::collections::HashMap<String, TerminalManager>,
-    /// Current active workspace ID for terminal lookup
-    active_workspace_id: String,
-    focus_handle: gpui::FocusHandle,
-    /// Cell dimensions measured from actual font metrics (None = not yet measured)
-    cell_metrics: Option<crate::gpui_terminal::CellMetrics>,
-    /// Mouse drag state for text selection
-    selecting: bool,
-    /// Context menu state
-    context_menu: Option<ContextMenuState>,
-    /// Drag state for resizing split panes
-    resize_drag: Option<ResizeDragState>,
-    /// Cursor blink frame counter (toggled by 60fps timer)
-    cursor_blink_frame: u32,
-    /// Workspace rename state: (workspace_id, current_text)
-    renaming_workspace: Option<(String, String)>,
-    /// Tab rename state: (pane_id, tab_index, current_text)
-    renaming_tab: Option<(String, usize, String)>,
-    /// Terminal search state: (query_text, match_index)
-    search_state: Option<(String, usize)>,
-    /// Cached Vibe Coding tool availability: vec of (tool_id, label, env)
-    detected_vibe_tools: Vec<(&'static str, &'static str, &'static str)>,
-    /// Whether WSL is available (cached at startup, Windows only)
-    wsl_detected: bool,
-    /// Whether PTY processes have been spawned (deferred from constructor)
-    terminals_spawned: bool,
-    /// Whether startup tool detection has completed
-    tools_detected: bool,
-    /// Zoomed pane: when set, only this pane is rendered at full size
-    zoomed_pane: Option<amux_platform::terminal::manager::PaneId>,
-    /// Custom workspace display order (vec of workspace IDs).
-    /// Applied after every model refresh to preserve user's drag ordering.
-    workspace_order: Vec<String>,
-    /// Per-pane screen bounds: (x, y, w, h) in window pixels.
-    /// Computed during render_layout, used by mouse handlers for hit-testing.
-    pane_bounds: std::collections::HashMap<String, (f32, f32, f32, f32)>,
+    pub(crate) app: DesktopApp,
+    pub(crate) model: GpuiWindowModel,
+    pub(crate) sidebar_state: WorkspaceSidebarState,
+    pub(crate) workspace_terminals: std::collections::HashMap<String, TerminalManager>,
+    pub(crate) active_workspace_id: String,
+    pub(crate) focus_handle: gpui::FocusHandle,
+    pub(crate) cell_metrics: Option<crate::gpui_terminal::CellMetrics>,
+    pub(crate) selecting: bool,
+    pub(crate) context_menu: Option<ContextMenuState>,
+    pub(crate) resize_drag: Option<ResizeDragState>,
+    pub(crate) cursor_blink_frame: u32,
+    pub(crate) renaming_workspace: Option<(String, String)>,
+    pub(crate) renaming_tab: Option<(String, usize, String)>,
+    pub(crate) search_state: Option<(String, usize)>,
+    pub(crate) detected_vibe_tools: Vec<(&'static str, &'static str, &'static str)>,
+    pub(crate) wsl_detected: bool,
+    pub(crate) terminals_spawned: bool,
+    pub(crate) tools_detected: bool,
+    pub(crate) zoomed_pane: Option<amux_platform::terminal::manager::PaneId>,
+    pub(crate) workspace_order: Vec<String>,
+    pub(crate) pane_bounds: std::collections::HashMap<String, (f32, f32, f32, f32)>,
+    pub(crate) config: crate::gpui_config::AmuxConfig,
 }
 
 /// Right-click context menu
 #[cfg(feature = "gpui")]
 #[derive(Clone, Debug)]
-struct ContextMenuState {
+pub(crate) struct ContextMenuState {
     position: gpui::Point<gpui::Pixels>,
 }
 
 /// Drag state for resizing split panes
 #[cfg(feature = "gpui")]
 #[derive(Clone, Debug)]
-struct ResizeDragState {
-    /// First pane ID in the left/top child (identifies which split)
-    split_first_pane: String,
-    /// true = horizontal split (drag left/right), false = vertical (drag up/down)
-    is_horizontal: bool,
-    /// Mouse position at drag start (x for horizontal, y for vertical)
-    start_mouse_pos: f32,
-    /// Ratio at drag start
-    start_ratio: f32,
-    /// Estimated container size in the drag axis (pixels)
-    container_length: f32,
+pub(crate) struct ResizeDragState {
+    pub(crate) split_first_pane: String,
+    pub(crate) is_horizontal: bool,
+    pub(crate) start_mouse_pos: f32,
+    pub(crate) start_ratio: f32,
+    pub(crate) container_length: f32,
 }
 
 /// Drag data for tab drag-and-drop between panes
 #[cfg(feature = "gpui")]
 #[derive(Clone)]
-struct DragTab {
-    source_pane: amux_platform::terminal::manager::PaneId,
-    tab_index: usize,
-    title: String,
+pub(crate) struct DragTab {
+    pub(crate) source_pane: amux_platform::terminal::manager::PaneId,
+    pub(crate) tab_index: usize,
+    pub(crate) title: String,
 }
 
 #[cfg(feature = "gpui")]
@@ -142,22 +121,17 @@ impl Render for DragWorkspace {
 /// Context menu item definition
 #[cfg(feature = "gpui")]
 #[derive(Clone)]
-struct ContextMenuItem {
-    label: &'static str,
-    shortcut: Option<&'static str>,
-    icon: Option<&'static str>,
-    enabled: bool,
-    separator_after: bool,
+pub(crate) struct ContextMenuItem {
+    pub(crate) label: &'static str,
+    pub(crate) shortcut: Option<&'static str>,
+    pub(crate) enabled: bool,
+    pub(crate) separator_after: bool,
 }
 
 #[cfg(feature = "gpui")]
 impl ContextMenuItem {
     fn action(label: &'static str, shortcut: Option<&'static str>, enabled: bool) -> Self {
-        Self { label, shortcut, icon: None, enabled, separator_after: false }
-    }
-    fn with_icon(mut self, icon: &'static str) -> Self {
-        self.icon = Some(icon);
-        self
+        Self { label, shortcut, enabled, separator_after: false }
     }
     fn separator(mut self) -> Self {
         self.separator_after = true;
@@ -165,14 +139,24 @@ impl ContextMenuItem {
     }
     /// Create a section header (non-clickable label)
     fn header(label: &'static str) -> Self {
-        Self { label, shortcut: None, icon: None, enabled: false, separator_after: false }
+        Self { label, shortcut: None, enabled: false, separator_after: false }
     }
+}
+
+/// Captured terminal environment for spawning a new pane/tab.
+#[cfg(feature = "gpui")]
+pub(crate) struct CapturedEnv {
+    pub shell: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    /// Optional command to send as input after the shell starts (e.g. "wsl --cd /path")
+    pub initial_input: Option<String>,
 }
 
 #[cfg(feature = "gpui")]
 impl GpuiShellView {
     /// Create a new shell view with terminal manager
-    pub fn new(app: DesktopApp, model: GpuiWindowModel, cx: &mut Context<Self>) -> Self {
+    pub fn new(app: DesktopApp, model: GpuiWindowModel, config: crate::gpui_config::AmuxConfig, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
 
         // Get the active workspace ID
@@ -221,62 +205,10 @@ impl GpuiShellView {
             workspace_order: ws_order,
             pane_bounds: std::collections::HashMap::new(),
             wsl_detected: false, // detected lazily in background
+            config,
         }
     }
 
-    /// Detect all Vibe Coding tools once at startup.
-    /// On Windows: checks both native PATH and WSL, may add two entries per tool.
-    fn detect_all_vibe_tools() -> Vec<(&'static str, &'static str, &'static str)> {
-        let tool_ids: &[&str] = &["claude", "opencode", "aider", "codex", "gemini", "copilot"];
-        let has_wsl = if cfg!(target_os = "windows") { Self::wsl_available() } else { false };
-        let mut results = Vec::new();
-
-        for &tool_id in tool_ids {
-            let Some((linux_bin, win_bin, _, _)) = Self::vibe_tool_info(tool_id) else {
-                continue;
-            };
-
-            // Check native (Windows: where xxx.cmd, Linux: bash -ilc "command -v xxx")
-            let native_bin = if cfg!(target_os = "windows") { win_bin } else { linux_bin };
-            let found_native = Self::native_has_tool(native_bin);
-
-            // Check WSL (Windows only)
-            let found_wsl = if cfg!(target_os = "windows") && has_wsl {
-                Self::wsl_has_tool(linux_bin)
-            } else {
-                false
-            };
-
-            // Add native entry
-            if found_native {
-                let label: &'static str = match tool_id {
-                    "claude"   => "Launch Claude",
-                    "opencode" => "Launch OpenCode",
-                    "aider"    => "Launch Aider",
-                    "codex"    => "Launch Codex",
-                    "gemini"   => "Launch Gemini",
-                    "copilot"  => "Launch Copilot",
-                    _ => continue,
-                };
-                results.push((tool_id, label, "native"));
-            }
-
-            // Add WSL entry (even if native also exists — user may prefer WSL)
-            if found_wsl {
-                let label: &'static str = match tool_id {
-                    "claude"   => "Launch Claude (WSL)",
-                    "opencode" => "Launch OpenCode (WSL)",
-                    "aider"    => "Launch Aider (WSL)",
-                    "codex"    => "Launch Codex (WSL)",
-                    "gemini"   => "Launch Gemini (WSL)",
-                    "copilot"  => "Launch Copilot (WSL)",
-                    _ => continue,
-                };
-                results.push((tool_id, label, "wsl"));
-            }
-        }
-        results
-    }
 
     /// Get cell dimensions (width, height). Falls back to defaults if not yet measured.
     fn cell_dims(&self) -> (f32, f32) {
@@ -363,14 +295,14 @@ impl GpuiShellView {
     }
 
     /// Get the terminal manager for the active workspace (immutable)
-    fn terminal_manager(&self) -> &TerminalManager {
+    pub(crate) fn terminal_manager(&self) -> &TerminalManager {
         self.workspace_terminals.get(&self.active_workspace_id)
             .expect("active workspace must have a terminal manager")
     }
 
     /// Get the terminal manager for the active workspace (mutable).
     /// Auto-creates if missing (defensive against stale workspace IDs).
-    fn terminal_manager_mut(&mut self) -> &mut TerminalManager {
+    pub(crate) fn terminal_manager_mut(&mut self) -> &mut TerminalManager {
         if !self.workspace_terminals.contains_key(&self.active_workspace_id) {
             self.ensure_workspace_terminal(&self.active_workspace_id.clone());
         }
@@ -420,7 +352,7 @@ impl GpuiShellView {
     }
 
     /// Get the default shell program and args for the current platform
-    fn default_shell() -> (String, Vec<String>) {
+    pub(crate) fn default_shell() -> (String, Vec<String>) {
         if cfg!(target_os = "windows") {
             let shell = if Self::silent_command("pwsh.exe").arg("--version").output().is_ok() {
                 "pwsh.exe"
@@ -441,421 +373,132 @@ impl GpuiShellView {
         }
     }
 
-    fn default_cwd() -> Option<String> {
+    pub(crate) fn default_cwd() -> Option<String> {
         std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string())
     }
 
-    // ─── WSL-aware tool detection ───────────────────────────────
 
-    /// Create a Command that won't flash a console window on Windows.
-    fn silent_command(program: &str) -> std::process::Command {
-        let mut cmd = std::process::Command::new(program);
-        cmd.stdout(std::process::Stdio::null())
-           .stderr(std::process::Stdio::null());
-        // On Windows, prevent the subprocess from creating a visible console window
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
-        cmd
-    }
 
-    /// Check if WSL is available (Windows only, always false on other platforms).
-    fn wsl_available() -> bool {
-        if !cfg!(target_os = "windows") { return false; }
-        Self::silent_command("wsl.exe")
-            .arg("--status")
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
+    /// Capture the active tab's shell + cwd before any operation that changes active pane.
+    ///
+    /// On Windows: detects if the user is inside a WSL session by checking the terminal
+    /// title (bash sets it to "user@host:path"). If detected, spawns the same default shell
+    /// but sends "wsl --cd <path>" as input, so `exit` from WSL returns to the shell normally.
+    pub(crate) fn capture_active_env(&self) -> CapturedEnv {
+        let title = self.terminal_manager().active_terminal_title();
 
-    /// Check if a binary exists in WSL (Windows only, always false on other platforms).
-    fn wsl_has_tool(bin: &str) -> bool {
-        if !cfg!(target_os = "windows") { return false; }
-        Self::silent_command("wsl.exe")
-            .args(["--", "which", bin])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-
-    /// Check if a binary exists on the native platform.
-    fn native_has_tool(bin: &str) -> bool {
+        // Check terminal title for WSL session (user@host:path pattern)
         if cfg!(target_os = "windows") {
-            Self::silent_command("where")
-                .arg(bin)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        } else {
-            let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            Self::silent_command(&sh)
-                .args(["-ilc", &format!("command -v {} >/dev/null 2>&1", bin)])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        }
-    }
-
-    /// Detect where a Vibe Coding tool is available.
-    /// Returns: "native", "wsl", or "" (not found).
-    fn detect_tool_env(bin: &str) -> &'static str {
-        // 1. Check native PATH first
-        if Self::native_has_tool(bin) {
-            return "native";
-        }
-        // 2. On Windows, also check WSL
-        #[cfg(target_os = "windows")]
-        if Self::wsl_available() && Self::wsl_has_tool(bin) {
-            return "wsl";
-        }
-        ""
-    }
-
-    /// Convert a Windows path to WSL mount path.
-    /// e.g. "D:\projects\myapp" → "/mnt/d/projects/myapp"
-    fn windows_path_to_wsl(path: &str) -> String {
-        // Handle "D:\foo\bar" or "D:/foo/bar"
-        let path = path.replace('\\', "/");
-        if path.len() >= 2 && path.as_bytes()[1] == b':' {
-            let drive = (path.as_bytes()[0] as char).to_ascii_lowercase();
-            format!("/mnt/{}{}", drive, &path[2..])
-        } else {
-            path
-        }
-    }
-
-    /// Get the ~/.amux base directory
-    fn amux_dir() -> std::path::PathBuf {
-        let home = if cfg!(target_os = "windows") {
-            std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())
-        } else {
-            std::env::var("HOME").unwrap_or_else(|_| ".".into())
-        };
-        std::path::PathBuf::from(home).join(".amux")
-    }
-
-    /// Get layout storage path
-    fn layout_file_path() -> std::path::PathBuf {
-        Self::amux_dir().join("layouts.json")
-    }
-
-    /// Get startup file path for a workspace
-    fn startup_file_path(workspace_name: &str) -> std::path::PathBuf {
-        let safe_name = workspace_name.replace(['/', '\\', ':', ' '], "_");
-        Self::amux_dir().join("workspaces").join(format!("{}.startup", safe_name))
-    }
-
-    /// Parse a .startup file into pane commands.
-    /// Format:
-    ///   [pane:1 title=My Title]
-    ///   cd /some/dir
-    ///   command arg1 arg2
-    ///   [pane:2]
-    ///   another-command
-    /// Returns vec of (pane_number, custom_title, vec_of_commands)
-    fn parse_startup_file(path: &std::path::Path) -> Vec<(usize, Option<String>, Vec<String>)> {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
-        let mut result: Vec<(usize, Option<String>, Vec<String>)> = Vec::new();
-        let mut current_pane: usize = 1;
-        let mut current_title: Option<String> = None;
-        let mut current_cmds: Vec<String> = Vec::new();
-
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            // Check for [pane:N] or [pane:N title=xxx] header
-            if trimmed.starts_with("[pane:") && trimmed.ends_with(']') {
-                // Save previous pane
-                if !current_cmds.is_empty() {
-                    result.push((current_pane, current_title.take(), current_cmds.clone()));
-                    current_cmds.clear();
+            if let Some(ref t) = title {
+                if let Some(wsl_cmd) = Self::detect_wsl_from_title_str(t) {
+                    let (shell, args) = Self::default_shell();
+                    // Extract the WSL path so it's recorded on the new tab for future splits
+                    let wsl_cwd = Self::extract_wsl_path_from_title(t);
+                    return CapturedEnv { shell, args, cwd: wsl_cwd, initial_input: Some(wsl_cmd) };
                 }
-                let inner = &trimmed[6..trimmed.len() - 1]; // "1 title=xxx" or "1"
-                if let Some(space_pos) = inner.find(' ') {
-                    current_pane = inner[..space_pos].parse().unwrap_or(1);
-                    // Parse key=value attributes
-                    let attrs = &inner[space_pos + 1..];
-                    if let Some(t) = attrs.strip_prefix("title=") {
-                        let t = t.trim();
-                        if !t.is_empty() {
-                            current_title = Some(t.to_string());
-                        }
-                    }
-                } else {
-                    current_pane = inner.parse().unwrap_or(1);
-                    current_title = None;
-                }
-            } else {
-                current_cmds.push(trimmed.to_string());
             }
         }
-        // Save last pane
-        if !current_cmds.is_empty() {
-            result.push((current_pane, current_title, current_cmds));
-        }
-        result
+
+        let inherited = self.terminal_manager().active_shell_cmd()
+            .map(|(s, a)| (s.to_string(), a.to_vec()));
+
+        // On Linux/Mac: /proc/PID/cwd gives live CWD.
+        // On Windows: falls back to spawn-time CWD saved in tab.cwd.
+        let live_cwd = self.terminal_manager().active_cwd();
+
+        let (shell, args) = inherited.unwrap_or_else(Self::default_shell);
+        let cwd = live_cwd.or_else(Self::default_cwd);
+        CapturedEnv { shell, args, cwd, initial_input: None }
     }
 
-    /// Check if workspace is "empty" (single pane, single tab, no splits).
-    fn is_workspace_empty(&self) -> bool {
-        let mgr = self.terminal_manager();
-        mgr.total_panes() == 1 && mgr.total_tabs() <= 1
+    /// Parse a "user@host:path" or "user@host/path" terminal title.
+    /// Returns the path portion if present, or empty string if the format matches but has no path.
+    /// Returns None if the title doesn't match the WSL pattern at all.
+    fn parse_wsl_title_path(title: &str) -> Option<&str> {
+        let title = title.trim();
+        let at_pos = title.find('@')?;
+        if at_pos == 0 { return None; }
+        let after_at = &title[at_pos + 1..];
+        let path = if let Some(colon_pos) = after_at.find(':') {
+            after_at[colon_pos + 1..].trim_start()
+        } else if let Some(slash_pos) = after_at.find('/') {
+            &after_at[slash_pos..]
+        } else {
+            return None;
+        };
+        Some(path.trim())
     }
 
-    /// Execute startup commands for the active workspace.
-    /// Creates panes as needed and sends commands to each.
-    fn run_startup_commands(&mut self) {
-        let ws_name = self.model.active_workspace_name
-            .clone()
-            .unwrap_or_else(|| self.active_workspace_id.clone());
-        let path = Self::startup_file_path(&ws_name);
-        let pane_cmds = Self::parse_startup_file(&path);
-        if pane_cmds.is_empty() {
-            return;
+    /// Detect WSL session from terminal title and return the wsl command to send.
+    /// Returns Some("wsl --cd /path") or Some("wsl") if WSL detected.
+    fn detect_wsl_from_title_str(title: &str) -> Option<String> {
+        let path = Self::parse_wsl_title_path(title)?;
+        if path.is_empty() {
+            Some("wsl".to_string())
+        } else if path.starts_with('/') {
+            Some(format!("wsl --cd {}", path))
+        } else {
+            Some("wsl".to_string())
         }
+    }
 
-        let (shell, shell_args) = Self::default_shell();
-        let cwd = Self::default_cwd();
+    /// Extract the WSL path from a "user@host:path" terminal title.
+    fn extract_wsl_path_from_title(title: &str) -> Option<String> {
+        let path = Self::parse_wsl_title_path(title)?;
+        if path.starts_with('/') { Some(path.to_string()) } else { None }
+    }
 
-        for (i, (pane_num, custom_title, cmds)) in pane_cmds.iter().enumerate() {
-            // First pane already exists, subsequent panes need split
-            if i > 0 {
-                let direction = if i % 2 == 1 {
-                    SplitDirection::Horizontal
-                } else {
-                    SplitDirection::Vertical
-                };
-                self.terminal_manager_mut().split_active_pane(direction);
-                self.spawn_terminal_in_active();
-            }
+    /// Spawn a terminal in the active pane's active tab, inheriting env from the current tab.
+    pub(crate) fn spawn_terminal_in_active(&mut self) {
+        let env = self.capture_active_env();
+        self.spawn_with_captured_env(&env);
+    }
 
-            // Send commands to the active terminal
+    /// Spawn a terminal with pre-captured environment (use after split/new-tab).
+    pub(crate) fn spawn_with_captured_env(&mut self, env: &CapturedEnv) {
+        // When initial_input is set (WSL scenario), the CWD is a Linux path that
+        // Windows ConPTY cannot use as working_directory. Pass None to PTY and let
+        // the initial_input command (e.g. "wsl --cd /path") handle directory setup.
+        let pty_cwd = if env.initial_input.is_some() {
+            None
+        } else {
+            env.cwd.as_deref()
+        };
+        if let Err(e) = self.terminal_manager_mut().spawn_in_active(&env.shell, &env.args, pty_cwd) {
+            eprintln!("[amux] spawn_in_active failed: {} | shell={:?} args={:?} cwd={:?}", e, env.shell, env.args, pty_cwd);
+        }
+        // Send initial command if present (e.g. "wsl --cd /path")
+        if let Some(ref cmd) = env.initial_input {
             if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                for cmd in cmds {
-                    let input = format!("{}\r", cmd);
-                    term.send_input(input.as_bytes());
-                }
-            }
-
-            // Set tab title: custom_title > last command name > pane:N
-            let active_id = self.terminal_manager().active_pane_id().cloned();
-            if let Some(ref pid) = active_id {
-                if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
-                    if let Some(tab) = pane.tabs.get_mut(pane.active_tab) {
-                        let title = if let Some(t) = custom_title {
-                            t.clone()
-                        } else if let Some(last_cmd) = cmds.last() {
-                            last_cmd.split_whitespace().next()
-                                .unwrap_or("Terminal").to_string()
-                        } else {
-                            format!("pane:{}", pane_num)
-                        };
-                        tab.title = title;
-                        tab.custom_title = custom_title.is_some();
-                    }
-                }
+                let input = format!("{}\r", cmd);
+                term.send_input(input.as_bytes());
             }
         }
-
-        // Equalize splits after creating all panes
-        self.terminal_manager_mut().equalize_splits();
-    }
-
-    /// Open the startup file for editing in a new split pane.
-    fn edit_startup_file(&mut self) {
-        let ws_name = self.model.active_workspace_name
-            .clone()
-            .unwrap_or_else(|| self.active_workspace_id.clone());
-        let path = Self::startup_file_path(&ws_name);
-
-        // Create directory and template file if it doesn't exist
-        if !path.exists() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let template = format!(
-                "# Startup commands for workspace: {}\n\
-                 # Each [pane:N] section creates a new terminal pane.\n\
-                 # Use [pane:N title=Name] to set a custom tab title.\n\
-                 # Lines are sent as commands to the shell.\n\
-                 #\n\
-                 # Example:\n\
-                 # [pane:1 title=Build]\n\
-                 # cd /my/project\n\
-                 # cargo watch -x check\n\
-                 #\n\
-                 # [pane:2 title=AI]\n\
-                 # cd /my/project\n\
-                 # claude\n",
-                ws_name
-            );
-            let _ = std::fs::write(&path, template);
-        }
-
-        if cfg!(target_os = "windows") {
-            // Windows: open with GUI editor directly (no terminal pane needed)
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "notepad".to_string());
-            let _ = std::process::Command::new(&editor)
-                .arg(&path)
-                .spawn();
-            return;
-        }
-
-        // Linux/Mac: open in a split pane with terminal editor
-        self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-        let cmd = format!("{} {}", editor, path.to_string_lossy());
-        let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let _ = self.terminal_manager_mut().spawn_in_active(&sh, &["-ilc".to_string(), cmd], None);
-
-        // Rename tab
-        let active_id = self.terminal_manager().active_pane_id().cloned();
-        if let Some(ref pid) = active_id {
-            if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
-                if let Some(tab) = pane.tabs.last_mut() {
-                    tab.title = "Startup Config".to_string();
-                    tab.custom_title = true;
+        // Record the logical CWD on the tab for future inheritance and persistence,
+        // even if it wasn't passed to the PTY (e.g. WSL Linux paths on Windows).
+        // Always overwrite so that live CWD from the parent pane is captured.
+        if let Some(ref cwd) = env.cwd {
+            if let Some(pane) = self.terminal_manager_mut().active_pane_mut() {
+                if let Some(tab) = pane.tabs.get_mut(pane.active_tab) {
+                    tab.cwd = Some(cwd.clone());
                 }
             }
         }
     }
 
-    /// Save all workspace layouts to disk
-    fn save_all_layouts(&self) {
-        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for (ws_id, tm) in &self.workspace_terminals {
-            map.insert(ws_id.clone(), tm.save_layout());
-        }
-        let path = Self::layout_file_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string(&map) {
-            let _ = std::fs::write(&path, json);
-        }
+    /// Restart the terminal in a specific pane (used when process exits)
+    pub(crate) fn restart_terminal_in_pane(&mut self, pane_id: &amux_platform::terminal::manager::PaneId) {
+        self.terminal_manager_mut().set_active_pane(pane_id);
+        // Restart with the same shell + cwd the tab was using
+        let inherited = self.terminal_manager().active_shell_cmd()
+            .map(|(s, a)| (s.to_string(), a.to_vec()));
+        let saved_cwd = self.terminal_manager().active_cwd();
+
+        let (shell, args) = inherited.unwrap_or_else(Self::default_shell);
+        let cwd = saved_cwd.or_else(Self::default_cwd);
+        let _ = self.terminal_manager_mut().restart_active_terminal(&shell, &args, cwd.as_deref());
     }
 
-    /// Load all workspace layouts from disk
-    fn load_all_layouts() -> std::collections::HashMap<String, String> {
-        let path = Self::layout_file_path();
-        if let Ok(data) = std::fs::read_to_string(&path) {
-            serde_json::from_str(&data).unwrap_or_default()
-        } else {
-            std::collections::HashMap::new()
-        }
-    }
-
-    fn spawn_terminal_in_active(&mut self) {
-        let (shell, args) = Self::default_shell();
-        let cwd = Self::default_cwd();
-        let _ = self.terminal_manager_mut().spawn_in_active(&shell, &args, cwd.as_deref());
-    }
-
-    /// Vibe Coding tool definitions: (tool_id, linux_bin, win_bin, extra_args, tab_title)
-    fn vibe_tool_info(tool: &str) -> Option<(&'static str, &'static str, Vec<String>, &'static str)> {
-        Some(match tool {
-            "claude"   => ("claude",   "claude.cmd",   vec![], "Claude Code"),
-            "opencode" => ("opencode", "opencode.cmd", vec![], "OpenCode"),
-            "aider"    => ("aider",    "aider",        vec![], "Aider"),
-            "codex"    => ("codex",    "codex.cmd",    vec![], "Codex CLI"),
-            "gemini"   => ("gemini",   "gemini.cmd",   vec![], "Gemini CLI"),
-            "copilot"  => ("gh",       "gh",           vec!["copilot".into()], "Copilot CLI"),
-            _ => return None,
-        })
-    }
-
-    /// Launch a Vibe Coding CLI tool in a new split pane.
-    /// `use_wsl`: true to force WSL launch, false for native.
-    fn launch_vibe_tool_env(&mut self, tool: &str, use_wsl: bool) {
-        let Some((linux_bin, win_bin, extra_args, tab_title)) = Self::vibe_tool_info(tool) else {
-            return;
-        };
-        let env = if use_wsl { "wsl" } else { "native" };
-
-        // Split right
-        self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-        let cwd = Self::default_cwd();
-
-        let tool_cmd = if extra_args.is_empty() {
-            linux_bin.to_string()
-        } else {
-            format!("{} {}", linux_bin, extra_args.join(" "))
-        };
-
-        let (shell, shell_args, spawn_cwd) = if use_wsl && cfg!(target_os = "windows") {
-            // Windows host → launch inside WSL via wsl.exe
-            let mut wsl_args = vec![];
-            if let Some(ref cwd_str) = cwd {
-                let wsl_path = Self::windows_path_to_wsl(cwd_str);
-                wsl_args.extend(["--cd".to_string(), wsl_path]);
-            }
-            // Use login shell inside WSL so PATH is complete
-            wsl_args.extend(["--".to_string(), "bash".to_string(), "-ilc".to_string(), tool_cmd]);
-            ("wsl.exe".to_string(), wsl_args, None)
-        } else if use_wsl {
-            // Already inside WSL/Linux → just use login shell
-            let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            (sh, vec!["-ilc".to_string(), tool_cmd], cwd.as_deref().map(|s| s.to_string()))
-        } else if cfg!(target_os = "windows") {
-            // Windows native tool
-            let bin = win_bin;
-            let win_cmd = if extra_args.is_empty() {
-                bin.to_string()
-            } else {
-                format!("{} {}", bin, extra_args.join(" "))
-            };
-            let (ps, _) = Self::default_shell();
-            (ps, vec!["-NoLogo".to_string(), "-Command".to_string(), win_cmd], cwd.as_deref().map(|s| s.to_string()))
-        } else {
-            // Linux/Mac native tool
-            let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            (sh, vec!["-ilc".to_string(), tool_cmd], cwd.as_deref().map(|s| s.to_string()))
-        };
-
-        let spawn_cwd_ref = spawn_cwd.as_deref();
-        let _ = self.terminal_manager_mut().spawn_in_active(&shell, &shell_args, spawn_cwd_ref);
-
-        // Rename the tab
-        let suffix = if env == "wsl" { " (WSL)" } else { "" };
-        let title = format!("{}{}", tab_title, suffix);
-        let active_id = self.terminal_manager().active_pane_id().cloned();
-        if let Some(ref pid) = active_id {
-            if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
-                if let Some(tab) = pane.tabs.last_mut() {
-                    tab.title = title;
-                }
-            }
-        }
-    }
-
-    /// Open a WSL bash shell in a new tab in the current pane.
-    fn launch_wsl_shell(&mut self) {
-        self.terminal_manager_mut().add_tab_to_active_pane("WSL".into());
-        let cwd = Self::default_cwd();
-        let mut wsl_args = vec![];
-        if let Some(ref cwd_str) = cwd {
-            let wsl_path = Self::windows_path_to_wsl(cwd_str);
-            wsl_args.extend(["--cd".to_string(), wsl_path]);
-        }
-        let _ = self.terminal_manager_mut().spawn_in_active("wsl.exe", &wsl_args, None);
-        // Rename the tab
-        let active_id = self.terminal_manager().active_pane_id().cloned();
-        if let Some(ref pid) = active_id {
-            if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
-                if let Some(tab) = pane.tabs.last_mut() {
-                    tab.title = "WSL".to_string();
-                }
-            }
-        }
-    }
 
     /// Reorder a workspace by moving it from one index to another.
     fn reorder_workspace(&mut self, from_index: usize, to_id: &str) {
@@ -874,7 +517,7 @@ impl GpuiShellView {
     }
 
     /// Refresh model from backend, then re-apply custom workspace order.
-    fn refresh_model(&mut self) {
+    pub(crate) fn refresh_model(&mut self) {
         self.model = self.app.render_with(&amux_ui::GpuiRenderer);
         self.apply_workspace_order();
     }
@@ -897,7 +540,7 @@ impl GpuiShellView {
     }
 
     /// Jump to the next/previous search match in the active terminal.
-    fn search_navigate(&mut self, forward: bool) {
+    pub(crate) fn search_navigate(&mut self, forward: bool) {
         use alacritty_terminal::index::{Direction, Side, Point as APoint, Line, Column};
         use alacritty_terminal::term::search::RegexSearch;
 
@@ -953,7 +596,7 @@ impl GpuiShellView {
 
     /// Toggle zoom on the active pane — fills the entire content area.
     /// Press again to restore the original split layout.
-    fn toggle_zoom(&mut self) {
+    pub(crate) fn toggle_zoom(&mut self) {
         if self.zoomed_pane.is_some() {
             self.zoomed_pane = None;
         } else if let Some(pid) = self.terminal_manager().active_pane_id().cloned() {
@@ -961,109 +604,6 @@ impl GpuiShellView {
         }
     }
 
-    /// Copy selected text to clipboard via alacritty's selection.
-    fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(term) = self.terminal_manager_mut().active_terminal() {
-            let text = term.with_term(|t| t.selection_to_string());
-            if let Some(text) = text {
-                if !text.is_empty() {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                }
-            }
-            // Clear selection after copy
-            term.with_term_mut(|t| { t.selection = None; });
-        }
-    }
-
-    /// Paste from clipboard into terminal
-    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
-        let text = cx.read_from_clipboard()
-            .and_then(|item| item.text().map(|s| s.to_string()));
-        if let Some(text) = text {
-            self.send_paste_text(&text);
-        }
-    }
-
-    /// Smart paste: if clipboard has an image, save it and insert the file path
-    /// formatted for the current AI tool. If clipboard has text, paste normally.
-    fn smart_paste(&mut self, cx: &mut Context<Self>) {
-        let item = match cx.read_from_clipboard() {
-            Some(item) => item,
-            None => return,
-        };
-
-        // Check for image first
-        for entry in item.entries() {
-            if let gpui::ClipboardEntry::Image(image) = entry {
-                if !image.bytes.is_empty() {
-                    if let Some(path) = self.save_clipboard_image(image) {
-                        // Detect which AI tool is running and format accordingly
-                        let formatted = self.format_image_path_for_tool(&path);
-                        self.send_paste_text(&formatted);
-                    }
-                    return;
-                }
-            }
-        }
-
-        // Fallback to text paste
-        if let Some(text) = item.text() {
-            self.send_paste_text(&text);
-        }
-    }
-
-    /// Format the image path for the current terminal context.
-    /// On Windows: always provide both Windows and WSL paths, since the terminal
-    /// might be running a WSL program (claude, opencode) via wsl.exe.
-    fn format_image_path_for_tool(&self, path: &str) -> String {
-        if cfg!(target_os = "windows") && path.len() >= 2 && path.as_bytes()[1] == b':' {
-            // Windows path detected — convert to WSL format since most Vibe Coding
-            // tools run inside WSL. WSL can also read Windows paths via /mnt/,
-            // so the WSL path works everywhere.
-            Self::windows_path_to_wsl(path)
-        } else {
-            path.to_string()
-        }
-    }
-
-    /// Save a clipboard image to ~/.amux/screenshots/ and return the path string.
-    fn save_clipboard_image(&self, image: &gpui::Image) -> Option<String> {
-        let dir = Self::amux_dir().join("screenshots");
-        std::fs::create_dir_all(&dir).ok()?;
-
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let ext = match image.format {
-            gpui::ImageFormat::Png => "png",
-            gpui::ImageFormat::Jpeg => "jpg",
-            gpui::ImageFormat::Gif => "gif",
-            gpui::ImageFormat::Webp => "webp",
-            gpui::ImageFormat::Bmp => "bmp",
-            _ => "png",
-        };
-        let filename = format!("screenshot_{}.{}", timestamp, ext);
-        let path = dir.join(&filename);
-        std::fs::write(&path, &image.bytes).ok()?;
-        Some(path.to_string_lossy().to_string())
-    }
-
-    /// Send text to active terminal with bracketed paste support.
-    fn send_paste_text(&mut self, text: &str) {
-        if let Some(term) = self.terminal_manager_mut().active_terminal() {
-            let bracketed = term.with_term(|t| {
-                t.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
-            });
-            if bracketed {
-                term.send_input(b"\x1b[200~");
-            }
-            term.send_input(text.as_bytes());
-            if bracketed {
-                term.send_input(b"\x1b[201~");
-            }
-        }
-    }
 
     /// Convert pixel position to terminal cell coordinates.
     /// Accounts for sidebar width.
@@ -1095,41 +635,29 @@ impl GpuiShellView {
             },
         ];
 
-        // WSL Terminal option (Windows only, cached)
-        if self.wsl_detected {
-            items.push(ContextMenuItem::action("WSL Terminal", None, true)
-                .with_icon("WSL"));
-        }
-
         // Workspace startup commands
         {
             let ws_name = self.model.active_workspace_name
                 .clone().unwrap_or_else(|| self.active_workspace_id.clone());
             let has_startup = Self::startup_file_path(&ws_name).exists();
-            if let Some(last) = items.last_mut() {
-                last.separator_after = true;
-            }
             if has_startup {
                 items.push(ContextMenuItem::action("Run Startup", None, true));
             }
-            items.push(ContextMenuItem::action("Edit Startup", None, true));
+            items.push(ContextMenuItem::action("Edit Startup", None, true).separator());
         }
 
-        // Vibe Coding tools — from cached detection
-        if !self.detected_vibe_tools.is_empty() {
-            if let Some(last) = items.last_mut() {
-                last.separator_after = true;
-            }
-            for &(_tool_id, label, env) in &self.detected_vibe_tools {
-                let icon = if env == "wsl" { "WSL" } else { ">_" };
-                items.push(ContextMenuItem::action(label, None, true).with_icon(icon));
-            }
+        // Terminal launchers: WSL + Vibe Coding tools
+        if self.wsl_detected {
+            items.push(ContextMenuItem::action("WSL Terminal", None, true));
+        }
+        for &(_tool_id, label, _env) in &self.detected_vibe_tools {
+            items.push(ContextMenuItem::action(label, None, true));
         }
         items
     }
 
     /// Execute a context menu action by label
-    fn execute_context_menu_action(&mut self, label: &str, cx: &mut Context<Self>) {
+    pub(crate) fn execute_context_menu_action(&mut self, label: &str, cx: &mut Context<Self>) {
         match label {
             "Copy" => {
                 self.copy_selection(cx);
@@ -1138,16 +666,19 @@ impl GpuiShellView {
                 self.paste_clipboard(cx);
             }
             "Split Right" => {
+                let env = self.capture_active_env();
                 self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-                self.spawn_terminal_in_active();
+                self.spawn_with_captured_env(&env);
             }
             "Split Down" => {
+                let env = self.capture_active_env();
                 self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
-                self.spawn_terminal_in_active();
+                self.spawn_with_captured_env(&env);
             }
             "New Tab" => {
+                let env = self.capture_active_env();
                 self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
-                self.spawn_terminal_in_active();
+                self.spawn_with_captured_env(&env);
             }
             "Close Pane" => {
                 self.zoomed_pane = None; // unzoom on close
@@ -1247,7 +778,7 @@ impl Render for GpuiShellView {
 
         // Measure font metrics on first render
         let metrics = self.cell_metrics.get_or_insert_with(|| {
-            crate::gpui_terminal::measure_cell_metrics(window)
+            crate::gpui_terminal::measure_cell_metrics(window, &self.config.font_family, self.config.font_size, self.config.line_height)
         }).clone();
         let cell_w = metrics.width.max(1.0);  // guard against zero
         let cell_h = metrics.height.max(1.0);
@@ -1745,9 +1276,9 @@ impl Render for GpuiShellView {
                                 // Zoom mode: render only the zoomed pane at full size
                                 if let Some(zpid) = zoomed {
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, cx)
                                 } else if let Some(layout) = layout_cloned {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, cx)
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, cx)
                                 } else {
                                     div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
                                 }
@@ -1834,1113 +1365,11 @@ impl Render for GpuiShellView {
     }
 }
 
-/// IME input handler — enables Chinese/Japanese/Korean input
+
+// NOTE: render_context_menu, first_pane_in_layout, render_layout
+// have been moved to gpui_layout_renderer.rs
 #[cfg(feature = "gpui")]
-impl gpui::EntityInputHandler for GpuiShellView {
-    fn text_for_range(
-        &mut self, _range: std::ops::Range<usize>, _adjusted: &mut Option<std::ops::Range<usize>>,
-        _window: &mut Window, _cx: &mut Context<Self>,
-    ) -> Option<String> {
-        None
-    }
-
-    fn selected_text_range(
-        &mut self, _ignore: bool, _window: &mut Window, _cx: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        None // Don't report selection — prevents GPUI from drawing a stray text caret
-    }
-
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
-        None
-    }
-
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
-
-    fn replace_text_in_range(
-        &mut self, _range: Option<std::ops::Range<usize>>, text: &str,
-        _window: &mut Window, cx: &mut Context<Self>,
-    ) {
-        if text.is_empty() { return; }
-
-        // If renaming workspace, send text to rename field
-        if let Some((_, ref mut rename_text)) = self.renaming_workspace {
-            rename_text.push_str(text);
-            cx.notify();
-            return;
-        }
-        // If renaming tab, send text to rename field
-        if let Some((_, _, ref mut rename_text)) = self.renaming_tab {
-            rename_text.push_str(text);
-            cx.notify();
-            return;
-        }
-        // If searching, append to search query and auto-navigate
-        if let Some((ref mut query, _)) = self.search_state {
-            query.push_str(text);
-            let q = query.clone();
-            drop(query);
-            self.search_navigate(true);
-            cx.notify();
-            return;
-        }
-
-        // Send to terminal PTY
-        if let Some(term) = self.terminal_manager_mut().active_terminal() {
-            term.send_input(text.as_bytes());
-        }
-        cx.notify();
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self, _range: Option<std::ops::Range<usize>>, _new_text: &str,
-        _selected: Option<std::ops::Range<usize>>, _window: &mut Window, _cx: &mut Context<Self>,
-    ) {
-        // IME composition in progress — we don't show inline preview for terminal
-    }
-
-    fn bounds_for_range(
-        &mut self, _range: std::ops::Range<usize>, _element_bounds: Bounds<Pixels>,
-        _window: &mut Window, _cx: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        None
-    }
-
-    fn character_index_for_point(
-        &mut self, _point: gpui::Point<Pixels>, _window: &mut Window, _cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        None
-    }
-}
-
-#[cfg(feature = "gpui")]
-impl GpuiShellView {
-    fn on_global_key_down(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let keystroke = &event.keystroke;
-        let ctrl = keystroke.modifiers.control;
-        let shift = keystroke.modifiers.shift;
-        let alt = keystroke.modifiers.alt;
-
-        let key = &keystroke.key;
-
-        let modifier = if ctrl && shift {
-            "ctrl+shift"
-        } else if ctrl {
-            "ctrl"
-        } else {
-            ""
-        };
-        
-        let full_keystroke = if modifier.is_empty() {
-            key.clone()
-        } else {
-            format!("{}+{}", modifier, key)
-        };
-
-        let keystr = full_keystroke.to_lowercase();
-
-        // Close context menu on any key
-        if self.context_menu.is_some() {
-            self.context_menu = None;
-            cx.notify();
-            if keystr == "escape" {
-                return;
-            }
-        }
-
-        // Workspace rename handling
-        if let Some((ref ws_id, ref mut text)) = self.renaming_workspace {
-            match keystr.as_str() {
-                "enter" => {
-                    let ws_id = ws_id.clone();
-                    let new_name = text.clone();
-                    if !new_name.is_empty() {
-                        let _ = self.app.rename_workspace(&ws_id, &new_name);
-                        self.refresh_model();
-                    }
-                    self.renaming_workspace = None;
-                    cx.notify();
-                    return;
-                }
-                "escape" => {
-                    self.renaming_workspace = None;
-                    cx.notify();
-                    return;
-                }
-                "backspace" => {
-                    text.pop();
-                    cx.notify();
-                    return;
-                }
-                _ => {
-                    // Character input handled by replace_text_in_range (IME handler)
-                    return;
-                }
-            }
-        }
-
-        // Tab rename handling
-        if let Some((ref pane_id, tab_idx, ref mut text)) = self.renaming_tab {
-            match keystr.as_str() {
-                "enter" => {
-                    let pid = amux_platform::terminal::manager::PaneId(pane_id.clone());
-                    let new_name = text.clone();
-                    if !new_name.is_empty() {
-                        if let Some(pane) = self.terminal_manager_mut().get_pane_mut(&pid) {
-                            if let Some(tab) = pane.tabs.get_mut(tab_idx) {
-                                tab.title = new_name;
-                                tab.custom_title = true;
-                            }
-                        }
-                    }
-                    self.renaming_tab = None;
-                    cx.notify();
-                    return;
-                }
-                "escape" => {
-                    self.renaming_tab = None;
-                    cx.notify();
-                    return;
-                }
-                "backspace" => {
-                    text.pop();
-                    cx.notify();
-                    return;
-                }
-                _ => return,
-            }
-        }
-
-        // Terminal search handling
-        if let Some((ref mut query, ref mut _match_idx)) = self.search_state {
-            match keystr.as_str() {
-                "escape" | "ctrl+f" => {
-                    // Clear selection and close search
-                    if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                        term.with_term_mut(|t| { t.selection = None; });
-                    }
-                    self.search_state = None;
-                    cx.notify();
-                    return;
-                }
-                "enter" => {
-                    self.search_navigate(true);
-                    cx.notify();
-                    return;
-                }
-                "shift+enter" => {
-                    self.search_navigate(false);
-                    cx.notify();
-                    return;
-                }
-                "backspace" => {
-                    query.pop();
-                    if !query.is_empty() {
-                        // Auto-search on each keystroke
-                        let q = query.clone();
-                        drop(query);
-                        self.search_navigate(true);
-                    } else {
-                        // Clear selection when query is empty
-                        if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                            term.with_term_mut(|t| { t.selection = None; });
-                        }
-                    }
-                    cx.notify();
-                    return;
-                }
-                _ => {
-                    // Character input handled by IME handler
-                    return;
-                }
-            }
-        }
-
-        // Command palette handling
-        if self.model.command_palette_open {
-            match keystr.as_str() {
-                "escape" | "ctrl+p" => {
-                    let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "enter" => {
-                    let _ = self.app.execute_selected_palette_command();
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "up" | "arrowup" => {
-                    self.app.select_previous_palette_item();
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "down" | "arrowdown" => {
-                    self.app.select_next_palette_item();
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                _ => return,
-            }
-        }
-
-        // Ctrl+Shift shortcuts — UI operations that don't conflict with shell readline
-        if ctrl && shift {
-            match keystr.as_str() {
-                "ctrl+shift+c" => {
-                    self.copy_selection(cx);
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+v" => {
-                    self.smart_paste(cx);
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+\\" => {
-                    self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-                    self.spawn_terminal_in_active();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+d" => {
-                    self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
-                    self.spawn_terminal_in_active();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+t" => {
-                    self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
-                    self.spawn_terminal_in_active();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+w" => {
-                    if self.terminal_manager_mut().close_active_pane() {
-                        cx.notify();
-                    }
-                    return;
-                }
-                "ctrl+shift+f" => {
-                    self.toggle_zoom();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+e" => {
-                    self.terminal_manager_mut().equalize_splits();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+m" => {
-                    self.sidebar_state.collapsed = !self.sidebar_state.collapsed;
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+p" => {
-                    let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+s" => {
-                    // Open terminal search
-                    self.search_state = Some((String::new(), 0));
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+n" => {
-                    let _ = self.app.run_command("new workspace");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+left" => {
-                    let _ = self.app.run_command("pane resize-left");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+shift+right" => {
-                    let _ = self.app.run_command("pane resize-right");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        // Ctrl shortcuts — only intercept keys that don't conflict with shell/readline
-        if ctrl && !shift {
-            match keystr.as_str() {
-                "ctrl+v" => {
-                    self.paste_clipboard(cx);
-                    cx.notify();
-                    return;
-                }
-                // Pane navigation
-                "ctrl+left" => {
-                    let _ = self.app.run_command("switch pane prev");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+right" => {
-                    let _ = self.app.run_command("switch pane next");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+q" => {
-                    cx.quit();
-                    return;
-                }
-                // Font size
-                "ctrl+=" | "ctrl++" => {
-                    let _ = self.app.run_command("font increase");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+-" => {
-                    let _ = self.app.run_command("font decrease");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+0" => {
-                    let _ = self.app.run_command("font reset");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                // Tab/workspace switching
-                "ctrl+pageup" => {
-                    let _ = self.app.run_command("switch tab prev");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+pagedown" => {
-                    let _ = self.app.run_command("switch tab next");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+1" => {
-                    let _ = self.app.run_command("switch workspace 1");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+2" => {
-                    let _ = self.app.run_command("switch workspace 2");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+3" => {
-                    let _ = self.app.run_command("switch workspace 3");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+4" => {
-                    let _ = self.app.run_command("switch workspace 4");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+5" => {
-                    let _ = self.app.run_command("switch workspace 5");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                // All other Ctrl+key → forward to PTY (readline: Ctrl+A/E/B/F/D/U/K/W/P/N/etc.)
-                _ => {
-                    self.handle_terminal_input(key, ctrl, shift, alt);
-                    cx.notify();
-                    return;
-                }
-            }
-        }
-
-        // Alt+key → forward to PTY (readline word navigation: Alt+B/F/D, Alt+Backspace, etc.)
-        if alt && !ctrl {
-            self.handle_terminal_input(key, ctrl, shift, alt);
-            cx.notify();
-            return;
-        }
-
-        // Terminal special keys (non-modifier or with any modifier)
-        match keystr.as_str() {
-            "enter" | "tab" | "backspace" | "escape" => {
-                self.handle_terminal_input(key, ctrl, shift, alt);
-                cx.notify();
-                return;
-            }
-            s if s == "up" || s == "down" || s == "left" || s == "right"
-                || s.starts_with("arrow") || s.starts_with("f1")
-                || s.starts_with("f2") || s.starts_with("f3") || s.starts_with("f4")
-                || s.starts_with("f5") || s.starts_with("f6") || s.starts_with("f7")
-                || s.starts_with("f8") || s.starts_with("f9") || s.starts_with("f10")
-                || s.starts_with("f11") || s.starts_with("f12") || s.starts_with("page")
-                || s.starts_with("home") || s.starts_with("end") || s.starts_with("insert")
-                || s.starts_with("delete") => {
-                self.handle_terminal_input(key, ctrl, shift, alt);
-                cx.notify();
-                return;
-            }
-            _ => {}
-        }
-
-        // Regular character input is handled by EntityInputHandler::replace_text_in_range
-        // (both English and Chinese/IME input go through that path to avoid double-sending)
-    }
-}
-
-/// Render the right-click context menu
-#[cfg(feature = "gpui")]
-fn render_context_menu(
-    pos: gpui::Point<gpui::Pixels>,
-    items: Vec<ContextMenuItem>,
-    viewport_w: gpui::Pixels,
-    viewport_h: gpui::Pixels,
-    cx: &mut Context<GpuiShellView>,
-) -> impl IntoElement {
-    let menu_w = 240.0_f32;
-    // Each item ≈ 30px (6px padding + ~18px text), separator ≈ 10px
-    let separator_count = items.iter().filter(|i| i.separator_after).count();
-    let menu_h = (items.len() as f32) * 30.0 + (separator_count as f32) * 10.0 + 12.0;
-    let max_menu_h = viewport_h.as_f32() * 0.8; // never exceed 80% of viewport
-
-    // Adjust position to keep menu within viewport
-    let mut x = pos.x.as_f32();
-    let mut y = pos.y.as_f32();
-    if x + menu_w > viewport_w.as_f32() {
-        x = (viewport_w.as_f32() - menu_w).max(0.0);
-    }
-    if y + menu_h.min(max_menu_h) > viewport_h.as_f32() {
-        y = (viewport_h.as_f32() - menu_h.min(max_menu_h)).max(0.0);
-    }
-
-    let mut menu = div()
-        .id("context-menu-container")
-        .absolute()
-        .left(px(x))
-        .top(px(y))
-        .w(px(menu_w))
-        .max_h(px(max_menu_h))
-        .overflow_y_scroll()
-        .rounded(px(8.0))
-        .bg(rgb(0x282a2e))
-        .border_1()
-        .border_color(rgb(0x373b41))
-        .shadow_lg()
-        .py_1()
-        .flex()
-        .flex_col();
-
-    for item in items {
-        let label = item.label;
-        let enabled = item.enabled;
-
-        let text_color = if enabled { rgb(0xc5c8c6) } else { rgb(0x4a4d4e) };
-
-        // Left side: optional icon badge + label
-        let mut left = div().flex().flex_row().items_center().gap(px(6.0));
-        if let Some(icon) = item.icon {
-            let (badge_bg, badge_fg) = match icon {
-                "WSL" => (rgb(0x2d4f2d), rgb(0x8abeb7)), // green tint for Linux/WSL
-                _     => (rgb(0x313244), rgb(0x81a2be)),  // blue for native tools
-            };
-            left = left.child(
-                div()
-                    .px(px(4.0))
-                    .py(px(1.0))
-                    .rounded(px(3.0))
-                    .bg(badge_bg)
-                    .text_color(badge_fg)
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(icon),
-            );
-        }
-        left = left.child(div().text_sm().text_color(text_color).child(label));
-
-        let row = div()
-            .id(gpui::ElementId::Name(label.into()))
-            .px_3()
-            .py(px(6.0))
-            .mx_1()
-            .rounded(px(4.0))
-            .flex()
-            .justify_between()
-            .items_center()
-            .when(enabled, |d| d.hover(|d| d.bg(rgb(0x373b41))))
-            .when(enabled, |d| {
-                d.on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.execute_context_menu_action(label, cx);
-                }))
-            })
-            .child(left)
-            .children(item.shortcut.map(|kb| {
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x696d70))
-                    .child(kb)
-            }));
-
-        menu = menu.child(row);
-
-        if item.separator_after {
-            menu = menu.child(
-                div()
-                    .mx_2()
-                    .my_1()
-                    .h(px(1.0))
-                    .bg(rgb(0x373b41)),
-            );
-        }
-    }
-
-    menu
-}
-
-/// Recursively render the tab layout tree (split panes)
-/// Get the first pane ID from a layout subtree (for identifying splits)
-#[cfg(feature = "gpui")]
-fn first_pane_in_layout(layout: &amux_platform::terminal::manager::TabLayout) -> Option<amux_platform::terminal::manager::PaneId> {
-    use amux_platform::terminal::manager::TabLayout;
-    match layout {
-        TabLayout::Single(id) => Some(id.clone()),
-        TabLayout::Horizontal { left, .. } => first_pane_in_layout(left),
-        TabLayout::Vertical { top, .. } => first_pane_in_layout(top),
-    }
-}
-
-#[cfg(feature = "gpui")]
-fn render_layout(
-    layout: &amux_platform::terminal::manager::TabLayout,
-    manager: &TerminalManager,
-    active_pane_id: Option<&amux_platform::terminal::manager::PaneId>,
-    avail_w: f32,
-    avail_h: f32,
-    cursor_blink_on: bool,
-    metrics: &crate::gpui_terminal::CellMetrics,
-    is_zoomed: bool,
-    renaming_tab: &Option<(String, usize, String)>,
-    origin_x: f32,
-    origin_y: f32,
-    pane_bounds: &mut std::collections::HashMap<String, (f32, f32, f32, f32)>,
-    cx: &mut Context<GpuiShellView>,
-) -> gpui::AnyElement {
-    use amux_platform::terminal::manager::{PaneId, TabLayout};
-
-    match layout {
-        TabLayout::Single(pane_id) => {
-            // Record this pane's screen bounds for mouse hit-testing.
-            // Tab strip (28px) is at the top; terminal content starts below it.
-            let tab_strip_h = 28.0_f32;
-            pane_bounds.insert(pane_id.0.clone(), (origin_x, origin_y + tab_strip_h, avail_w, (avail_h - tab_strip_h).max(0.0)));
-            let is_active = active_pane_id == Some(pane_id);
-            let has_multiple_panes = manager.total_panes() > 1;
-
-            // Build per-pane tab strip + terminal content
-            // get_pane may return None if layout references a pane that doesn't
-            // exist in the panes map (e.g., corrupted saved layout). In that case,
-            // we skip the pane and render a placeholder.
-            let (tab_strip, content) = if let Some(pane) = manager.get_pane(pane_id) {
-                let tabs = pane.tab_titles();
-                let pid_for_tabs = pane_id.clone();
-                let has_multiple_panes = manager.total_panes() > 1;
-
-                // Left side: tab buttons
-                let tab_count = tabs.len();
-                let tabs_row = div()
-                    .flex()
-                    .flex_row()
-                    .gap_px()
-                    .flex_1()
-                    .overflow_hidden()
-                    .children(tabs.into_iter().map(|(idx, title, is_tab_active, has_activity)| {
-                        let pid_click = pid_for_tabs.clone();
-                        let pid_close_tab = pid_for_tabs.clone();
-                        let pid_drag = pid_for_tabs.clone();
-                        let can_close_tab = tab_count > 1;
-                        let drag_title = title.clone();
-                        div()
-                            .id(gpui::ElementId::Name(
-                                format!("{}-tab-{}", pid_for_tabs.0, idx).into(),
-                            ))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(4.0))
-                            .min_w(px(60.0))
-                            .max_w(px(180.0))
-                            .flex_shrink()
-                            .overflow_hidden()
-                            .px_3()
-                            .py(px(4.0))
-                            .text_xs()
-                            .cursor_grab()
-                            .text_color(if is_tab_active { rgb(0xcdd6f4) } else { rgb(0x7f849c) })
-                            .bg(if is_tab_active { rgb(0x1e1e2e) } else { rgb(0x11111b) })
-                            .border_b_2()
-                            .border_color(if is_tab_active { rgb(0x89b4fa) } else { rgb(0x11111b) })
-                            .when(is_tab_active, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                            .hover(|d| d.bg(rgb(0x252530)))
-                            .on_drag(
-                                DragTab {
-                                    source_pane: pid_drag,
-                                    tab_index: idx,
-                                    title: drag_title,
-                                },
-                                |drag, _, _, cx| {
-                                    cx.stop_propagation();
-                                    cx.new(|_| drag.clone())
-                                },
-                            )
-                            .on_click({
-                                let pid_rename = pid_click.clone();
-                                let rename_title = title.clone();
-                                cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
-                                    if event.click_count() >= 2 {
-                                        // Double-click: start inline rename
-                                        this.renaming_tab = Some((pid_rename.0.clone(), idx, String::new()));
-                                    } else {
-                                        // Single click: switch tab
-                                        this.terminal_manager_mut().set_active_pane(&pid_click);
-                                        this.terminal_manager_mut().set_active_tab_in_pane(idx);
-                                    }
-                                    cx.notify();
-                                })
-                            })
-                            .child({
-                                let is_tab_renaming = renaming_tab.as_ref()
-                                    .map(|(p, i, _): &(String, usize, String)| p == &pid_for_tabs.0 && *i == idx)
-                                    .unwrap_or(false);
-                                if is_tab_renaming {
-                                    let rename_text = renaming_tab.as_ref()
-                                        .map(|(_, _, t): &(String, usize, String)| t.clone())
-                                        .unwrap_or_default();
-                                    div()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .text_sm()
-                                        .text_color(rgb(0xcdd6f4))
-                                        .bg(rgb(0x313244))
-                                        .rounded(px(2.0))
-                                        .border_1()
-                                        .border_color(rgb(0x89b4fa))
-                                        .px_1()
-                                        .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
-                                        .into_any_element()
-                                } else {
-                                    let mut tab_content = div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(4.0))
-                                        .overflow_hidden()
-                                        .flex_1();
-                                    // Activity indicator: green dot for unread output
-                                    if has_activity && !is_tab_active {
-                                        tab_content = tab_content.child(
-                                            div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
-                                                .bg(rgb(0xa6e3a1)).flex_shrink_0()
-                                        );
-                                    }
-                                    tab_content = tab_content.child(
-                                        div().whitespace_nowrap().child(title)
-                                    );
-                                    tab_content.into_any_element()
-                                }
-                            })
-                            .when(can_close_tab, |d| {
-                                d.child(
-                                    div()
-                                        .id(gpui::ElementId::Name(
-                                            format!("{}-tab-{}-close", pid_close_tab.0, idx).into(),
-                                        ))
-                                        .px(px(2.0))
-                                        .rounded(px(3.0))
-                                        .text_color(rgb(0x585b70))
-                                        .hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
-                                        .child("×")
-                                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                                            this.terminal_manager_mut().set_active_pane(&pid_close_tab);
-                                            if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pid_close_tab) {
-                                                pane.close_tab(idx);
-                                            }
-                                            cx.notify();
-                                        }))
-                                )
-                            })
-                    }));
-
-                // Right side: action buttons
-                let pid_new = pane_id.clone();
-                let pid_sr = pane_id.clone();
-                let pid_sd = pane_id.clone();
-                let pid_close = pane_id.clone();
-
-                let actions_row = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .px_2()
-                    // + New Tab
-                    .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("{}-btn-add", pane_id.0).into()))
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(3.0))
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
-                            .child("+")
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.terminal_manager_mut().set_active_pane(&pid_new);
-                                this.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
-                                this.spawn_terminal_in_active();
-                                cx.notify();
-                            })),
-                    )
-                    // Split Right ⬕
-                    .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("{}-btn-sr", pane_id.0).into()))
-                            .px(px(5.0))
-                            .py(px(2.0))
-                            .rounded(px(3.0))
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
-                            .child("⬕")
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.terminal_manager_mut().set_active_pane(&pid_sr);
-                                this.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-                                this.spawn_terminal_in_active();
-                                cx.notify();
-                            })),
-                    )
-                    // Split Down ⬓
-                    .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("{}-btn-sd", pane_id.0).into()))
-                            .px(px(5.0))
-                            .py(px(2.0))
-                            .rounded(px(3.0))
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
-                            .child("⬓")
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.terminal_manager_mut().set_active_pane(&pid_sd);
-                                this.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
-                                this.spawn_terminal_in_active();
-                                cx.notify();
-                            })),
-                    )
-                    // Zoom ⤢ / Restore ⤡
-                    .when(has_multiple_panes || is_zoomed, |d| {
-                        let pid_zoom = pane_id.clone();
-                        let zoom_icon = if is_zoomed { "⤡" } else { "⤢" };
-                        d.child(
-                            div()
-                                .id(gpui::ElementId::Name(format!("{}-btn-zoom", pane_id.0).into()))
-                                .px(px(5.0))
-                                .py(px(2.0))
-                                .rounded(px(3.0))
-                                .text_xs()
-                                .text_color(rgb(0x6c7086))
-                                .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
-                                .child(zoom_icon)
-                                .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.terminal_manager_mut().set_active_pane(&pid_zoom);
-                                    this.toggle_zoom();
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    // Close ✕
-                    .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("{}-btn-close", pane_id.0).into()))
-                            .px(px(5.0))
-                            .py(px(2.0))
-                            .rounded(px(3.0))
-                            .text_xs()
-                            .text_color(if has_multiple_panes { rgb(0x6c7086) } else { rgb(0x313244) })
-                            .when(has_multiple_panes, |d| {
-                                d.hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
-                            })
-                            .child("✕")
-                            .when(has_multiple_panes, |d| {
-                                d.on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.terminal_manager_mut().set_active_pane(&pid_close);
-                                    this.terminal_manager_mut().close_active_pane();
-                                    cx.notify();
-                                }))
-                            }),
-                    );
-
-                // Combine into tab strip (relative container for zoom indicator)
-                let tab_strip = div()
-                    .relative()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .bg(rgb(0x11111b))
-                    .border_b_1()
-                    .border_color(rgb(0x252530))
-                    .child(tabs_row)
-                    .child(actions_row)
-                    // Zoom indicator: absolutely centered over the entire tab strip
-                    .when(is_zoomed, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left_0()
-                                .right_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                // Don't block clicks on tabs/buttons underneath
-                                .child(
-                                    div()
-                                        .px_2()
-                                        .py(px(2.0))
-                                        .rounded(px(8.0))
-                                        .bg(rgb(0x1e1e2e))
-                                        .border_1()
-                                        .border_color(rgb(0x45475a))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(5.0))
-                                        .child(
-                                            div()
-                                                .w(px(6.0))
-                                                .h(px(6.0))
-                                                .rounded(px(3.0))
-                                                .bg(rgb(0xa6e3a1)) // green for "zoomed" state
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0xa6adc8))
-                                                .child("ZOOMED")
-                                        )
-                                )
-                        )
-                    })
-                    .into_any_element();
-
-                let content = if let Some(term) = pane.active_terminal_ref() {
-                    crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active).into_any_element()
-                } else {
-                    div().flex_1().flex().items_center().justify_center()
-                        .bg(rgb(0x1d1f21))
-                        .child(
-                            div().flex().flex_col().items_center().gap_2()
-                                .child(div().text_sm().text_color(rgb(0x585b70)).child("Starting terminal..."))
-                        )
-                        .into_any_element()
-                };
-                (tab_strip, content)
-            } else {
-                (
-                    div().into_any_element(),
-                    div().flex_1().bg(rgb(0x1e1e2e)).child("Empty pane").into_any_element(),
-                )
-            };
-
-            let pid = pane_id.clone();
-            let pid_drop = pane_id.clone();
-            div()
-                .id(gpui::ElementId::Name(pane_id.0.clone().into()))
-                .flex_1()
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .bg(rgb(0x1d1f21))
-                // Active pane indicator: only show when multiple panes exist
-                // No extra border — active pane is indicated by tab strip's blue underline
-                // Tab strip at top (limux style)
-                .child(tab_strip)
-                // Terminal content
-                .child(content)
-                // Drag-and-drop: visual feedback when dragging a tab over this pane
-                .drag_over::<DragTab>(|style, _, _, _| {
-                    style.border_t_2().border_color(rgb(0x585b70))
-                })
-                // Drag-and-drop: accept a dropped tab
-                .on_drop(cx.listener(move |this, drag: &DragTab, _window, cx| {
-                    this.terminal_manager_mut().move_tab_to_pane(
-                        &drag.source_pane,
-                        drag.tab_index,
-                        &pid_drop,
-                    );
-                    cx.notify();
-                }))
-                .on_mouse_down(gpui::MouseButton::Right, {
-                    let pid_right = pid.clone();
-                    cx.listener(move |this, _event: &gpui::MouseDownEvent, _window, cx| {
-                        this.terminal_manager_mut().set_active_pane(&pid_right);
-                        cx.notify();
-                    })
-                })
-                // Switch active pane on mouse_down (not click) so it happens
-                // BEFORE the root div's mouse_down handler reads active_terminal().
-                // This ensures text selection targets the correct pane.
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _event: &gpui::MouseDownEvent, _window, cx| {
-                    this.terminal_manager_mut().set_active_pane(&pid);
-                    cx.notify();
-                }))
-                .into_any_element()
-        }
-        TabLayout::Horizontal { left, right, ratio } => {
-            let r = *ratio;
-            let handle_px = 6.0_f32;
-            let usable = (avail_w - handle_px).max(0.0);
-            let left_w = usable * r;
-            let right_w = usable * (1.0 - r);
-
-            let split_id = first_pane_in_layout(right)
-                .map(|p| p.0.clone())
-                .unwrap_or_default();
-            let split_id_clone = split_id.clone();
-
-            let left_div = div()
-                .id(gpui::ElementId::Name(format!("split-l-{}", split_id).into()))
-                .w(px(left_w))
-                .h_full()
-                .overflow_hidden()
-                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, cx));
-
-            let handle = div()
-                .id(gpui::ElementId::Name(format!("resize-h-{}", split_id).into()))
-                .group("resize-h")
-                .w(px(handle_px))
-                .flex_shrink_0()
-                .cursor_col_resize()
-                .child(
-                    div()
-                        .w(px(1.0))
-                        .h_full()
-                        .mx_auto()
-                        .bg(rgb(0x252530))
-                        .group_hover("resize-h", |d| d.w(px(2.0)).bg(rgb(0x585b70)))
-                )
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _window, _cx| {
-                    this.resize_drag = Some(ResizeDragState {
-                        split_first_pane: split_id_clone.clone(),
-                        is_horizontal: true,
-                        start_mouse_pos: event.position.x.as_f32(),
-                        start_ratio: r,
-                        container_length: usable,
-                    });
-                }));
-
-            let right_div = div()
-                .id(gpui::ElementId::Name(format!("split-r-{}", split_id).into()))
-                .w(px(right_w))
-                .h_full()
-                .overflow_hidden()
-                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, cx));
-
-            div()
-                .w(px(avail_w))
-                .h(px(avail_h))
-                .flex()
-                .flex_row()
-                .overflow_hidden()
-                .child(left_div)
-                .child(handle)
-                .child(right_div)
-                .into_any_element()
-        }
-        TabLayout::Vertical { top, bottom, ratio } => {
-            let r = *ratio;
-            let handle_px = 6.0_f32;
-            let usable = (avail_h - handle_px).max(0.0);
-            let top_h = usable * r;
-            let bottom_h = usable * (1.0 - r);
-
-            let split_id = first_pane_in_layout(bottom)
-                .map(|p| p.0.clone())
-                .unwrap_or_default();
-            let split_id_clone = split_id.clone();
-
-            let top_div = div()
-                .id(gpui::ElementId::Name(format!("split-t-{}", split_id).into()))
-                .w_full()
-                .h(px(top_h))
-                .overflow_hidden()
-                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, cx));
-
-            let handle = div()
-                .id(gpui::ElementId::Name(format!("resize-v-{}", split_id).into()))
-                .group("resize-v")
-                .h(px(handle_px))
-                .flex_shrink_0()
-                .cursor_ns_resize()
-                .child(
-                    div()
-                        .h(px(1.0))
-                        .w_full()
-                        .my_auto()
-                        .bg(rgb(0x252530))
-                        .group_hover("resize-v", |d| d.h(px(2.0)).bg(rgb(0x585b70)))
-                )
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _window, _cx| {
-                    this.resize_drag = Some(ResizeDragState {
-                        split_first_pane: split_id_clone.clone(),
-                        is_horizontal: false,
-                        start_mouse_pos: event.position.y.as_f32(),
-                        start_ratio: r,
-                        container_length: usable,
-                    });
-                }));
-
-            let bottom_div = div()
-                .id(gpui::ElementId::Name(format!("split-b-{}", split_id).into()))
-                .w_full()
-                .h(px(bottom_h))
-                .overflow_hidden()
-                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, cx));
-
-            div()
-                .w(px(avail_w))
-                .h(px(avail_h))
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .child(top_div)
-                .child(handle)
-                .child(bottom_div)
-                .into_any_element()
-        }
-    }
-}
-
-#[cfg(feature = "gpui")]
-pub fn run(app: &amux_ui::DesktopApp) {
+pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
     use amux_ui::GpuiRenderer;
     use smol::Timer;
 
@@ -2950,6 +1379,7 @@ pub fn run(app: &amux_ui::DesktopApp) {
     application().run(move |cx: &mut App| {
         let model = model.clone();
         let app = app.clone();
+        let config = config.clone();
         
         let window_opts = WindowOptions {
             titlebar: Some(gpui::TitlebarOptions {
@@ -2992,14 +1422,15 @@ pub fn run(app: &amux_ui::DesktopApp) {
                             if !this.terminals_spawned {
                                 this.terminals_spawned = true;
                                 let (shell, args) = GpuiShellView::default_shell();
-                                let cwd = GpuiShellView::default_cwd();
+                                let default_cwd = GpuiShellView::default_cwd();
                                 let ws_ids: Vec<String> = this.workspace_terminals.keys().cloned().collect();
                                 for ws_id in ws_ids {
                                     if let Some(tm) = this.workspace_terminals.get_mut(&ws_id) {
                                         let pane_ids: Vec<_> = tm.active_layout()
                                             .map(|l| l.pane_ids()).unwrap_or_default();
                                         for pid in pane_ids {
-                                            let _ = tm.spawn_in_pane(&pid, &shell, &args, cwd.as_deref());
+                                            // Spawn all tabs with per-tab saved cwd
+                                            tm.spawn_all_tabs_in_pane(&pid, &shell, &args, default_cwd.as_deref());
                                         }
                                     }
                                 }
@@ -3031,7 +1462,7 @@ pub fn run(app: &amux_ui::DesktopApp) {
                 })
                 .detach();
 
-                GpuiShellView::new(app, model, cx)
+                GpuiShellView::new(app, model, config, cx)
             })
         });
         
@@ -3045,4 +1476,4 @@ pub fn run(app: &amux_ui::DesktopApp) {
 }
 
 #[cfg(not(feature = "gpui"))]
-pub fn run(_: &amux_ui::DesktopApp) {}
+pub fn run(_: &amux_ui::DesktopApp, _config: crate::gpui_config::AmuxConfig) {}

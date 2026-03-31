@@ -126,9 +126,11 @@ dependencies = [
  "git2",
  "gpui",
  "gpui_platform",
+ "serde",
  "serde_json",
  "smol",
  "tempfile",
+ "toml 0.8.23",
  "windows-sys 0.59.0",
 ]
 
