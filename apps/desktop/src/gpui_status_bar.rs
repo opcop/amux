@@ -1,6 +1,14 @@
 #[cfg(feature = "gpui")]
 use gpui::{rgb, px, FontWeight, IntoElement, div, prelude::*};
 
+/// Summary of a single agent's status for the status bar
+#[cfg(feature = "gpui")]
+pub struct AgentSummary {
+    pub name: String,
+    pub status_icon: &'static str,
+    pub color: u32,
+}
+
 /// Runtime status bar data collected from actual terminal state
 #[cfg(feature = "gpui")]
 pub struct StatusBarData {
@@ -8,6 +16,7 @@ pub struct StatusBarData {
     pub pane_count: usize,
     pub tab_count: usize,
     pub shell_name: String,
+    pub agents: Vec<AgentSummary>,
 }
 
 #[cfg(feature = "gpui")]
@@ -81,6 +90,32 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                 .flex()
                 .gap_3()
                 .items_center()
+                // Agent status indicators
+                .children(if data.agents.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut els = vec![
+                        div().w_px().h(px(12.0)).bg(rgb(0x313244)).into_any_element(),
+                    ];
+                    for agent in &data.agents {
+                        els.push(
+                            div()
+                                .flex()
+                                .gap(px(4.0))
+                                .items_center()
+                                .child(
+                                    div().text_color(rgb(agent.color))
+                                        .child(agent.status_icon)
+                                )
+                                .child(
+                                    div().text_color(rgb(0x7f849c))
+                                        .child(agent.name.clone())
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                    els
+                })
                 .child(
                     div()
                         .px(px(6.0))

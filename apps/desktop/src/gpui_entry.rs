@@ -10,11 +10,11 @@ use gpui_platform::application;
 #[cfg(feature = "gpui")]
 use amux_platform::terminal::manager::{TerminalManager, SplitDirection};
 #[cfg(feature = "gpui")]
-use crate::gpui_status_bar::{render_status_bar, StatusBarData};
+use crate::gpui_status_bar::{render_status_bar, StatusBarData, AgentSummary};
 #[cfg(feature = "gpui")]
 use crate::gpui_workspace_sidebar::WorkspaceSidebarState;
 #[cfg(feature = "gpui")]
-use crate::gpui_layout_renderer::{render_context_menu, render_layout};
+use crate::gpui_layout_renderer::{render_context_menu, render_layout, render_pane_picker, render_template_picker, render_agent_picker};
 
 
 #[cfg(feature = "gpui")]
@@ -46,6 +46,14 @@ pub(crate) struct GpuiShellView {
     pub(crate) workspace_order: Vec<String>,
     pub(crate) pane_bounds: std::collections::HashMap<String, (f32, f32, f32, f32)>,
     pub(crate) config: crate::gpui_config::AmuxConfig,
+    /// Toast notifications for agent status changes.
+    pub(crate) toasts: Vec<ToastNotification>,
+    /// Pane picker for "Send to Pane" (Ctrl+Shift+Enter)
+    pub(crate) pane_picker: Option<PanePickerState>,
+    /// Template picker for "Apply Layout..."
+    pub(crate) template_picker: Option<TemplatePickerState>,
+    /// Agent launcher picker
+    pub(crate) agent_picker: Option<AgentPickerState>,
 }
 
 /// Right-click context menu
@@ -64,6 +72,43 @@ pub(crate) struct ResizeDragState {
     pub(crate) start_mouse_pos: f32,
     pub(crate) start_ratio: f32,
     pub(crate) container_length: f32,
+}
+
+/// Toast notification for agent status changes
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub(crate) struct ToastNotification {
+    pub(crate) message: String,
+    pub(crate) color: u32,
+    pub(crate) frame_created: u32,
+    pub(crate) pane_id: amux_platform::terminal::manager::PaneId,
+    pub(crate) tab_index: usize,
+}
+
+/// Pane picker state for "Send to Pane" feature
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub(crate) struct PanePickerState {
+    pub(crate) text: String,
+    pub(crate) targets: Vec<(amux_platform::terminal::manager::PaneId, String)>,
+    pub(crate) selected_index: usize,
+}
+
+/// Template picker state for "Apply Layout" feature
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub(crate) struct TemplatePickerState {
+    pub(crate) templates: Vec<amux_platform::terminal::manager::LayoutTemplate>,
+    pub(crate) selected_index: usize,
+}
+
+/// Agent launcher picker state
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub(crate) struct AgentPickerState {
+    /// (tool_id, display_label, is_wsl)
+    pub(crate) agents: Vec<(String, String, bool)>,
+    pub(crate) selected_index: usize,
 }
 
 /// Drag data for tab drag-and-drop between panes
@@ -206,6 +251,10 @@ impl GpuiShellView {
             pane_bounds: std::collections::HashMap::new(),
             wsl_detected: false, // detected lazily in background
             config,
+            toasts: Vec::new(),
+            pane_picker: None,
+            template_picker: None,
+            agent_picker: None,
         }
     }
 
@@ -320,14 +369,14 @@ impl GpuiShellView {
             let _ = tm.spawn_in_active(&shell, &args, cwd.as_deref());
             self.workspace_terminals.insert(workspace_id.to_string(), tm);
         } else if let Some(tm) = self.workspace_terminals.get_mut(workspace_id) {
-            // Heal any layout/pane mismatches and spawn terminals for empty panes
+            // Heal layout, then spawn all tabs (not just active) for restored workspaces
             tm.heal_layout();
             let (shell, args) = Self::default_shell();
             let cwd = Self::default_cwd();
             let pane_ids: Vec<_> = tm.active_layout()
                 .map(|l| l.pane_ids()).unwrap_or_default();
             for pid in pane_ids {
-                let _ = tm.spawn_in_pane(&pid, &shell, &args, cwd.as_deref());
+                tm.spawn_all_tabs_in_pane(&pid, &shell, &args, cwd.as_deref());
             }
         }
     }
@@ -486,6 +535,112 @@ impl GpuiShellView {
         }
     }
 
+    /// Apply a layout template to the current workspace.
+    /// Replaces all panes and spawns terminals in each.
+    pub(crate) fn apply_template(&mut self, template: &amux_platform::terminal::manager::LayoutTemplate) {
+        let tm = TerminalManager::from_template(template);
+        self.workspace_terminals.insert(self.active_workspace_id.clone(), tm);
+        // Spawn terminals in all panes
+        let (shell, args) = Self::default_shell();
+        let cwd = Self::default_cwd();
+        let pane_ids: Vec<_> = self.terminal_manager().active_layout()
+            .map(|l| l.pane_ids()).unwrap_or_default();
+        for pid in pane_ids {
+            self.terminal_manager_mut().spawn_all_tabs_in_pane(&pid, &shell, &args, cwd.as_deref());
+        }
+        self.save_all_layouts();
+    }
+
+    /// Apply a template by name (searches built-in + custom).
+    pub(crate) fn apply_template_by_name(&mut self, name: &str) {
+        let templates = Self::all_templates();
+        if let Some(t) = templates.iter().find(|t| t.name == name) {
+            self.apply_template(t);
+        }
+    }
+
+    /// Save current layout as a custom template with auto-generated name.
+    pub(crate) fn save_current_as_template(&mut self, name: &str) {
+        let desc = format!("{} panes", self.terminal_manager().total_panes());
+        let template = self.terminal_manager().to_template(name, &desc);
+        Self::save_template(&template);
+    }
+
+    /// Open the template picker overlay.
+    pub(crate) fn open_template_picker(&mut self) {
+        let templates = Self::all_templates();
+        if templates.is_empty() { return; }
+        self.template_picker = Some(TemplatePickerState {
+            templates,
+            selected_index: 0,
+        });
+    }
+
+    /// Execute the template picker selection.
+    pub(crate) fn execute_template_picker(&mut self) {
+        if let Some(picker) = self.template_picker.take() {
+            if let Some(t) = picker.templates.get(picker.selected_index) {
+                self.apply_template(t);
+            }
+        }
+    }
+
+    /// Delete the selected custom template from the picker.
+    pub(crate) fn delete_selected_template(&mut self) {
+        if let Some(ref mut picker) = self.template_picker {
+            if let Some(t) = picker.templates.get(picker.selected_index) {
+                if t.builtin { return; } // can't delete built-in
+                let name = t.name.clone();
+                Self::delete_template(&name);
+                picker.templates.remove(picker.selected_index);
+                if picker.templates.is_empty() {
+                    self.template_picker = None;
+                } else if picker.selected_index >= picker.templates.len() {
+                    picker.selected_index = picker.templates.len() - 1;
+                }
+            }
+        }
+    }
+
+    /// Open the agent launcher picker.
+    pub(crate) fn open_agent_picker(&mut self) {
+        let mut agents: Vec<(String, String, bool)> = Vec::new();
+        if self.wsl_detected {
+            agents.push(("wsl".into(), "WSL Terminal".into(), true));
+        }
+        for &(tool_id, label, _env) in &self.detected_vibe_tools {
+            agents.push((tool_id.into(), label.into(), false));
+        }
+        if agents.is_empty() { return; }
+        // If only one option, launch directly
+        if agents.len() == 1 {
+            let (tool_id, _, is_wsl) = &agents[0];
+            if *is_wsl {
+                self.launch_wsl_shell();
+            } else {
+                self.launch_vibe_tool_env(tool_id, false);
+            }
+            return;
+        }
+        self.agent_picker = Some(AgentPickerState {
+            agents,
+            selected_index: 0,
+        });
+    }
+
+    /// Execute the agent picker selection.
+    pub(crate) fn execute_agent_picker(&mut self) {
+        if let Some(picker) = self.agent_picker.take() {
+            if let Some((tool_id, _, is_wsl)) = picker.agents.get(picker.selected_index) {
+                if *is_wsl {
+                    self.launch_wsl_shell();
+                } else {
+                    self.launch_vibe_tool_env(tool_id, false);
+                }
+            }
+        }
+    }
+
     /// Restart the terminal in a specific pane (used when process exits)
     pub(crate) fn restart_terminal_in_pane(&mut self, pane_id: &amux_platform::terminal::manager::PaneId) {
         self.terminal_manager_mut().set_active_pane(pane_id);
@@ -623,6 +778,7 @@ impl GpuiShellView {
 
         let mut items = vec![
             ContextMenuItem::action("Copy", Some("Ctrl+Shift+C"), has_selection),
+            ContextMenuItem::action("Send to Pane", Some("Ctrl+Shift+Enter"), self.terminal_manager().total_panes() > 1),
             ContextMenuItem::action("Paste", Some("Ctrl+V"), true).separator(),
             ContextMenuItem::action("Split Right", Some("Ctrl+Shift+\\"), true),
             ContextMenuItem::action("Split Down", Some("Ctrl+Shift+D"), true).separator(),
@@ -646,12 +802,14 @@ impl GpuiShellView {
             items.push(ContextMenuItem::action("Edit Startup", None, true).separator());
         }
 
-        // Terminal launchers: WSL + Vibe Coding tools
-        if self.wsl_detected {
-            items.push(ContextMenuItem::action("WSL Terminal", None, true));
-        }
-        for &(_tool_id, label, _env) in &self.detected_vibe_tools {
-            items.push(ContextMenuItem::action(label, None, true));
+        // Layout templates (opens picker)
+        items.push(ContextMenuItem::action("Apply Layout...", None, true));
+        items.push(ContextMenuItem::action("Save Layout as Template", None, true).separator());
+
+        // Terminal launchers
+        let has_launchers = self.wsl_detected || !self.detected_vibe_tools.is_empty();
+        if has_launchers {
+            items.push(ContextMenuItem::action("Launch Agent...", None, true));
         }
         items
     }
@@ -661,6 +819,9 @@ impl GpuiShellView {
         match label {
             "Copy" => {
                 self.copy_selection(cx);
+            }
+            "Send to Pane" => {
+                self.start_send_to_pane(cx);
             }
             "Paste" => {
                 self.paste_clipboard(cx);
@@ -687,8 +848,8 @@ impl GpuiShellView {
             "Zoom Pane" | "Restore Pane" => {
                 self.toggle_zoom();
             }
-            "WSL Terminal" => {
-                self.launch_wsl_shell();
+            "WSL Terminal" | "Launch Agent..." => {
+                self.open_agent_picker();
             }
             "Clear" => {
                 if let Some(term) = self.terminal_manager_mut().active_terminal() {
@@ -700,6 +861,14 @@ impl GpuiShellView {
             }
             "Edit Startup" => {
                 self.edit_startup_file();
+            }
+            "Apply Layout..." => {
+                self.open_template_picker();
+            }
+            "Save Layout as Template" => {
+                let ws_name = self.model.active_workspace_name
+                    .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+                self.save_current_as_template(&ws_name);
             }
             l if l.starts_with("Launch Claude")   => self.launch_vibe_tool_env("claude", l.contains("WSL")),
             l if l.starts_with("Launch Codex")    => self.launch_vibe_tool_env("codex", l.contains("WSL")),
@@ -1296,6 +1465,14 @@ impl Render for GpuiShellView {
                     std::env::var("SHELL").unwrap_or_else(|_| "bash".into())
                         .rsplit('/').next().unwrap_or("bash").to_string()
                 },
+                agents: self.terminal_manager().agent_summaries()
+                    .into_iter()
+                    .map(|(name, icon, color)| AgentSummary {
+                        name,
+                        status_icon: icon,
+                        color,
+                    })
+                    .collect(),
             }))
             // Context menu: dismiss overlay + menu
             .when_some(self.context_menu.clone(), |this, menu| {
@@ -1362,6 +1539,57 @@ impl Render for GpuiShellView {
                         )
                 )
             })
+            // Agent picker overlay (Launch Agent)
+            .when_some(self.agent_picker.clone(), |this, picker| {
+                this.child(render_agent_picker(&picker, cx))
+            })
+            // Template picker overlay (Apply Layout)
+            .when_some(self.template_picker.clone(), |this, picker| {
+                this.child(render_template_picker(&picker, cx))
+            })
+            // Pane picker overlay (Send to Pane)
+            .when_some(self.pane_picker.clone(), |this, picker| {
+                this.child(render_pane_picker(&picker, cx))
+            })
+            // Agent toast notifications (bottom-right)
+            .when(!self.toasts.is_empty(), |this| {
+                let toast_els: Vec<_> = self.toasts.iter().enumerate().map(|(i, t)| {
+                    let pane_id = t.pane_id.clone();
+                    let tab_idx = t.tab_index;
+                    div()
+                        .id(gpui::ElementId::Name(format!("toast-{}", i).into()))
+                        .px_3()
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .bg(rgb(0x1e1e2e))
+                        .border_1()
+                        .border_color(rgb(t.color))
+                        .shadow_lg()
+                        .text_xs()
+                        .text_color(rgb(t.color))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(0x252530)))
+                        .child(t.message.clone())
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.terminal_manager_mut().set_active_pane(&pane_id);
+                            this.terminal_manager_mut().set_active_tab_in_pane(tab_idx);
+                            // Dismiss all toasts on click
+                            this.toasts.clear();
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                }).collect();
+                this.child(
+                    div()
+                        .absolute()
+                        .bottom(px(36.0))
+                        .right(px(16.0))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(toast_els)
+                )
+            })
     }
 }
 
@@ -1419,36 +1647,65 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                 cx.notify();
                             }
                             // Deferred startup: spawn PTY processes on first frame
+                            // Only spawn the active workspace's terminals for fast startup.
+                            // Other workspaces spawn on first switch (ensure_workspace_terminal).
                             if !this.terminals_spawned {
                                 this.terminals_spawned = true;
                                 let (shell, args) = GpuiShellView::default_shell();
                                 let default_cwd = GpuiShellView::default_cwd();
-                                let ws_ids: Vec<String> = this.workspace_terminals.keys().cloned().collect();
-                                for ws_id in ws_ids {
-                                    if let Some(tm) = this.workspace_terminals.get_mut(&ws_id) {
-                                        let pane_ids: Vec<_> = tm.active_layout()
-                                            .map(|l| l.pane_ids()).unwrap_or_default();
-                                        for pid in pane_ids {
-                                            // Spawn all tabs with per-tab saved cwd
-                                            tm.spawn_all_tabs_in_pane(&pid, &shell, &args, default_cwd.as_deref());
-                                        }
+                                let active_ws = this.active_workspace_id.clone();
+                                if let Some(tm) = this.workspace_terminals.get_mut(&active_ws) {
+                                    let pane_ids: Vec<_> = tm.active_layout()
+                                        .map(|l| l.pane_ids()).unwrap_or_default();
+                                    for pid in pane_ids {
+                                        tm.spawn_all_tabs_in_pane(&pid, &shell, &args, default_cwd.as_deref());
                                     }
                                 }
-                                cx.notify(); // trigger re-render to show terminal content
+                                cx.notify();
                             }
-                            // Deferred tool detection: run on third frame
+                            // Deferred tool detection: launch in background thread on third frame
                             if !this.tools_detected && this.cursor_blink_frame >= 3 {
                                 this.tools_detected = true;
-                                this.detected_vibe_tools = GpuiShellView::detect_all_vibe_tools();
-                                this.wsl_detected = GpuiShellView::wsl_available();
+                                // Spawn detection in background so it doesn't block rendering
+                                cx.spawn(async move |this, cx| {
+                                    // Run blocking detection on a background thread
+                                    let (tools, wsl) = smol::unblock(|| {
+                                        let tools = GpuiShellView::detect_all_vibe_tools();
+                                        let wsl = GpuiShellView::wsl_available();
+                                        (tools, wsl)
+                                    }).await;
+                                    let _ = this.update(cx, |view: &mut GpuiShellView, _cx| {
+                                        view.detected_vibe_tools = tools;
+                                        view.wsl_detected = wsl;
+                                    });
+                                }).detach();
                             }
                             // Poll terminal activity for all workspaces (~15fps)
                             if this.cursor_blink_frame % 4 == 0 {
+                                let frame = this.cursor_blink_frame;
                                 for tm in this.workspace_terminals.values_mut() {
-                                    tm.poll_activity();
+                                    let notifs = tm.poll_activity();
+                                    for n in notifs {
+                                        let msg = format!("{} {} — {}",
+                                            n.new_status.icon(),
+                                            n.tab_title,
+                                            n.new_status.label(),
+                                        );
+                                        this.toasts.push(ToastNotification {
+                                            message: msg,
+                                            color: n.new_status.color_rgb(),
+                                            frame_created: frame,
+                                            pane_id: n.pane_id,
+                                            tab_index: n.tab_index,
+                                        });
+                                    }
                                 }
                                 // Clear activity for the active tab since user is looking at it
                                 this.terminal_manager_mut().clear_active_activity();
+                                // Expire old toasts (after ~3 seconds = 180 frames at 60fps)
+                                this.toasts.retain(|t| {
+                                    frame.wrapping_sub(t.frame_created) < 180
+                                });
                             }
                             // Auto-save layouts every ~5 seconds (300 frames at 60fps)
                             if this.cursor_blink_frame % 300 == 0 {

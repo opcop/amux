@@ -19,6 +19,70 @@ pub enum SplitDirection {
     Vertical,   // Top and bottom
 }
 
+/// AI agent status detected from terminal output
+#[derive(Clone, Debug, PartialEq)]
+pub enum AgentStatus {
+    /// Agent is processing/thinking (spinner, "Thinking...", etc.)
+    Thinking,
+    /// Agent is waiting for user input (prompt visible)
+    Waiting,
+    /// Agent has finished its task
+    Done,
+    /// Agent encountered an error
+    Error,
+}
+
+impl AgentStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            AgentStatus::Thinking => "thinking...",
+            AgentStatus::Waiting  => "waiting",
+            AgentStatus::Done     => "done",
+            AgentStatus::Error    => "error",
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
+        match self {
+            AgentStatus::Thinking => "⟳",
+            AgentStatus::Waiting  => "●",
+            AgentStatus::Done     => "✓",
+            AgentStatus::Error    => "✗",
+        }
+    }
+
+    /// Catppuccin Mocha color for each status (RGB u32)
+    pub fn color_rgb(&self) -> u32 {
+        match self {
+            AgentStatus::Thinking => 0x89b4fa, // blue
+            AgentStatus::Waiting  => 0xf9e2af, // yellow
+            AgentStatus::Done     => 0xa6e3a1, // green
+            AgentStatus::Error    => 0xf38ba8, // red
+        }
+    }
+}
+
+/// Notification emitted when an agent's status changes
+#[derive(Clone, Debug)]
+pub struct AgentNotification {
+    pub pane_id: PaneId,
+    pub tab_index: usize,
+    pub tab_title: String,
+    pub agent_kind: AgentKind,
+    pub new_status: AgentStatus,
+}
+
+/// Known AI agent type for status detection
+#[derive(Clone, Debug, PartialEq)]
+pub enum AgentKind {
+    Claude,
+    Aider,
+    OpenCode,
+    Codex,
+    Gemini,
+    Copilot,
+}
+
 /// A terminal tab inside a pane
 pub struct PaneTab {
     pub title: String,
@@ -33,6 +97,10 @@ pub struct PaneTab {
     pub cwd: Option<String>,
     /// Shell program and args used to spawn this terminal (for inheriting on split/new tab)
     pub shell_cmd: Option<(String, Vec<String>)>,
+    /// Detected AI agent type (None if this is a plain terminal)
+    pub agent_kind: Option<AgentKind>,
+    /// Current agent status (None if not an agent or not yet detected)
+    pub agent_status: Option<AgentStatus>,
     /// Last known cursor line (for activity detection)
     last_cursor_line: i32,
 }
@@ -56,6 +124,8 @@ impl TerminalPane {
                 exited: false,
                 cwd: None,
                 shell_cmd: None,
+                agent_kind: None,
+                agent_status: None,
                 last_cursor_line: 0,
             }],
             active_tab: 0,
@@ -101,6 +171,8 @@ impl TerminalPane {
             exited: false,
             cwd: None,
             shell_cmd: None,
+            agent_kind: None,
+            agent_status: None,
             last_cursor_line: 0,
         });
         self.active_tab = self.tabs.len() - 1;
@@ -125,8 +197,8 @@ impl TerminalPane {
     }
 
     /// Tab titles for rendering
-    /// Returns (index, title, is_active, has_activity, exited) for each tab.
-    pub fn tab_titles(&self) -> Vec<(usize, String, bool, bool, bool)> {
+    /// Returns (index, title, is_active, has_activity, exited, agent_status_label_with_color) for each tab.
+    pub fn tab_titles(&self) -> Vec<(usize, String, bool, bool, bool, Option<(String, u32)>)> {
         self.tabs
             .iter()
             .enumerate()
@@ -138,7 +210,10 @@ impl TerminalPane {
                         .and_then(|term| term.title())
                         .unwrap_or_else(|| t.title.clone())
                 };
-                (i, title, i == self.active_tab, t.has_activity, t.exited)
+                let status_info = t.agent_status.as_ref().map(|s| {
+                    (format!("{} {}", s.icon(), s.label()), s.color_rgb())
+                });
+                (i, title, i == self.active_tab, t.has_activity, t.exited, status_info)
             })
             .collect()
     }
@@ -186,6 +261,98 @@ impl PaneLayout {
 
     pub fn pane_count(&self) -> usize {
         self.pane_ids().len()
+    }
+}
+
+/// Reusable layout template — structure + pane labels, no terminal state
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayoutTemplate {
+    pub name: String,
+    pub description: String,
+    pub layout: PaneLayout,
+    /// Pane ID → label for tab title
+    #[serde(default)]
+    pub pane_labels: HashMap<String, String>,
+    /// Built-in templates cannot be deleted
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+impl LayoutTemplate {
+    fn new(name: &str, desc: &str, layout: PaneLayout, labels: &[(&str, &str)], builtin: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            description: desc.to_string(),
+            layout,
+            pane_labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            builtin,
+        }
+    }
+
+    /// Built-in layout templates
+    pub fn builtins() -> Vec<Self> {
+        vec![
+            Self::new(
+                "AI + Shell",
+                "Left 70% AI agent, right 30% shell",
+                PaneLayout::Horizontal {
+                    left: Box::new(PaneLayout::Single(PaneId("pane-1".into()))),
+                    right: Box::new(PaneLayout::Single(PaneId("pane-2".into()))),
+                    ratio: 0.7,
+                },
+                &[("pane-1", "AI"), ("pane-2", "Shell")],
+                true,
+            ),
+            Self::new(
+                "AI + Test + Git",
+                "Left AI, right-top test runner, right-bottom git",
+                PaneLayout::Horizontal {
+                    left: Box::new(PaneLayout::Single(PaneId("pane-1".into()))),
+                    right: Box::new(PaneLayout::Vertical {
+                        top: Box::new(PaneLayout::Single(PaneId("pane-2".into()))),
+                        bottom: Box::new(PaneLayout::Single(PaneId("pane-3".into()))),
+                        ratio: 0.5,
+                    }),
+                    ratio: 0.6,
+                },
+                &[("pane-1", "AI"), ("pane-2", "Test"), ("pane-3", "Git")],
+                true,
+            ),
+            Self::new(
+                "Multi-Agent",
+                "Two AI agents top, shell bottom",
+                PaneLayout::Vertical {
+                    top: Box::new(PaneLayout::Horizontal {
+                        left: Box::new(PaneLayout::Single(PaneId("pane-1".into()))),
+                        right: Box::new(PaneLayout::Single(PaneId("pane-2".into()))),
+                        ratio: 0.5,
+                    }),
+                    bottom: Box::new(PaneLayout::Single(PaneId("pane-3".into()))),
+                    ratio: 0.7,
+                },
+                &[("pane-1", "Agent 1"), ("pane-2", "Agent 2"), ("pane-3", "Shell")],
+                true,
+            ),
+            Self::new(
+                "Full Stack",
+                "4-grid: frontend, backend, test, shell",
+                PaneLayout::Horizontal {
+                    left: Box::new(PaneLayout::Vertical {
+                        top: Box::new(PaneLayout::Single(PaneId("pane-1".into()))),
+                        bottom: Box::new(PaneLayout::Single(PaneId("pane-2".into()))),
+                        ratio: 0.5,
+                    }),
+                    right: Box::new(PaneLayout::Vertical {
+                        top: Box::new(PaneLayout::Single(PaneId("pane-3".into()))),
+                        bottom: Box::new(PaneLayout::Single(PaneId("pane-4".into()))),
+                        ratio: 0.5,
+                    }),
+                    ratio: 0.5,
+                },
+                &[("pane-1", "Frontend"), ("pane-2", "Backend"), ("pane-3", "Test"), ("pane-4", "Shell")],
+                true,
+            ),
+        ]
     }
 }
 
@@ -246,6 +413,54 @@ impl TerminalManager {
         }
     }
 
+    /// Create a TerminalManager from a layout template (no terminals spawned).
+    pub fn from_template(template: &LayoutTemplate) -> Self {
+        let pane_ids = template.layout.pane_ids();
+        let mut panes = HashMap::new();
+        let mut max_num = 1_usize;
+        for id in &pane_ids {
+            let mut pane = TerminalPane::new(id.clone());
+            if let Some(label) = template.pane_labels.get(&id.0) {
+                if let Some(tab) = pane.tabs.first_mut() {
+                    tab.title = label.clone();
+                    tab.custom_title = true;
+                }
+            }
+            // Track highest pane number for next_pane_num
+            if let Some(num_str) = id.0.strip_prefix("pane-") {
+                if let Ok(n) = num_str.parse::<usize>() {
+                    max_num = max_num.max(n);
+                }
+            }
+            panes.insert(id.clone(), pane);
+        }
+        let active_pane = pane_ids.first().cloned()
+            .unwrap_or_else(|| PaneId("pane-1".to_string()));
+        Self {
+            layout: template.layout.clone(),
+            panes,
+            active_pane,
+            next_pane_num: max_num + 1,
+        }
+    }
+
+    /// Capture the current layout as a reusable template.
+    pub fn to_template(&self, name: &str, description: &str) -> LayoutTemplate {
+        let mut pane_labels = HashMap::new();
+        for (id, pane) in &self.panes {
+            if let Some(tab) = pane.tabs.get(pane.active_tab) {
+                pane_labels.insert(id.0.clone(), tab.title.clone());
+            }
+        }
+        LayoutTemplate {
+            name: name.to_string(),
+            description: description.to_string(),
+            layout: self.layout.clone(),
+            pane_labels,
+            builtin: false,
+        }
+    }
+
     fn next_pane_id(&mut self) -> PaneId {
         let id = PaneId(format!("pane-{}", self.next_pane_num));
         self.next_pane_num += 1;
@@ -303,6 +518,29 @@ impl TerminalManager {
         if self.panes.contains_key(pane_id) {
             self.active_pane = pane_id.clone();
         }
+    }
+
+    /// Send text to a specific pane's active terminal with bracketed paste support.
+    pub fn send_text_to_pane(&mut self, pane_id: &PaneId, text: &str) {
+        if let Some(pane) = self.panes.get_mut(pane_id) {
+            if let Some(term) = pane.active_terminal() {
+                term.send_paste_input(text);
+            }
+        }
+    }
+
+    /// List all panes except the given one, returning (PaneId, active_tab_title).
+    pub fn other_pane_summaries(&self, exclude: &PaneId) -> Vec<(PaneId, String)> {
+        self.panes.iter()
+            .filter(|(id, _)| *id != exclude)
+            .map(|(id, pane)| {
+                let title = pane.tab_titles().into_iter()
+                    .find(|(_, _, active, ..)| *active)
+                    .map(|(_, t, ..)| t)
+                    .unwrap_or_else(|| id.0.clone());
+                (id.clone(), title)
+            })
+            .collect()
     }
 
     pub fn set_active_tab_in_pane(&mut self, tab_index: usize) {
@@ -677,9 +915,12 @@ impl TerminalManager {
     // === Activity detection ===
 
     /// Check all terminals for new output. Mark inactive pane tabs that have activity.
+    /// Also detects AI agent status from terminal output.
+    /// Returns notifications for agent status transitions on non-active tabs.
     /// Called from the polling loop.
-    pub fn poll_activity(&mut self) {
+    pub fn poll_activity(&mut self) -> Vec<AgentNotification> {
         use alacritty_terminal::grid::Dimensions;
+        let mut notifications = Vec::new();
         let active_pane_id = self.active_pane.clone();
         for (pane_id, pane) in &mut self.panes {
             let is_active_pane = *pane_id == active_pane_id;
@@ -702,9 +943,155 @@ impl TerminalManager {
                             tab.has_activity = true;
                         }
                     }
+
+                    // Auto-detect agent kind from terminal title on first output
+                    if tab.agent_kind.is_none() {
+                        if let Some(title) = term.title() {
+                            tab.agent_kind = Self::detect_agent_kind(&title);
+                        }
+                    }
+
+                    // Detect agent status from recent terminal output
+                    if tab.agent_kind.is_some() {
+                        let old_status = tab.agent_status.clone();
+                        let lines = term.last_lines(5);
+                        tab.agent_status = Self::detect_agent_status(
+                            tab.agent_kind.as_ref().unwrap(),
+                            &lines,
+                            tab.exited,
+                        );
+                        // Notify on status change (thinking→done or thinking→waiting)
+                        if !is_active_tab && old_status != tab.agent_status {
+                            if matches!(tab.agent_status, Some(AgentStatus::Done | AgentStatus::Waiting | AgentStatus::Error)) {
+                                tab.has_activity = true;
+                                let title = tab.terminal.as_ref()
+                                    .and_then(|t| t.title())
+                                    .unwrap_or_else(|| tab.title.clone());
+                                notifications.push(AgentNotification {
+                                    pane_id: pane_id.clone(),
+                                    tab_index: tab_idx,
+                                    tab_title: title,
+                                    agent_kind: tab.agent_kind.clone().unwrap(),
+                                    new_status: tab.agent_status.clone().unwrap(),
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
+        notifications
+    }
+
+    /// Collect summary of all detected agents across all panes/tabs.
+    /// Returns (short_name, status_icon, color_rgb) for each agent tab.
+    pub fn agent_summaries(&self) -> Vec<(String, &'static str, u32)> {
+        let mut out = Vec::new();
+        for pane in self.panes.values() {
+            for tab in &pane.tabs {
+                if let (Some(kind), Some(status)) = (&tab.agent_kind, &tab.agent_status) {
+                    let name = if tab.custom_title {
+                        tab.title.clone()
+                    } else {
+                        format!("{:?}", kind)
+                    };
+                    out.push((name, status.icon(), status.color_rgb()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Detect AI agent kind from terminal title
+    fn detect_agent_kind(title: &str) -> Option<AgentKind> {
+        let title_lower = title.to_lowercase();
+        if title_lower.contains("claude") { return Some(AgentKind::Claude); }
+        if title_lower.contains("aider") { return Some(AgentKind::Aider); }
+        if title_lower.contains("opencode") { return Some(AgentKind::OpenCode); }
+        if title_lower.contains("codex") { return Some(AgentKind::Codex); }
+        if title_lower.contains("gemini") { return Some(AgentKind::Gemini); }
+        if title_lower.contains("copilot") { return Some(AgentKind::Copilot); }
+        None
+    }
+
+    /// Detect agent status from the last few lines of terminal output.
+    fn detect_agent_status(kind: &AgentKind, lines: &[String], exited: bool) -> Option<AgentStatus> {
+        if exited {
+            return Some(AgentStatus::Done);
+        }
+        if lines.is_empty() {
+            return None;
+        }
+
+        // Check lines from bottom up for the most recent signal
+        for line in lines.iter().rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() { continue; }
+
+            // Common error patterns (check first — errors override other states)
+            if trimmed.contains("Error") || trimmed.contains("error:")
+                || trimmed.contains("ERROR") || trimmed.contains("failed")
+                || trimmed.contains("Permission denied") || trimmed.contains("panic")
+            {
+                return Some(AgentStatus::Error);
+            }
+
+            match kind {
+                AgentKind::Claude => {
+                    // Claude Code: ">" prompt = waiting, spinner/progress = thinking
+                    if trimmed.ends_with('>')
+                        || trimmed.ends_with('>') && trimmed.contains('$')
+                        || trimmed == ">"
+                    {
+                        return Some(AgentStatus::Waiting);
+                    }
+                    if trimmed.contains("Thinking") || trimmed.contains("⠋")
+                        || trimmed.contains("⠙") || trimmed.contains("⠹")
+                        || trimmed.contains("⠸") || trimmed.contains("⠼")
+                        || trimmed.contains("⠴") || trimmed.contains("⠦")
+                        || trimmed.contains("⠧") || trimmed.contains("⠇")
+                        || trimmed.contains("⠏")
+                    {
+                        return Some(AgentStatus::Thinking);
+                    }
+                }
+                AgentKind::Aider => {
+                    // Aider: "aider>" or ">" = waiting, "Thinking..." = thinking
+                    if trimmed.ends_with('>') || trimmed.starts_with("aider>") {
+                        return Some(AgentStatus::Waiting);
+                    }
+                    if trimmed.contains("Thinking") || trimmed.contains("sending") {
+                        return Some(AgentStatus::Thinking);
+                    }
+                }
+                AgentKind::OpenCode => {
+                    if trimmed.ends_with('>') || trimmed.contains("opencode>") {
+                        return Some(AgentStatus::Waiting);
+                    }
+                    if trimmed.contains("Thinking") || trimmed.contains("Processing") {
+                        return Some(AgentStatus::Thinking);
+                    }
+                }
+                AgentKind::Codex => {
+                    if trimmed.ends_with('>') {
+                        return Some(AgentStatus::Waiting);
+                    }
+                    if trimmed.contains("Thinking") || trimmed.contains("Running") {
+                        return Some(AgentStatus::Thinking);
+                    }
+                }
+                AgentKind::Gemini | AgentKind::Copilot => {
+                    if trimmed.ends_with('>') || trimmed.ends_with("$ ") {
+                        return Some(AgentStatus::Waiting);
+                    }
+                    if trimmed.contains("Thinking") || trimmed.contains("Generating") {
+                        return Some(AgentStatus::Thinking);
+                    }
+                }
+            }
+        }
+        // If agent is detected but no status signal found, assume thinking (output in progress)
+        Some(AgentStatus::Thinking)
     }
 
     /// Clear activity flag for the active pane's active tab.
@@ -822,7 +1209,9 @@ impl TerminalManager {
                         exited: false,
                         cwd: st.cwd.clone(),
                         shell_cmd: st.shell_cmd.clone(),
-                        last_cursor_line: 0,
+                        agent_kind: None,
+                agent_status: None,
+                last_cursor_line: 0,
                     }).collect();
                     let active_tab = if saved.active_tab < tabs.len() { saved.active_tab } else { 0 };
                     if tabs.is_empty() {

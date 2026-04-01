@@ -99,6 +99,53 @@ impl GpuiShellView {
         Some(path.to_string_lossy().to_string())
     }
 
+    /// Initiate "Send to Pane": grab the current selection and either send
+    /// directly (if only one other pane) or open the pane picker.
+    pub(crate) fn start_send_to_pane(&mut self, _cx: &mut Context<Self>) {
+        // 1. Get selected text from active terminal
+        let text = self.terminal_manager_mut().active_terminal()
+            .and_then(|term| term.with_term(|t| t.selection_to_string()))
+            .unwrap_or_default();
+        if text.is_empty() { return; }
+
+        // 2. Get list of other panes
+        let active_pid = self.terminal_manager().active_pane_id().cloned();
+        let targets = match active_pid {
+            Some(ref pid) => self.terminal_manager().other_pane_summaries(pid),
+            None => return,
+        };
+        if targets.is_empty() { return; }
+
+        // 3. Only one other pane — send directly, skip picker
+        if targets.len() == 1 {
+            let target_id = targets[0].0.clone();
+            self.terminal_manager_mut().send_text_to_pane(&target_id, &text);
+            if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                term.with_term_mut(|t| { t.selection = None; });
+            }
+            return;
+        }
+
+        // 4. Multiple panes — open picker
+        self.pane_picker = Some(crate::gpui_entry::PanePickerState {
+            text,
+            targets,
+            selected_index: 0,
+        });
+    }
+
+    /// Execute the pane picker selection — send text to chosen pane and close picker.
+    pub(crate) fn execute_pane_picker(&mut self) {
+        if let Some(picker) = self.pane_picker.take() {
+            if let Some((target_id, _)) = picker.targets.get(picker.selected_index) {
+                self.terminal_manager_mut().send_text_to_pane(target_id, &picker.text);
+                if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                    term.with_term_mut(|t| { t.selection = None; });
+                }
+            }
+        }
+    }
+
     /// Send text to active terminal with bracketed paste support.
     pub(crate) fn send_paste_text(&mut self, text: &str) {
         if let Some(term) = self.terminal_manager_mut().active_terminal() {

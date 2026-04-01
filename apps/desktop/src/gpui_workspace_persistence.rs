@@ -222,6 +222,59 @@ impl GpuiShellView {
         }
     }
 
+    // === Layout Template storage ===
+
+    /// Templates directory path
+    fn templates_dir() -> std::path::PathBuf {
+        Self::amux_dir().join("templates")
+    }
+
+    /// Save a layout template to ~/.amux/templates/
+    pub(crate) fn save_template(template: &amux_platform::terminal::manager::LayoutTemplate) {
+        let dir = Self::templates_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let safe_name = template.name.replace(['/', '\\', ':', ' '], "_");
+        let path = dir.join(format!("{}.json", safe_name));
+        if let Ok(json) = serde_json::to_string_pretty(template) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    /// Load all custom templates from ~/.amux/templates/
+    pub(crate) fn load_custom_templates() -> Vec<amux_platform::terminal::manager::LayoutTemplate> {
+        let dir = Self::templates_dir();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
+        let mut templates = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(data) = std::fs::read_to_string(&path) {
+                    if let Ok(t) = serde_json::from_str(&data) {
+                        templates.push(t);
+                    }
+                }
+            }
+        }
+        templates
+    }
+
+    /// Delete a custom template by name
+    pub(crate) fn delete_template(name: &str) {
+        let safe_name = name.replace(['/', '\\', ':', ' '], "_");
+        let path = Self::templates_dir().join(format!("{}.json", safe_name));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// All templates: built-in + custom
+    pub(crate) fn all_templates() -> Vec<amux_platform::terminal::manager::LayoutTemplate> {
+        let mut all = amux_platform::terminal::manager::LayoutTemplate::builtins();
+        all.extend(Self::load_custom_templates());
+        all
+    }
+
     /// Save all workspace layouts to disk
     pub(crate) fn save_all_layouts(&self) {
         let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();

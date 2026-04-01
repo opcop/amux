@@ -160,7 +160,7 @@ pub(crate) fn render_layout(
                     .gap_px()
                     .flex_1()
                     .overflow_hidden()
-                    .children(tabs.into_iter().map(|(idx, title, is_tab_active, has_activity, tab_exited)| {
+                    .children(tabs.into_iter().map(|(idx, title, is_tab_active, has_activity, tab_exited, agent_status)| {
                         let pid_click = pid_for_tabs.clone();
                         let pid_close_tab = pid_for_tabs.clone();
                         let pid_drag = pid_for_tabs.clone();
@@ -257,6 +257,16 @@ pub(crate) fn render_layout(
                                     tab_content = tab_content.child(
                                         div().whitespace_nowrap().child(title)
                                     );
+                                    // Show agent status badge with color coding
+                                    if let Some((ref label, color)) = agent_status {
+                                        tab_content = tab_content.child(
+                                            div()
+                                                .text_xs()
+                                                .whitespace_nowrap()
+                                                .text_color(rgb(color))
+                                                .child(format!("[{}]", label))
+                                        );
+                                    }
                                     tab_content.into_any_element()
                                 }
                             })
@@ -639,6 +649,355 @@ pub(crate) fn render_layout(
                 .into_any_element()
         }
     }
+}
+
+/// Render the agent launcher picker overlay
+#[cfg(feature = "gpui")]
+pub(crate) fn render_agent_picker(
+    picker: &crate::gpui_entry::AgentPickerState,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    let mut list = div().flex().flex_col().gap_px();
+
+    for (i, (_tool_id, label, is_wsl)) in picker.agents.iter().enumerate() {
+        let is_selected = i == picker.selected_index;
+        let idx = i;
+        list = list.child(
+            div()
+                .id(gpui::ElementId::Name(format!("agent-{}", i).into()))
+                .px_3()
+                .py(px(6.0))
+                .rounded(px(4.0))
+                .flex()
+                .items_center()
+                .gap_2()
+                .bg(if is_selected { rgb(0x313244) } else { rgb(0x1e1e2e) })
+                .hover(|d| d.bg(rgb(0x313244)))
+                .cursor_pointer()
+                .child(
+                    div().text_xs().text_color(rgb(0x89b4fa)).min_w(px(16.0))
+                        .child(format!("{}", i + 1))
+                )
+                .child(
+                    div().text_sm()
+                        .text_color(if is_selected { rgb(0xcdd6f4) } else { rgb(0xa6adc8) })
+                        .child(label.clone())
+                )
+                .when(*is_wsl, |d| {
+                    d.child(
+                        div().text_xs().px(px(4.0)).py(px(1.0))
+                            .rounded(px(3.0)).bg(rgb(0x313244))
+                            .text_color(rgb(0x585b70)).child("WSL")
+                    )
+                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if let Some(ref mut p) = this.agent_picker {
+                        p.selected_index = idx;
+                    }
+                    this.execute_agent_picker();
+                    cx.notify();
+                }))
+        );
+    }
+
+    div()
+        .absolute()
+        .top_0().left_0().right_0().bottom_0()
+        .flex().items_center().justify_center()
+        .child(
+            div()
+                .id("agent-picker-backdrop")
+                .absolute()
+                .top_0().left_0().right_0().bottom_0()
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.agent_picker = None;
+                    cx.notify();
+                }))
+        )
+        .child(
+            div()
+                .w(px(320.0))
+                .rounded(px(8.0))
+                .bg(rgb(0x1e1e2e))
+                .border_1()
+                .border_color(rgb(0x45475a))
+                .shadow_lg()
+                .flex().flex_col().overflow_hidden()
+                .child(
+                    div().px_3().py(px(8.0))
+                        .border_b_1().border_color(rgb(0x313244))
+                        .child(
+                            div().text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xcdd6f4))
+                                .child("Launch Agent")
+                        )
+                )
+                .child(div().p_1().child(list))
+                .child(
+                    div().px_3().py(px(6.0))
+                        .border_t_1().border_color(rgb(0x313244))
+                        .text_xs().text_color(rgb(0x585b70))
+                        .child("↑↓ navigate  1-9 quick select  Enter launch  Esc cancel")
+                )
+        )
+}
+
+/// Render the template picker overlay for "Apply Layout"
+#[cfg(feature = "gpui")]
+pub(crate) fn render_template_picker(
+    picker: &crate::gpui_entry::TemplatePickerState,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    let mut list = div().flex().flex_col().gap_px();
+
+    for (i, template) in picker.templates.iter().enumerate() {
+        let is_selected = i == picker.selected_index;
+        let idx = i;
+        let pane_count = template.layout.pane_count();
+        let is_custom = !template.builtin;
+        let del_idx = i;
+        let mut row = div()
+            .id(gpui::ElementId::Name(format!("tpl-{}", i).into()))
+            .group("tpl-row")
+            .px_3()
+            .py(px(6.0))
+            .rounded(px(4.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .bg(if is_selected { rgb(0x313244) } else { rgb(0x1e1e2e) })
+            .hover(|d| d.bg(rgb(0x313244)))
+            .cursor_pointer()
+            .child(
+                div().text_xs().text_color(rgb(0x89b4fa)).min_w(px(16.0))
+                    .child(format!("{}", i + 1))
+            )
+            .child(
+                div().flex().flex_col().flex_1().overflow_hidden()
+                    .child(
+                        div().text_sm().flex().gap_1().items_center()
+                            .text_color(if is_selected { rgb(0xcdd6f4) } else { rgb(0xa6adc8) })
+                            .child(template.name.clone())
+                            .when(is_custom, |d| {
+                                d.child(
+                                    div().text_xs().text_color(rgb(0x585b70)).child("(custom)")
+                                )
+                            })
+                    )
+                    .child(
+                        div().text_xs().text_color(rgb(0x585b70))
+                            .child(format!("{} — {} panes", template.description, pane_count))
+                    )
+            )
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                if let Some(ref mut p) = this.template_picker {
+                    p.selected_index = idx;
+                }
+                this.execute_template_picker();
+                cx.notify();
+            }));
+
+        // Delete button for custom templates — hidden by default, visible on hover
+        if is_custom {
+            row = row.child(
+                div()
+                    .id(gpui::ElementId::Name(format!("tpl-del-{}", i).into()))
+                    .px(px(4.0))
+                    .py(px(2.0))
+                    .rounded(px(3.0))
+                    .text_xs()
+                    .text_color(rgb(0x1e1e2e)) // invisible by default (matches bg)
+                    .group_hover("tpl-row", |d| d.text_color(rgb(0x585b70))) // visible on row hover
+                    .hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8))) // red on button hover
+                    .child("✕")
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        if let Some(ref mut p) = this.template_picker {
+                            p.selected_index = del_idx;
+                        }
+                        this.delete_selected_template();
+                        cx.notify();
+                    }))
+            );
+        }
+
+        list = list.child(row);
+    }
+
+    div()
+        .absolute()
+        .top_0().left_0().right_0().bottom_0()
+        .flex().items_center().justify_center()
+        // Dismiss backdrop — clicking outside the picker closes it
+        .child(
+            div()
+                .id("template-picker-backdrop")
+                .absolute()
+                .top_0().left_0().right_0().bottom_0()
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.template_picker = None;
+                    cx.notify();
+                }))
+        )
+        .child(
+            div()
+                .w(px(360.0))
+                .rounded(px(8.0))
+                .bg(rgb(0x1e1e2e))
+                .border_1()
+                .border_color(rgb(0x45475a))
+                .shadow_lg()
+                .flex().flex_col().overflow_hidden()
+                // Header
+                .child(
+                    div().px_3().py(px(8.0))
+                        .border_b_1().border_color(rgb(0x313244))
+                        .child(
+                            div().text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xcdd6f4))
+                                .child("Apply Layout Template")
+                        )
+                )
+                // Template list
+                .child(div().p_1().child(list))
+                // Footer
+                .child(
+                    div().px_3().py(px(6.0))
+                        .border_t_1().border_color(rgb(0x313244))
+                        .text_xs().text_color(rgb(0x585b70))
+                        .child("↑↓ navigate  1-9 select  Enter apply  Del remove  Esc cancel")
+                )
+        )
+}
+
+/// Render the pane picker overlay for "Send to Pane"
+#[cfg(feature = "gpui")]
+pub(crate) fn render_pane_picker(
+    picker: &crate::gpui_entry::PanePickerState,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    let text_preview = if picker.text.len() > 40 {
+        format!("{}...", &picker.text[..40])
+    } else {
+        picker.text.clone()
+    };
+
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap_px();
+
+    for (i, (_pid, title)) in picker.targets.iter().enumerate() {
+        let is_selected = i == picker.selected_index;
+        let pid = _pid.clone();
+        let idx = i;
+        list = list.child(
+            div()
+                .id(gpui::ElementId::Name(format!("picker-{}", i).into()))
+                .px_3()
+                .py(px(5.0))
+                .rounded(px(4.0))
+                .flex()
+                .items_center()
+                .gap_2()
+                .bg(if is_selected { rgb(0x313244) } else { rgb(0x1e1e2e) })
+                .hover(|d| d.bg(rgb(0x313244)))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x89b4fa))
+                        .min_w(px(16.0))
+                        .child(format!("{}", i + 1))
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(if is_selected { rgb(0xcdd6f4) } else { rgb(0xa6adc8) })
+                        .child(title.clone())
+                )
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if let Some(ref mut p) = this.pane_picker {
+                        p.selected_index = idx;
+                    }
+                    this.execute_pane_picker();
+                    cx.notify();
+                }))
+        );
+    }
+
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        // Dismiss backdrop
+        .child(
+            div()
+                .id("pane-picker-backdrop")
+                .absolute()
+                .top_0().left_0().right_0().bottom_0()
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.pane_picker = None;
+                    cx.notify();
+                }))
+        )
+        .child(
+            div()
+                .w(px(320.0))
+                .rounded(px(8.0))
+                .bg(rgb(0x1e1e2e))
+                .border_1()
+                .border_color(rgb(0x45475a))
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                // Header
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(rgb(0x313244))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xcdd6f4))
+                                .child("Send to Pane")
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x585b70))
+                                .child(text_preview)
+                        )
+                )
+                // Pane list
+                .child(
+                    div().p_1().child(list)
+                )
+                // Footer
+                .child(
+                    div()
+                        .px_3()
+                        .py(px(6.0))
+                        .border_t_1()
+                        .border_color(rgb(0x313244))
+                        .text_xs()
+                        .text_color(rgb(0x585b70))
+                        .child("↑↓ navigate  1-9 quick select  Enter send  Esc cancel")
+                )
+        )
 }
 
 /// Render the "Process exited" overlay with Restart/Close buttons.

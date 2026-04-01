@@ -260,6 +260,12 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
             "Previous tab",
             ShortcutCategory::Pane,
         ),
+        Shortcut::new(
+            "ctrl+shift+enter",
+            "Ctrl+Shift+Enter",
+            "Send selection to pane",
+            ShortcutCategory::Pane,
+        ),
         // Settings
         Shortcut::new(
             "ctrl+,",

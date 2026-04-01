@@ -212,6 +212,21 @@ impl AlacrittyTerminal {
         self.notifier.notify(data.to_vec());
     }
 
+    /// Send text to PTY, wrapping with bracketed paste escape sequences if the
+    /// terminal has bracketed paste mode enabled.
+    pub fn send_paste_input(&self, text: &str) {
+        let bracketed = self.with_term(|t| {
+            t.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+        });
+        if bracketed {
+            self.send_input(b"\x1b[200~");
+        }
+        self.send_input(text.as_bytes());
+        if bracketed {
+            self.send_input(b"\x1b[201~");
+        }
+    }
+
     /// Resize the terminal
     pub fn resize(&mut self, cols: u16, rows: u16) {
         if cols == self.cols && rows == self.rows {
@@ -295,5 +310,44 @@ impl AlacrittyTerminal {
     pub fn is_scrolled(&self) -> bool {
         let term = self.term.lock_unfair();
         term.grid().display_offset() > 0
+    }
+
+    /// Read the last N non-empty lines from the terminal screen.
+    /// Used for agent status detection (lightweight, no allocation for empty lines).
+    pub fn last_lines(&self, n: usize) -> Vec<String> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Line, Column};
+
+        self.with_term(|t| {
+            let grid = t.grid();
+            let screen_lines = grid.screen_lines() as i32;
+            let cols = grid.columns();
+            let mut result = Vec::new();
+
+            // Scan from bottom of screen upward, collecting non-empty lines
+            for row_idx in (0..screen_lines).rev() {
+                let line = Line(row_idx);
+                let mut text = String::new();
+                for col in 0..cols {
+                    let cell = &grid[line][Column(col)];
+                    if cell.c != ' ' && cell.c != '\0' {
+                        // Extend to include this column
+                        while text.len() < col {
+                            text.push(' ');
+                        }
+                        text.push(cell.c);
+                    }
+                }
+                let trimmed = text.trim_end().to_string();
+                if !trimmed.is_empty() {
+                    result.push(trimmed);
+                    if result.len() >= n {
+                        break;
+                    }
+                }
+            }
+            result.reverse(); // return in top-to-bottom order
+            result
+        })
     }
 }

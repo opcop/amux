@@ -91,6 +91,18 @@ impl DesktopApp {
         let _ = self.dispatch(UiAction::SetCommandPaletteSelectedIndex(previous));
     }
 
+    /// Get the command string of the currently selected palette item.
+    pub fn selected_palette_command_str(&self) -> Option<String> {
+        let commands =
+            crate::commands::filtered_palette_commands(&self.state.command_palette_query);
+        if commands.is_empty() {
+            return None;
+        }
+        let index = self.state.command_palette_selected_index
+            .min(commands.len().saturating_sub(1));
+        Some(commands[index].command.clone())
+    }
+
     pub fn execute_selected_palette_command(&mut self) -> Result<String, String> {
         let commands =
             crate::commands::filtered_palette_commands(&self.state.command_palette_query);

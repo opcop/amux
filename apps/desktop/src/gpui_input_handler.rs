@@ -248,6 +248,26 @@ impl GpuiShellView {
                     return;
                 }
                 "enter" => {
+                    // Intercept layout commands — they need gpui-layer side effects
+                    let cmd = self.app.selected_palette_command_str();
+                    if let Some(ref c) = cmd {
+                        if c.starts_with("layout template ") {
+                            let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
+                            self.open_template_picker();
+                            self.refresh_model();
+                            cx.notify();
+                            return;
+                        }
+                        if c == "layout save-as-template" {
+                            let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
+                            let ws_name = self.model.active_workspace_name
+                                .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+                            self.save_current_as_template(&ws_name);
+                            self.refresh_model();
+                            cx.notify();
+                            return;
+                        }
+                    }
                     let _ = self.app.execute_selected_palette_command();
                     self.refresh_model();
                     cx.notify();
@@ -267,6 +287,105 @@ impl GpuiShellView {
                 }
                 _ => return,
             }
+        }
+
+        // Agent picker handling (Launch Agent)
+        if self.agent_picker.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.agent_picker = None;
+                }
+                "enter" => {
+                    self.execute_agent_picker();
+                }
+                "up" | "arrowup" => {
+                    if let Some(ref mut p) = self.agent_picker {
+                        if p.selected_index > 0 { p.selected_index -= 1; }
+                    }
+                }
+                "down" | "arrowdown" => {
+                    if let Some(ref mut p) = self.agent_picker {
+                        if p.selected_index + 1 < p.agents.len() { p.selected_index += 1; }
+                    }
+                }
+                k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
+                    let n = (k.as_bytes()[0] - b'0') as usize;
+                    if n <= self.agent_picker.as_ref().unwrap().agents.len() {
+                        self.agent_picker.as_mut().unwrap().selected_index = n - 1;
+                        self.execute_agent_picker();
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
+
+        // Template picker handling (Apply Layout)
+        if self.template_picker.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.template_picker = None;
+                }
+                "enter" => {
+                    self.execute_template_picker();
+                }
+                "delete" | "backspace" => {
+                    self.delete_selected_template();
+                }
+                "up" | "arrowup" => {
+                    if let Some(ref mut p) = self.template_picker {
+                        if p.selected_index > 0 { p.selected_index -= 1; }
+                    }
+                }
+                "down" | "arrowdown" => {
+                    if let Some(ref mut p) = self.template_picker {
+                        if p.selected_index + 1 < p.templates.len() { p.selected_index += 1; }
+                    }
+                }
+                k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
+                    let n = (k.as_bytes()[0] - b'0') as usize;
+                    if n <= self.template_picker.as_ref().unwrap().templates.len() {
+                        self.template_picker.as_mut().unwrap().selected_index = n - 1;
+                        self.execute_template_picker();
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
+
+        // Pane picker handling (Send to Pane)
+        if self.pane_picker.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.pane_picker = None;
+                }
+                "enter" => {
+                    self.execute_pane_picker();
+                }
+                "up" | "arrowup" => {
+                    if let Some(ref mut p) = self.pane_picker {
+                        if p.selected_index > 0 { p.selected_index -= 1; }
+                    }
+                }
+                "down" | "arrowdown" => {
+                    if let Some(ref mut p) = self.pane_picker {
+                        if p.selected_index + 1 < p.targets.len() { p.selected_index += 1; }
+                    }
+                }
+                k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
+                    let n = (k.as_bytes()[0] - b'0') as usize;
+                    if n <= self.pane_picker.as_ref().unwrap().targets.len() {
+                        self.pane_picker.as_mut().unwrap().selected_index = n - 1;
+                        self.execute_pane_picker();
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
         }
 
         // Ctrl+Shift shortcuts — UI operations that don't conflict with shell readline
@@ -351,6 +470,11 @@ impl GpuiShellView {
                 "ctrl+shift+right" => {
                     let _ = self.app.run_command("pane resize-right");
                     self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+enter" => {
+                    self.start_send_to_pane(cx);
                     cx.notify();
                     return;
                 }
