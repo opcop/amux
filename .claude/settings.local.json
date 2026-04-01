@@ -37,7 +37,11 @@
       "Bash(wc -l /mnt/d/repository/arden/Ai/ide/amux/crates/*/src/**/*.rs)",
       "Bash(find /mnt/d/repository/arden/Ai/ide/amux -path */alacritty* -name *.rs)",
       "Bash(cargo metadata:*)",
-      "Bash(python3 -c \"import sys,json; m=json.load\\(sys.stdin\\); [print\\(p[''''manifest_path'''']\\) for p in m[''''packages''''] if ''''alacritty'''' in p[''''name'''']]\")"
+      "Bash(python3 -c \"import sys,json; m=json.load\\(sys.stdin\\); [print\\(p[''''manifest_path'''']\\) for p in m[''''packages''''] if ''''alacritty'''' in p[''''name'''']]\")",
+      "Bash(cargo doc:*)",
+      "Bash(python3 -c \"from PIL import Image; print\\(''''pillow ok''''\\)\")",
+      "Bash(apt list:*)",
+      "Bash(dpkg -l)"
     ]
   }
 }

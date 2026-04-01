@@ -18,9 +18,9 @@ use crate::gpui_layout_renderer::{render_context_menu, render_layout, render_pan
 
 
 #[cfg(feature = "gpui")]
-const SIDEBAR_WIDTH_EXPANDED: f32 = 220.0;
-#[cfg(feature = "gpui")]
 const SIDEBAR_WIDTH_COLLAPSED: f32 = 28.0;
+const SIDEBAR_WIDTH_MIN: f32 = 120.0;
+const SIDEBAR_WIDTH_MAX: f32 = 480.0;
 
 #[cfg(feature = "gpui")]
 pub(crate) struct GpuiShellView {
@@ -57,6 +57,8 @@ pub(crate) struct GpuiShellView {
     pub(crate) agent_picker: Option<AgentPickerState>,
     /// IME preedit text (composition in progress)
     pub(crate) ime_preedit: Option<String>,
+    /// Sidebar resize drag: (start_mouse_x, start_width)
+    pub(crate) sidebar_drag_start: Option<(f32, f32)>,
 }
 
 /// Right-click context menu
@@ -261,6 +263,7 @@ impl GpuiShellView {
             template_picker: None,
             agent_picker: None,
             ime_preedit: None,
+            sidebar_drag_start: None,
         }
     }
 
@@ -270,6 +273,15 @@ impl GpuiShellView {
         match &self.cell_metrics {
             Some(m) => (m.width, m.height),
             None => (8.0, 20.0), // safe fallback before first render
+        }
+    }
+
+    /// Current sidebar width in pixels.
+    fn sidebar_width(&self) -> f32 {
+        if self.sidebar_state.collapsed {
+            SIDEBAR_WIDTH_COLLAPSED
+        } else {
+            self.sidebar_state.width
         }
     }
 
@@ -315,7 +327,7 @@ impl GpuiShellView {
         }
 
         // Fallback: assume single pane after sidebar + tab strip
-        let sidebar_w = if self.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
+        let sidebar_w = self.sidebar_width();
         let tab_strip_h = 28.0_f32;
         let x = (pos.x.as_f32() - sidebar_w).max(0.0);
         let y = (pos.y.as_f32() - tab_strip_h).max(0.0);
@@ -963,8 +975,8 @@ impl Render for GpuiShellView {
         let cell_h = metrics.height.max(1.0);
 
         // Resize terminals — skip during drag to avoid content loss
-        if self.resize_drag.is_none() {
-            let sidebar_w = if self.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
+        if self.resize_drag.is_none() && self.sidebar_drag_start.is_none() {
+            let sidebar_w = self.sidebar_width();
             let vp = window.viewport_size();
             let content_w = vp.width.as_f32() - sidebar_w;
             let status_bar_h = 28.0_f32;
@@ -1019,11 +1031,7 @@ impl Render for GpuiShellView {
                 // MUST check before clearing rename state, otherwise double-click
                 // rename on a workspace gets set by the workspace handler then
                 // immediately cleared here via event bubbling.
-                let sidebar_w = if this.sidebar_state.collapsed {
-                    SIDEBAR_WIDTH_COLLAPSED
-                } else {
-                    SIDEBAR_WIDTH_EXPANDED
-                };
+                let sidebar_w = this.sidebar_width();
                 if event.position.x.as_f32() < sidebar_w {
                     return;
                 }
@@ -1065,6 +1073,13 @@ impl Render for GpuiShellView {
             }))
             // Mouse: move — forward to PTY or extend selection
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+                // Handle sidebar resize drag
+                if let Some((start_x, start_w)) = this.sidebar_drag_start {
+                    let delta = event.position.x.as_f32() - start_x;
+                    this.sidebar_state.width = (start_w + delta).clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+                    cx.notify();
+                    return;
+                }
                 // Handle split resize drag
                 if let Some(ref drag) = this.resize_drag.clone() {
                     let current_pos = if drag.is_horizontal {
@@ -1117,6 +1132,7 @@ impl Render for GpuiShellView {
                 }
                 this.selecting = false;
                 this.resize_drag = None;
+                this.sidebar_drag_start = None;
                 cx.notify();
             }))
             // Mouse: right button up — forward release to PTY
@@ -1181,14 +1197,21 @@ impl Render for GpuiShellView {
                     // Sidebar
                     .child({
                         if sidebar_visible {
+                            let sw = self.sidebar_state.width;
                             div()
                                 .id("sidebar-expanded")
-                                .w(px(SIDEBAR_WIDTH_EXPANDED))
+                                .w(px(sw))
                                 .bg(rgb(0x181818))
                                 .flex()
-                                .flex_col()
-                                .border_r_1()
-                                .border_color(rgb(0x2a2a2a))
+                                .flex_row()
+                                .overflow_hidden()
+                                // Sidebar content column
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .overflow_hidden()
                                 // Header: title + collapse button
                                 .child(
                                     div()
@@ -1396,6 +1419,29 @@ impl Render for GpuiShellView {
                                             cx.notify();
                                         })),
                                 )
+                                ) // end sidebar content column
+                                // Resize handle (right edge)
+                                .child(
+                                    div()
+                                        .id("sidebar-resize-handle")
+                                        .group("sidebar-handle")
+                                        .w(px(4.0))
+                                        .h_full()
+                                        .flex_shrink_0()
+                                        .cursor_col_resize()
+                                        .child(
+                                            div()
+                                                .w(px(1.0))
+                                                .h_full()
+                                                .bg(rgb(0x2a2a2a))
+                                                .group_hover("sidebar-handle", |d| d.w(px(2.0)).bg(rgb(0x89b4fa)))
+                                        )
+                                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _w, _cx| {
+                                            this.sidebar_drag_start = Some(
+                                                (event.position.x.as_f32(), this.sidebar_state.width)
+                                            );
+                                        }))
+                                )
                         } else {
                             // Collapsed sidebar: narrow strip with expand button
                             div()
@@ -1435,7 +1481,7 @@ impl Render for GpuiShellView {
                             // Terminal pane(s) — renders split layout recursively
                             .child({
                                 let active_pane_id = self.terminal_manager_mut().active_pane_id().cloned();
-                                let sidebar_w = if self.sidebar_state.collapsed { SIDEBAR_WIDTH_COLLAPSED } else { SIDEBAR_WIDTH_EXPANDED };
+                                let sidebar_w = self.sidebar_width();
                                 let vp = window.viewport_size();
                                 let content_w = vp.width.as_f32() - sidebar_w;
                                 let status_bar_h = 28.0_f32;

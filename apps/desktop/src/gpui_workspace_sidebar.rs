@@ -22,6 +22,8 @@ use crate::gpui_components::action_button;
 pub struct WorkspaceSidebarState {
     pub collapsed: bool,
     pub show_recent: bool,
+    /// User-resizable sidebar width (pixels). Clamped to [120, 480].
+    pub width: f32,
 }
 
 #[cfg(feature = "gpui")]
@@ -30,6 +32,7 @@ impl Default for WorkspaceSidebarState {
         Self {
             collapsed: false,
             show_recent: true,
+            width: 220.0,
         }
     }
 }

@@ -982,12 +982,12 @@ fn prepaint_terminal(
         }
     }
 
-    // ── Phase 4: Scrollbar ──
+    // ── Phase 4: Scrollbar (only visible when scrolled away from bottom) ──
     let mut scrollbar_rects = Vec::new();
     {
         let (offset, history, visible) = data.scroll_info;
-        let total = history + visible;
-        if history > 0 {
+        if history > 0 && offset > 0 {
+            let total = history + visible;
             let track_h = data.rows as f32 * cell_h;
             let bar_w = 4.0_f32;
             let track_x = bounds.origin.x + px(data.cols as f32 * cell_w - bar_w);
@@ -1000,22 +1000,17 @@ fn prepaint_terminal(
             let scroll_frac = (offset as f32 / history as f32).clamp(0.0, 1.0);
             let thumb_y = track_y + px((track_h - thumb_h) * (1.0 - scroll_frac));
 
-            // Track (subtle, only when scrolled)
-            if offset > 0 {
-                scrollbar_rects.push(PaintRect {
-                    origin: point(track_x, track_y),
-                    size: size(px(bar_w), px(track_h)),
-                    color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.05 },
-                });
-            }
+            // Track background
+            scrollbar_rects.push(PaintRect {
+                origin: point(track_x, track_y),
+                size: size(px(bar_w), px(track_h)),
+                color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.05 },
+            });
             // Thumb
             scrollbar_rects.push(PaintRect {
                 origin: point(track_x, thumb_y),
                 size: size(px(bar_w), px(thumb_h)),
-                color: Rgba {
-                    r: 1.0, g: 1.0, b: 1.0,
-                    a: if offset > 0 { 0.3 } else { 0.1 },
-                },
+                color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.3 },
             });
         }
     }
