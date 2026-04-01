@@ -1433,9 +1433,18 @@ fn is_wide_char(ch: char) -> bool {
         0x4E00..=0x9FFF |
         // CJK Extension A
         0x3400..=0x4DBF |
-        // CJK Extension B-F
+        // CJK Extension B (Unified Ideographs)
         0x20000..=0x2A6DF |
-        0x2A700..=0x2EBEF |
+        // CJK Extension C
+        0x2A700..=0x2B73F |
+        // CJK Extension D
+        0x2B740..=0x2B81F |
+        // CJK Extension E
+        0x2B820..=0x2CEAF |
+        // CJK Extension F
+        0x2CEB0..=0x2EBEF |
+        // CJK Extension G
+        0x30000..=0x3134F |
         // CJK Compatibility Ideographs
         0xF900..=0xFAFF |
         // Hangul Syllables
@@ -1458,7 +1467,16 @@ fn is_wide_char(ch: char) -> bool {
         // Kangxi Radicals
         0x2F00..=0x2FDF |
         // CJK Radicals Supplement
-        0x2E80..=0x2EFF
+        0x2E80..=0x2EFF |
+        // Miscellaneous Symbols and Dingbats (wide when emoji presentation)
+        0x2600..=0x27BF |
+        // Miscellaneous Symbols & Pictographs, Emoticons, Transport/Map Symbols,
+        // Supplemental Symbols & Pictographs
+        0x1F300..=0x1F9FF |
+        // Chess Symbols
+        0x1FA00..=0x1FA6F |
+        // Symbols and Pictographs Extended-A
+        0x1FA70..=0x1FAFF
     )
 }
 
@@ -1644,5 +1662,44 @@ mod tests {
         // CHA: move to column 7
         term.feed(b"\x1b[7G");
         assert_eq!(term.cursor().x, 6);
+    }
+
+    #[test]
+    fn test_is_wide_char_cjk() {
+        // CJK Unified Ideographs
+        assert!(super::is_wide_char('中'));
+        assert!(super::is_wide_char('日'));
+        // Hiragana
+        assert!(super::is_wide_char('あ'));
+        // Katakana
+        assert!(super::is_wide_char('ア'));
+        // Fullwidth Latin
+        assert!(super::is_wide_char('Ａ'));
+        // Hangul
+        assert!(super::is_wide_char('한'));
+    }
+
+    #[test]
+    fn test_is_wide_char_emoji() {
+        // Miscellaneous Symbols and Pictographs (U+1F300-1F5FF)
+        assert!(super::is_wide_char('🌀')); // U+1F300
+        assert!(super::is_wide_char('😀')); // U+1F600
+        // Supplemental Symbols and Pictographs (U+1F900-1F9FF)
+        assert!(super::is_wide_char('🤔')); // U+1F914
+        // Symbols and Pictographs Extended-A (U+1FA70-1FAFF)
+        assert!(super::is_wide_char('🪐')); // U+1FA90
+        // Miscellaneous Symbols (U+2600-27BF)
+        assert!(super::is_wide_char('☀')); // U+2600
+    }
+
+    #[test]
+    fn test_is_wide_char_narrow() {
+        // ASCII is narrow
+        assert!(!super::is_wide_char('A'));
+        assert!(!super::is_wide_char('z'));
+        assert!(!super::is_wide_char('0'));
+        // Latin Extended is narrow
+        assert!(!super::is_wide_char('é'));
+        assert!(!super::is_wide_char('ü'));
     }
 }

@@ -62,25 +62,50 @@ impl gpui::EntityInputHandler for GpuiShellView {
             return;
         }
 
-        // Send to terminal PTY
+        // Send to terminal PTY and ensure we're viewing the latest output
         if let Some(term) = self.terminal_manager_mut().active_terminal() {
+            term.scroll_to_bottom();
             term.send_input(text.as_bytes());
         }
+        // Clear IME preedit (composition committed)
+        self.ime_preedit = None;
+        // Reset cursor blink so cursor is visible immediately after typing
+        self.cursor_blink_frame = 0;
         cx.notify();
     }
 
     fn replace_and_mark_text_in_range(
-        &mut self, _range: Option<std::ops::Range<usize>>, _new_text: &str,
-        _selected: Option<std::ops::Range<usize>>, _window: &mut Window, _cx: &mut Context<Self>,
+        &mut self, _range: Option<std::ops::Range<usize>>, new_text: &str,
+        _selected: Option<std::ops::Range<usize>>, _window: &mut Window, cx: &mut Context<Self>,
     ) {
-        // IME composition in progress — we don't show inline preview for terminal
+        // IME composition in progress — show preedit text overlay
+        if new_text.is_empty() {
+            self.ime_preedit = None;
+        } else {
+            self.ime_preedit = Some(new_text.to_string());
+        }
+        cx.notify();
     }
 
     fn bounds_for_range(
         &mut self, _range: std::ops::Range<usize>, _element_bounds: Bounds<Pixels>,
         _window: &mut Window, _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        None
+        // Position IME candidate window near the terminal cursor
+        let metrics = self.cell_metrics.as_ref()?;
+        let active_pid = self.terminal_manager().active_pane_id()?.clone();
+        let (cursor_col, cursor_row) = self.terminal_manager().active_terminal_ref()
+            .map(|t| t.with_term(|term| {
+                let c = term.renderable_content().cursor;
+                (c.point.column.0, c.point.line.0.max(0) as usize)
+            }))?;
+        let (origin_x, origin_y, _, _) = self.pane_bounds.get(&active_pid.0)?;
+        let x = origin_x + cursor_col as f32 * metrics.width;
+        let y = origin_y + cursor_row as f32 * metrics.height;
+        Some(Bounds {
+            origin: gpui::point(gpui::px(x), gpui::px(y)),
+            size: gpui::size(gpui::px(metrics.width), gpui::px(metrics.height)),
+        })
     }
 
     fn character_index_for_point(

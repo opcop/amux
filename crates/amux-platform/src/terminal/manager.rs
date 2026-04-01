@@ -396,10 +396,16 @@ pub struct TerminalManager {
     panes: HashMap<PaneId, TerminalPane>,
     active_pane: PaneId,
     next_pane_num: usize,
+    /// Scrollback buffer size for new terminals
+    scrollback_lines: usize,
 }
 
 impl TerminalManager {
     pub fn new() -> Self {
+        Self::with_scrollback(10000)
+    }
+
+    pub fn with_scrollback(scrollback_lines: usize) -> Self {
         let pane_id = PaneId("pane-1".to_string());
         let pane = TerminalPane::new(pane_id.clone());
         let mut panes = HashMap::new();
@@ -410,6 +416,7 @@ impl TerminalManager {
             panes,
             active_pane: pane_id,
             next_pane_num: 2,
+            scrollback_lines,
         }
     }
 
@@ -441,6 +448,7 @@ impl TerminalManager {
             panes,
             active_pane,
             next_pane_num: max_num + 1,
+            scrollback_lines: 10000,
         }
     }
 
@@ -459,6 +467,10 @@ impl TerminalManager {
             pane_labels,
             builtin: false,
         }
+    }
+
+    pub fn set_scrollback(&mut self, lines: usize) {
+        self.scrollback_lines = lines;
     }
 
     fn next_pane_id(&mut self) -> PaneId {
@@ -614,13 +626,13 @@ impl TerminalManager {
     /// Create an AlacrittyTerminal with CWD fallback: tries cwd first, then None on failure.
     /// Returns (terminal, actual_cwd_used) so callers can record what worked.
     fn create_terminal_with_fallback(
-        shell: &str, args: &[String], cwd: Option<&str>,
+        shell: &str, args: &[String], cwd: Option<&str>, scrollback: usize,
     ) -> Result<(AlacrittyTerminal, Option<String>), String> {
-        match AlacrittyTerminal::new(120, 40, 8, 20, shell, args, cwd) {
+        match AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, cwd, scrollback) {
             Ok(t) => Ok((t, cwd.map(|s| s.to_string()))),
             Err(e) if cwd.is_some() => {
                 eprintln!("[amux] spawn failed with cwd {:?}: {}, retrying with default", cwd, e);
-                let t = AlacrittyTerminal::new(120, 40, 8, 20, shell, args, None)?;
+                let t = AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, None, scrollback)?;
                 Ok((t, None))
             }
             Err(e) => Err(e),
@@ -640,7 +652,7 @@ impl TerminalManager {
         if tab.terminal.is_some() {
             return Ok(()); // already has a terminal
         }
-        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd)?;
+        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd, self.scrollback_lines)?;
         tab.terminal = Some(term);
         tab.cwd = actual_cwd;
         tab.shell_cmd = Some((shell.to_string(), args.to_vec()));
@@ -666,7 +678,7 @@ impl TerminalManager {
             } else {
                 (shell, args)
             };
-            let result = Self::create_terminal_with_fallback(tab_shell, tab_args, cwd);
+            let result = Self::create_terminal_with_fallback(tab_shell, tab_args, cwd, self.scrollback_lines);
             let (term, used_cwd) = match result {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -691,7 +703,7 @@ impl TerminalManager {
         tab.terminal = None;
         tab.exited = false;
         // Spawn new one with fallback
-        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd)?;
+        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd, self.scrollback_lines)?;
         tab.terminal = Some(term);
         tab.cwd = actual_cwd;
         tab.shell_cmd = Some((shell.to_string(), args.to_vec()));
@@ -1238,6 +1250,7 @@ impl TerminalManager {
             panes,
             active_pane,
             next_pane_num: state.next_pane_num,
+            scrollback_lines: 10000, // overridden by caller with config value
         })
     }
 }

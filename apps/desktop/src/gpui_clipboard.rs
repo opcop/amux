@@ -149,6 +149,7 @@ impl GpuiShellView {
     /// Send text to active terminal with bracketed paste support.
     pub(crate) fn send_paste_text(&mut self, text: &str) {
         if let Some(term) = self.terminal_manager_mut().active_terminal() {
+            term.scroll_to_bottom();
             let bracketed = term.with_term(|t| {
                 t.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
             });

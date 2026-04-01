@@ -116,6 +116,20 @@ impl AlacrittyTerminal {
         args: &[String],
         cwd: Option<&str>,
     ) -> Result<Self, String> {
+        Self::with_scrollback(cols, rows, cell_width, cell_height, shell, args, cwd, 10000)
+    }
+
+    /// Create with custom scrollback size
+    pub fn with_scrollback(
+        cols: u16,
+        rows: u16,
+        cell_width: u16,
+        cell_height: u16,
+        shell: &str,
+        args: &[String],
+        cwd: Option<&str>,
+        scrollback_lines: usize,
+    ) -> Result<Self, String> {
         let event_proxy = AmuEventProxy {
             title: Arc::new(Mutex::new(None)),
             bell: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -124,7 +138,8 @@ impl AlacrittyTerminal {
         };
 
         let size = TermSize { cols, rows, cell_width, cell_height };
-        let config = TermConfig::default();
+        let mut config = TermConfig::default();
+        config.scrolling_history = scrollback_lines;
         let term = Term::new(config, &size, event_proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
@@ -148,6 +163,14 @@ impl AlacrittyTerminal {
         env.insert("LS_COLORS".to_string(),
             "di=1;34:ln=1;36:so=1;35:pi=33:ex=1;32:bd=1;33:cd=1;33:su=1;31:sg=1;33:tw=1;34:ow=1;34:*.tar=1;31:*.gz=1;31:*.zip=1;31:*.rpm=1;31:*.deb=1;31".to_string()
         );
+        // Pass terminal env vars through to WSL sessions via WSLENV.
+        // Append to existing WSLENV if set, so user values aren't lost.
+        let wslenv_extra = "LS_COLORS:TERM:COLORTERM:TERM_PROGRAM";
+        let wslenv = match std::env::var("WSLENV") {
+            Ok(existing) if !existing.is_empty() => format!("{}:{}", existing, wslenv_extra),
+            _ => wslenv_extra.to_string(),
+        };
+        env.insert("WSLENV".to_string(), wslenv);
 
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(shell.to_string(), args.to_vec())),
@@ -310,6 +333,16 @@ impl AlacrittyTerminal {
     pub fn is_scrolled(&self) -> bool {
         let term = self.term.lock_unfair();
         term.grid().display_offset() > 0
+    }
+
+    /// Scroll info for rendering scrollbar: (display_offset, total_history_lines, visible_rows)
+    pub fn scroll_info(&self) -> (usize, usize, usize) {
+        use alacritty_terminal::grid::Dimensions;
+        let term = self.term.lock_unfair();
+        let offset = term.grid().display_offset();
+        let history = term.grid().history_size();
+        let visible = term.screen_lines();
+        (offset, history, visible)
     }
 
     /// Read the last N non-empty lines from the terminal screen.

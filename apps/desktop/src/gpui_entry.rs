@@ -46,6 +46,7 @@ pub(crate) struct GpuiShellView {
     pub(crate) workspace_order: Vec<String>,
     pub(crate) pane_bounds: std::collections::HashMap<String, (f32, f32, f32, f32)>,
     pub(crate) config: crate::gpui_config::AmuxConfig,
+    pub(crate) terminal_theme: crate::gpui_terminal::TerminalTheme,
     /// Toast notifications for agent status changes.
     pub(crate) toasts: Vec<ToastNotification>,
     /// Pane picker for "Send to Pane" (Ctrl+Shift+Enter)
@@ -54,6 +55,8 @@ pub(crate) struct GpuiShellView {
     pub(crate) template_picker: Option<TemplatePickerState>,
     /// Agent launcher picker
     pub(crate) agent_picker: Option<AgentPickerState>,
+    /// IME preedit text (composition in progress)
+    pub(crate) ime_preedit: Option<String>,
 }
 
 /// Right-click context menu
@@ -215,15 +218,16 @@ impl GpuiShellView {
         let layouts = Self::load_all_layouts();
         for ws in &model.workspace_items {
             let mut tm = if let Some(json) = layouts.get(&ws.id) {
-                TerminalManager::restore_layout(json).unwrap_or_else(TerminalManager::new)
+                TerminalManager::restore_layout(json)
+                    .unwrap_or_else(|| TerminalManager::with_scrollback(config.scrollback))
             } else {
-                TerminalManager::new()
+                TerminalManager::with_scrollback(config.scrollback)
             };
             tm.heal_layout();
             workspace_terminals.insert(ws.id.clone(), tm);
         }
         if !workspace_terminals.contains_key(&active_ws_id) {
-            workspace_terminals.insert(active_ws_id.clone(), TerminalManager::new());
+            workspace_terminals.insert(active_ws_id.clone(), TerminalManager::with_scrollback(config.scrollback));
         }
         // PTY processes will be spawned on the first render frame (deferred for fast startup)
 
@@ -250,11 +254,13 @@ impl GpuiShellView {
             workspace_order: ws_order,
             pane_bounds: std::collections::HashMap::new(),
             wsl_detected: false, // detected lazily in background
+            terminal_theme: crate::gpui_terminal::TerminalTheme::by_name(&config.theme),
             config,
             toasts: Vec::new(),
             pane_picker: None,
             template_picker: None,
             agent_picker: None,
+            ime_preedit: None,
         }
     }
 
@@ -363,7 +369,7 @@ impl GpuiShellView {
     /// Also heals layout/pane inconsistencies for existing managers.
     fn ensure_workspace_terminal(&mut self, workspace_id: &str) {
         if !self.workspace_terminals.contains_key(workspace_id) {
-            let mut tm = TerminalManager::new();
+            let mut tm = TerminalManager::with_scrollback(self.config.scrollback);
             let (shell, args) = Self::default_shell();
             let cwd = Self::default_cwd();
             let _ = tm.spawn_in_active(&shell, &args, cwd.as_deref());
@@ -538,7 +544,8 @@ impl GpuiShellView {
     /// Apply a layout template to the current workspace.
     /// Replaces all panes and spawns terminals in each.
     pub(crate) fn apply_template(&mut self, template: &amux_platform::terminal::manager::LayoutTemplate) {
-        let tm = TerminalManager::from_template(template);
+        let mut tm = TerminalManager::from_template(template);
+        tm.set_scrollback(self.config.scrollback);
         self.workspace_terminals.insert(self.active_workspace_id.clone(), tm);
         // Spawn terminals in all panes
         let (shell, args) = Self::default_shell();
@@ -884,6 +891,8 @@ impl GpuiShellView {
 
     /// Handle key input for the terminal
     pub fn handle_terminal_input(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool) {
+        // Reset cursor blink on any terminal input
+        self.cursor_blink_frame = 0;
         use amux_platform::terminal::keys;
         
         // GPUI sends lowercase keys but to_pty expects title case
@@ -924,8 +933,9 @@ impl GpuiShellView {
             .unwrap_or(false);
         let input = keys::to_pty_with_mode(normalized_key, ctrl, shift, alt, app_cursor);
 
-        // Only send to PTY - PTY will echo back, no local echo needed
+        // Scroll to bottom on input so user always sees what they type
         if let Some(terminal) = self.terminal_manager_mut().active_terminal() {
+            terminal.scroll_to_bottom();
             terminal.send_input(&input);
         }
         
@@ -1430,7 +1440,8 @@ impl Render for GpuiShellView {
                                 let content_w = vp.width.as_f32() - sidebar_w;
                                 let status_bar_h = 28.0_f32;
                                 let content_h = vp.height.as_f32() - status_bar_h;
-                                let cursor_blink_on = true;
+                                // Cursor blinks: visible for 30 frames, hidden for 30 frames (~500ms each at 60fps)
+                                let cursor_blink_on = (self.cursor_blink_frame % 60) < 30;
                                 // Compute pane bounds for mouse hit-testing
                                 self.pane_bounds.clear();
                                 let origin_x = sidebar_w;
@@ -1445,9 +1456,9 @@ impl Render for GpuiShellView {
                                 // Zoom mode: render only the zoomed pane at full size
                                 if let Some(zpid) = zoomed {
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, cx)
                                 } else if let Some(layout) = layout_cloned {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, cx)
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, cx)
                                 } else {
                                     div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
                                 }
@@ -1538,6 +1549,39 @@ impl Render for GpuiShellView {
                             div().text_xs().text_color(rgb(0x585b70)).child("Enter/Shift+Enter  Esc close")
                         )
                 )
+            })
+            // IME preedit overlay (near cursor)
+            .when_some(self.ime_preedit.clone(), |this, preedit| {
+                // Position near active terminal cursor
+                let pos = self.cell_metrics.as_ref().and_then(|m| {
+                    let pid = self.terminal_manager().active_pane_id()?;
+                    let (ox, oy, _, _) = self.pane_bounds.get(&pid.0)?;
+                    let (col, row) = self.terminal_manager().active_terminal_ref()
+                        .map(|t| t.with_term(|term| {
+                            let c = term.renderable_content().cursor;
+                            (c.point.column.0, c.point.line.0.max(0) as usize)
+                        }))?;
+                    Some((ox + col as f32 * m.width, oy + row as f32 * m.height + m.height))
+                });
+                if let Some((x, y)) = pos {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left(px(x))
+                            .top(px(y))
+                            .px_2()
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(0x313244))
+                            .border_1()
+                            .border_color(rgb(0x89b4fa))
+                            .text_sm()
+                            .text_color(rgb(0xcdd6f4))
+                            .child(preedit)
+                    )
+                } else {
+                    this
+                }
             })
             // Agent picker overlay (Launch Agent)
             .when_some(self.agent_picker.clone(), |this, picker| {

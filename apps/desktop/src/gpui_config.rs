@@ -13,7 +13,11 @@ use serde::Deserialize;
 /// font_family = "JetBrains Mono"
 /// font_size = 15.0
 /// line_height = 1.5
+/// theme = "catppuccin-mocha"
 /// ```
+///
+/// Available themes: `tomorrow-night` (default), `catppuccin-mocha`, `dracula`,
+/// `solarized-dark`, `one-dark`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub(crate) struct AmuxConfig {
@@ -23,8 +27,10 @@ pub(crate) struct AmuxConfig {
     pub font_size: f32,
     /// Line height as a multiplier of font size (e.g. 1.4 = 140%).
     pub line_height: f32,
-    /// Theme name (reserved for future use).
+    /// Theme name.
     pub theme: String,
+    /// Scrollback buffer size in lines.
+    pub scrollback: usize,
 }
 
 impl Default for AmuxConfig {
@@ -33,7 +39,8 @@ impl Default for AmuxConfig {
             font_family: "Cascadia Code".to_string(),
             font_size: 14.0,
             line_height: 1.4,
-            theme: "dark".to_string(),
+            theme: "tomorrow-night".to_string(),
+            scrollback: 10000,
         }
     }
 }
@@ -66,6 +73,7 @@ impl AmuxConfig {
     fn sanitize(&mut self) {
         self.font_size = self.font_size.clamp(6.0, 72.0);
         self.line_height = self.line_height.clamp(1.0, 3.0);
+        self.scrollback = self.scrollback.clamp(100, 100_000);
     }
 }
 
@@ -79,7 +87,7 @@ mod tests {
         assert_eq!(config.font_family, "Cascadia Code");
         assert_eq!(config.font_size, 14.0);
         assert_eq!(config.line_height, 1.4);
-        assert_eq!(config.theme, "dark");
+        assert_eq!(config.theme, "tomorrow-night");
     }
 
     #[test]
@@ -109,10 +117,32 @@ mod tests {
         let toml_str = r#"
             font_size = 2.0
             line_height = 0.5
+            scrollback = 50
         "#;
         let mut config: AmuxConfig = toml::from_str(toml_str).unwrap();
         config.sanitize();
         assert_eq!(config.font_size, 6.0);
         assert_eq!(config.line_height, 1.0);
+        assert_eq!(config.scrollback, 100); // clamped to minimum
+    }
+
+    #[test]
+    fn sanitize_clamps_scrollback_max() {
+        let toml_str = r#"scrollback = 999999"#;
+        let mut config: AmuxConfig = toml::from_str(toml_str).unwrap();
+        config.sanitize();
+        assert_eq!(config.scrollback, 100_000);
+    }
+
+    #[test]
+    fn scrollback_default() {
+        let config = AmuxConfig::default();
+        assert_eq!(config.scrollback, 10000);
+    }
+
+    #[test]
+    fn theme_default_is_tomorrow_night() {
+        let config: AmuxConfig = toml::from_str("").unwrap();
+        assert_eq!(config.theme, "tomorrow-night");
     }
 }

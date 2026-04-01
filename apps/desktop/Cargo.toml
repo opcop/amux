@@ -37,3 +37,6 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Console",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"

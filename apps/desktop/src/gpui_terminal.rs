@@ -10,6 +10,211 @@ use gpui::{
     Point, Rgba, SharedString, Size, Styled, Window,
 };
 
+// ─── Glyph Cache ───────────────────────────────────────────────
+
+/// Thread-local shaped text cache to avoid re-shaping unchanged text runs.
+/// Key: u64 hash of (text_content, style_bits) — avoids String allocation on lookup.
+/// Uses hash-keyed cache with generation-based partial eviction (retains recent half).
+#[cfg(feature = "gpui")]
+mod glyph_cache {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+
+    /// Style bits packed into a u8 for cache key
+    pub fn style_key(bold: bool, italic: bool, underline: u8, strikethrough: bool) -> u8 {
+        (bold as u8)
+            | ((italic as u8) << 1)
+            | ((underline & 0x7) << 2)
+            | ((strikethrough as u8) << 5)
+    }
+
+    /// Compute a hash key from text + style without allocating a String.
+    fn hash_key(text: &str, style: u8) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        style.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    struct CacheEntry {
+        shaped: gpui::ShapedLine,
+        generation: u64,
+    }
+
+    struct Cache {
+        entries: HashMap<u64, CacheEntry>,
+        generation: u64,
+    }
+
+    thread_local! {
+        static CACHE: RefCell<Cache> = RefCell::new(Cache {
+            entries: HashMap::with_capacity(2048),
+            generation: 0,
+        });
+    }
+
+    /// Look up a shaped line in the cache (zero-allocation).
+    pub fn get(text: &str, style: u8) -> Option<gpui::ShapedLine> {
+        let key = hash_key(text, style);
+        CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            let cur_gen = cache.generation;
+            if let Some(entry) = cache.entries.get_mut(&key) {
+                entry.generation = cur_gen; // mark as recently used
+                Some(entry.shaped.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Insert a shaped line into the cache.
+    pub fn insert(text: &str, style: u8, shaped: gpui::ShapedLine) {
+        let key = hash_key(text, style);
+        CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            // Evict stale entries when cache grows too large (keep recent half)
+            if cache.entries.len() > 8192 {
+                let cutoff = cache.generation.saturating_sub(1);
+                cache.entries.retain(|_, e| e.generation > cutoff);
+                cache.generation += 1;
+            }
+            let cur_gen = cache.generation;
+            cache.entries.insert(key, CacheEntry {
+                shaped,
+                generation: cur_gen,
+            });
+        });
+    }
+
+    /// Clear the cache (call when font changes).
+    pub fn clear() {
+        CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            cache.entries.clear();
+            cache.generation += 1;
+        });
+    }
+}
+
+// ─── Terminal Theme ─────────────────────────────────────────────
+
+/// Terminal color scheme — 16 ANSI colors + special colors.
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub struct TerminalTheme {
+    /// ANSI colors 0-15 (black, red, green, yellow, blue, magenta, cyan, white,
+    /// then bright variants)
+    pub ansi: [u32; 16],
+    /// Dim ANSI colors 0-7
+    pub dim: [u32; 8],
+    /// Default foreground
+    pub fg: u32,
+    /// Default background
+    pub bg: u32,
+    /// Cursor color
+    pub cursor: u32,
+    /// Cursor text (under block cursor)
+    pub cursor_text: u32,
+    /// Selection highlight
+    pub selection: u32,
+}
+
+#[cfg(feature = "gpui")]
+impl TerminalTheme {
+    /// Tomorrow Night (default)
+    pub fn tomorrow_night() -> Self {
+        Self {
+            ansi: [
+                0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6,
+                0x969896, 0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xffffff,
+            ],
+            dim: [0x131515, 0x864343, 0x777e45, 0x9f834d, 0x556b7e, 0x75627c, 0x5c7e7a, 0x828482],
+            fg: 0xc5c8c6,
+            bg: 0x1d1f21,
+            cursor: 0xf5f5f5,
+            cursor_text: 0x1d1f21,
+            selection: 0x3a5a8f,
+        }
+    }
+
+    /// Catppuccin Mocha
+    pub fn catppuccin_mocha() -> Self {
+        Self {
+            ansi: [
+                0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xcba6f7, 0x94e2d5, 0xbac2de,
+                0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xcba6f7, 0x94e2d5, 0xa6adc8,
+            ],
+            dim: [0x313244, 0x874c5e, 0x5e8060, 0x8a7d61, 0x4e6589, 0x6e5d87, 0x537d74, 0x6c7086],
+            fg: 0xcdd6f4,
+            bg: 0x1e1e2e,
+            cursor: 0xf5e0dc,
+            cursor_text: 0x1e1e2e,
+            selection: 0x45475a,
+        }
+    }
+
+    /// Dracula
+    pub fn dracula() -> Self {
+        Self {
+            ansi: [
+                0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2,
+                0x6272a4, 0xff6e6e, 0x69ff94, 0xffffa5, 0xd6acff, 0xff92df, 0xa4ffff, 0xffffff,
+            ],
+            dim: [0x14151b, 0x992f2f, 0x2e9148, 0x8e9153, 0x6e5692, 0x994774, 0x518a97, 0x909090],
+            fg: 0xf8f8f2,
+            bg: 0x282a36,
+            cursor: 0xf8f8f2,
+            cursor_text: 0x282a36,
+            selection: 0x44475a,
+        }
+    }
+
+    /// Solarized Dark
+    pub fn solarized_dark() -> Self {
+        Self {
+            ansi: [
+                0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+                0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+            ],
+            dim: [0x042029, 0x8a1e1c, 0x535c00, 0x6e5400, 0x175680, 0x82204f, 0x196360, 0x908c82],
+            fg: 0x839496,
+            bg: 0x002b36,
+            cursor: 0x839496,
+            cursor_text: 0x002b36,
+            selection: 0x073642,
+        }
+    }
+
+    /// One Dark (Atom)
+    pub fn one_dark() -> Self {
+        Self {
+            ansi: [
+                0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf,
+                0x545862, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xc8ccd4,
+            ],
+            dim: [0x1a1d23, 0x8a4248, 0x5d7849, 0x8d764c, 0x3c6c93, 0x7a4a88, 0x357078, 0x696e77],
+            fg: 0xabb2bf,
+            bg: 0x282c34,
+            cursor: 0x528bff,
+            cursor_text: 0x282c34,
+            selection: 0x3e4452,
+        }
+    }
+
+    /// Look up a built-in theme by name.
+    pub fn by_name(name: &str) -> Self {
+        match name.to_lowercase().as_str() {
+            "catppuccin" | "catppuccin-mocha" | "catppuccin_mocha" => Self::catppuccin_mocha(),
+            "dracula" => Self::dracula(),
+            "solarized" | "solarized-dark" | "solarized_dark" => Self::solarized_dark(),
+            "one-dark" | "one_dark" | "onedark" | "atom" => Self::one_dark(),
+            _ => Self::tomorrow_night(),
+        }
+    }
+}
+
 // ─── Cell Metrics ───────────────────────────────────────────────
 
 /// Cell dimensions measured from actual font metrics.
@@ -90,8 +295,9 @@ pub fn render_alacritty_terminal(
     is_active_pane: bool,
     font_family: &str,
     font_size: f32,
+    theme: &TerminalTheme,
 ) -> impl IntoElement {
-    let mut data = collect_render_data(term, cursor_blink_on);
+    let mut data = collect_render_data(term, cursor_blink_on, theme);
 
     // Active pane: always show beam cursor.
     // TUI apps (Claude/Codex/OpenCode) hide the terminal cursor but track position
@@ -133,6 +339,9 @@ struct RenderData {
     selection_ranges: Vec<(usize, usize, usize)>,
     cursor_text_color: Rgba,
     default_bg: Rgba,
+    selection_bg: Rgba,
+    /// Scroll state: (display_offset, total_history, visible_rows)
+    scroll_info: (usize, usize, usize),
 }
 
 #[cfg(feature = "gpui")]
@@ -158,6 +367,22 @@ struct RenderCell {
     strikethrough: bool,
     hidden: bool,
     wide_continuation: bool,
+    /// OSC 8 hyperlink URL (if any)
+    hyperlink_url: Option<String>,
+}
+
+#[cfg(feature = "gpui")]
+impl UnderlineKind {
+    fn as_u8(self) -> u8 {
+        match self {
+            UnderlineKind::None => 0,
+            UnderlineKind::Single => 1,
+            UnderlineKind::Double => 2,
+            UnderlineKind::Curly => 3,
+            UnderlineKind::Dotted => 4,
+            UnderlineKind::Dashed => 5,
+        }
+    }
 }
 
 #[cfg(feature = "gpui")]
@@ -173,6 +398,7 @@ impl Default for RenderCell {
             strikethrough: false,
             hidden: false,
             wide_continuation: false,
+            hyperlink_url: None,
         }
     }
 }
@@ -188,6 +414,10 @@ struct PrepaintData {
     selection_rects: Vec<PaintRect>,
     /// Shaped text lines with positions
     text_lines: Vec<PaintText>,
+    /// Custom underline rectangles (rendered after text)
+    underline_rects: Vec<PaintRect>,
+    /// Scrollbar indicator (thin track on right edge)
+    scrollbar_rects: Vec<PaintRect>,
     /// Cursor overlay rectangles (paint last)
     cursor_rects: Vec<PaintRect>,
     /// Line height for ShapedLine::paint
@@ -214,6 +444,7 @@ struct PaintText {
 fn collect_render_data(
     term: &amux_platform::terminal::alacritty_view::AlacrittyTerminal,
     cursor_blink_on: bool,
+    theme: &TerminalTheme,
 ) -> RenderData {
     use alacritty_terminal::grid::Dimensions;
     use alacritty_terminal::term::cell::Flags as CellFlags;
@@ -225,10 +456,10 @@ fn collect_render_data(
         let cursor = content.cursor;
         let display_offset = t.grid().display_offset();
 
-        let default_fg = rgb(0xc5c8c6);
-        let default_bg = rgb(0x1d1f21);
-        let cursor_color = rgb(0xf5f5f5);
-        let cursor_text_color = rgb(0x1d1f21);
+        let default_fg = rgb(theme.fg);
+        let default_bg = rgb(theme.bg);
+        let cursor_color = rgb(theme.cursor);
+        let cursor_text_color = rgb(theme.cursor_text);
 
         let mut grid: Vec<Vec<RenderCell>> = vec![vec![RenderCell::default(); cols]; rows];
 
@@ -245,8 +476,8 @@ fn collect_render_data(
                 let flags = cell.flags;
                 let is_dim = flags.contains(CellFlags::DIM);
                 let mut fg =
-                    convert_color(&cell.fg, &default_fg, true, is_dim);
-                let mut bg = convert_color(&cell.bg, &default_bg, false, false);
+                    convert_color(&cell.fg, &default_fg, true, is_dim, theme);
+                let mut bg = convert_color(&cell.bg, &default_bg, false, false, theme);
 
                 // REVERSE video: swap fg and bg
                 if flags.contains(CellFlags::INVERSE) {
@@ -268,16 +499,42 @@ fn collect_render_data(
                     UnderlineKind::None
                 };
 
+                let hyperlink_url = cell.hyperlink().map(|h| {
+                    let vte_link: alacritty_terminal::vte::ansi::Hyperlink = h.into();
+                    vte_link.uri.to_string()
+                });
+
+                // Hyperlinks: auto-underline and tint blue if no explicit style
+                let (final_fg, final_underline) = if hyperlink_url.is_some() {
+                    let link_fg = if matches!(cell.fg, alacritty_terminal::vte::ansi::Color::Named(
+                        alacritty_terminal::vte::ansi::NamedColor::Foreground
+                    )) {
+                        // Default foreground — tint to link blue
+                        Rgba { r: 0.478, g: 0.647, b: 0.855, a: 1.0 } // #7aa6da
+                    } else {
+                        fg
+                    };
+                    let ul = if underline == UnderlineKind::None {
+                        UnderlineKind::Single
+                    } else {
+                        underline
+                    };
+                    (link_fg, ul)
+                } else {
+                    (fg, underline)
+                };
+
                 grid[row][col] = RenderCell {
                     ch: cell.c,
-                    fg,
+                    fg: final_fg,
                     bg,
                     bold: flags.contains(CellFlags::BOLD),
                     italic: flags.contains(CellFlags::ITALIC),
-                    underline,
+                    underline: final_underline,
                     strikethrough: flags.contains(CellFlags::STRIKEOUT),
                     hidden: flags.contains(CellFlags::HIDDEN),
                     wide_continuation: flags.contains(CellFlags::WIDE_CHAR_SPACER),
+                    hyperlink_url,
                 };
             }
         }
@@ -325,6 +582,13 @@ fn collect_render_data(
             cursor_color,
             cursor_text_color,
             default_bg,
+            selection_bg: rgb(theme.selection),
+            scroll_info: {
+                let offset = t.grid().display_offset();
+                let history = t.grid().history_size();
+                let visible = t.screen_lines();
+                (offset, history, visible)
+            },
             selection_ranges,
         }
     })
@@ -364,6 +628,25 @@ fn shape_cursor_x(
     }
 }
 
+/// Shape a text run, using the glyph cache when possible.
+#[cfg(feature = "gpui")]
+fn shape_cached(
+    text: &str,
+    style_bits: u8,
+    run: gpui::TextRun,
+    font_size: Pixels,
+    text_system: &std::sync::Arc<gpui::WindowTextSystem>,
+) -> gpui::ShapedLine {
+    if let Some(cached) = glyph_cache::get(text, style_bits) {
+        return cached;
+    }
+    let shaped = text_system.shape_line(
+        SharedString::from(text.to_string()), font_size, &[run], None,
+    );
+    glyph_cache::insert(text, style_bits, shaped.clone());
+    shaped
+}
+
 fn prepaint_terminal(
     mut data: RenderData,
     bounds: Bounds<Pixels>,
@@ -382,10 +665,11 @@ fn prepaint_terminal(
     let mut special_rects = Vec::with_capacity(64);
     let mut selection_rects = Vec::new();
     let mut text_lines = Vec::with_capacity(data.rows * 8);
+    let mut underline_rects = Vec::new();
     let mut cursor_rects = Vec::new();
 
     // Build selection highlight rects
-    let selection_bg = Rgba { r: 0.2, g: 0.35, b: 0.6, a: 1.0 }; // blue highlight
+    let selection_bg = data.selection_bg;
     for &(row, c_start, c_end) in &data.selection_ranges {
         let x = bounds.origin.x + px(c_start as f32 * cell_w);
         let y = bounds.origin.y + px(row as f32 * cell_h);
@@ -519,27 +803,21 @@ fn prepaint_terminal(
             let mut has_visible = false; // track if run has non-space chars
 
             // Helper: build TextRun with current style
-            let build_run = |text_len: usize, fg: Rgba, bold: bool, italic: bool, underline: UnderlineKind, strikethrough: bool, hidden: bool| -> gpui::TextRun {
+            let build_run = |text_len: usize, fg: Rgba, bold: bool, italic: bool, _underline: UnderlineKind, strikethrough: bool, hidden: bool| -> gpui::TextRun {
                 // Hidden text: render as invisible (fg = transparent)
                 let fg_hsla = if hidden {
                     Hsla { h: 0.0, s: 0.0, l: 0.0, a: 0.0 }
                 } else {
                     rgba_to_hsla(fg)
                 };
-                let ul_style = match underline {
-                    UnderlineKind::None => None,
-                    UnderlineKind::Curly => Some(gpui::UnderlineStyle { thickness: px(1.0), color: Some(fg_hsla), wavy: true }),
-                    // GPUI doesn't support true double underline; approximate with thicker line
-                    UnderlineKind::Double => Some(gpui::UnderlineStyle { thickness: px(2.0), color: Some(fg_hsla), wavy: false }),
-                    // Dotted/Dashed rendered as single — GPUI has no dash style support
-                    _ => Some(gpui::UnderlineStyle { thickness: px(1.0), color: Some(fg_hsla), wavy: false }),
-                };
+                // Underlines are rendered as custom quads for full style support
+                // (double, curly, dotted, dashed). Only strikethrough uses GPUI's built-in.
                 gpui::TextRun {
                     len: text_len,
                     font: make_font_styled(font_family, bold, italic),
                     color: fg_hsla,
                     background_color: None,
-                    underline: ul_style,
+                    underline: None,
                     strikethrough: if strikethrough {
                         Some(gpui::StrikethroughStyle { thickness: px(1.0), color: Some(fg_hsla) })
                     } else { None },
@@ -581,10 +859,9 @@ fn prepaint_terminal(
 
                     // Flush pending narrow run
                     if has_visible {
+                        let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
                         let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
-                        let shaped = text_system.shape_line(
-                            SharedString::from(narrow_text.clone()), font_size, &[run], None,
-                        );
+                        let shaped = shape_cached(&narrow_text, sk, run, font_size, &text_system);
                         let x = bounds.origin.x + px(narrow_start as f32 * cell_w);
                         text_lines.push(PaintText { origin: point(x, y), shaped });
                     }
@@ -601,10 +878,9 @@ fn prepaint_terminal(
                     let ch = if c.ch == '\0' { ' ' } else { c.ch };
                     if ch != ' ' {
                         let ch_str = ch.to_string();
+                        let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
                         let run = build_run(ch_str.len(), fg, bold, italic, underline, strikethrough, hidden);
-                        let shaped = text_system.shape_line(
-                            SharedString::from(ch_str), font_size, &[run], None,
-                        );
+                        let shaped = shape_cached(&ch_str, sk, run, font_size, &text_system);
                         let x = bounds.origin.x + px(col as f32 * cell_w);
                         text_lines.push(PaintText { origin: point(x, y), shaped });
                     }
@@ -637,12 +913,39 @@ fn prepaint_terminal(
 
             // Flush remaining narrow run
             if has_visible {
+                let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
                 let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
-                let shaped = text_system.shape_line(
-                    SharedString::from(narrow_text), font_size, &[run], None,
-                );
+                let shaped = shape_cached(&narrow_text, sk, run, font_size, &text_system);
                 let x = bounds.origin.x + px(narrow_start as f32 * cell_w);
                 text_lines.push(PaintText { origin: point(x, y), shaped });
+            }
+        }
+
+        // ── Phase 2.5: Underline spans ──
+        // Scan row for consecutive cells with same underline style + color.
+        {
+            let mut ucol = 0;
+            while ucol < data.cols {
+                let cell = &data.grid[row][ucol];
+                let ul = cell.underline;
+                if ul == UnderlineKind::None || cell.wide_continuation {
+                    ucol += 1;
+                    continue;
+                }
+                let ul_color = cell.fg;
+                let start = ucol;
+                ucol += 1;
+                while ucol < data.cols
+                    && data.grid[row][ucol].underline == ul
+                    && data.grid[row][ucol].fg == ul_color
+                    && !data.grid[row][ucol].wide_continuation
+                {
+                    ucol += 1;
+                }
+                let x = bounds.origin.x + px(start as f32 * cell_w);
+                let w = (ucol - start) as f32 * cell_w;
+                let baseline_y = y + px(cell_h - metrics.descent.abs().max(2.0));
+                push_underline(ul, ul_color, x, baseline_y, w, &mut underline_rects);
             }
         }
     }
@@ -679,11 +982,51 @@ fn prepaint_terminal(
         }
     }
 
+    // ── Phase 4: Scrollbar ──
+    let mut scrollbar_rects = Vec::new();
+    {
+        let (offset, history, visible) = data.scroll_info;
+        let total = history + visible;
+        if history > 0 {
+            let track_h = data.rows as f32 * cell_h;
+            let bar_w = 4.0_f32;
+            let track_x = bounds.origin.x + px(data.cols as f32 * cell_w - bar_w);
+            let track_y = bounds.origin.y;
+
+            // Thumb: proportional to visible/total, position based on offset
+            let thumb_ratio = (visible as f32 / total as f32).clamp(0.05, 1.0);
+            let thumb_h = (track_h * thumb_ratio).max(8.0);
+            // offset=0 means at bottom, offset=history means at top
+            let scroll_frac = (offset as f32 / history as f32).clamp(0.0, 1.0);
+            let thumb_y = track_y + px((track_h - thumb_h) * (1.0 - scroll_frac));
+
+            // Track (subtle, only when scrolled)
+            if offset > 0 {
+                scrollbar_rects.push(PaintRect {
+                    origin: point(track_x, track_y),
+                    size: size(px(bar_w), px(track_h)),
+                    color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.05 },
+                });
+            }
+            // Thumb
+            scrollbar_rects.push(PaintRect {
+                origin: point(track_x, thumb_y),
+                size: size(px(bar_w), px(thumb_h)),
+                color: Rgba {
+                    r: 1.0, g: 1.0, b: 1.0,
+                    a: if offset > 0 { 0.3 } else { 0.1 },
+                },
+            });
+        }
+    }
+
     PrepaintData {
         bg_rects,
         special_rects,
         selection_rects,
         text_lines,
+        underline_rects,
+        scrollbar_rects,
         cursor_rects,
         line_height,
     }
@@ -722,7 +1065,17 @@ fn paint_terminal(data: PrepaintData, window: &mut Window, cx: &mut gpui::App) {
         );
     }
 
-    // Layer 4: Cursor overlay (beam/underline)
+    // Layer 4.5: Custom underlines (over text, under cursor)
+    for rect in &data.underline_rects {
+        paint_rect(rect, window);
+    }
+
+    // Layer 5: Scrollbar (over everything except cursor)
+    for rect in &data.scrollbar_rects {
+        paint_rect(rect, window);
+    }
+
+    // Layer 6: Cursor overlay (beam/underline)
     for rect in &data.cursor_rects {
         paint_rect(rect, window);
     }
@@ -752,47 +1105,48 @@ fn rgba_to_hsla(c: Rgba) -> Hsla {
     c.into()
 }
 
-/// Convert alacritty color to Rgba. Tomorrow Night color scheme.
+/// Convert alacritty color to Rgba using the active theme.
 #[cfg(feature = "gpui")]
 fn convert_color(
     color: &alacritty_terminal::vte::ansi::Color,
     default: &Rgba,
     is_fg: bool,
     dim: bool,
+    theme: &TerminalTheme,
 ) -> Rgba {
     use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 
     let base = match color {
         AnsiColor::Named(name) => match name {
-            NamedColor::Black => rgb(0x1d1f21),
-            NamedColor::Red => rgb(0xcc6666),
-            NamedColor::Green => rgb(0xb5bd68),
-            NamedColor::Yellow => rgb(0xf0c674),
-            NamedColor::Blue => rgb(0x81a2be),
-            NamedColor::Magenta => rgb(0xb294bb),
-            NamedColor::Cyan => rgb(0x8abeb7),
-            NamedColor::White => rgb(0xc5c8c6),
-            NamedColor::BrightBlack => rgb(0x969896),
-            NamedColor::BrightRed => rgb(0xcc6666),
-            NamedColor::BrightGreen => rgb(0xb5bd68),
-            NamedColor::BrightYellow => rgb(0xf0c674),
-            NamedColor::BrightBlue => rgb(0x81a2be),
-            NamedColor::BrightMagenta => rgb(0xb294bb),
-            NamedColor::BrightCyan => rgb(0x8abeb7),
-            NamedColor::BrightWhite => rgb(0xffffff),
-            NamedColor::Foreground => rgb(0xc5c8c6),
-            NamedColor::Background => rgb(0x1d1f21),
-            NamedColor::Cursor => rgb(0xc5c8c6),
-            NamedColor::BrightForeground => rgb(0xeaeaea),
-            NamedColor::DimForeground => rgb(0x828482),
-            NamedColor::DimBlack => rgb(0x131515),
-            NamedColor::DimRed => rgb(0x864343),
-            NamedColor::DimGreen => rgb(0x777e45),
-            NamedColor::DimYellow => rgb(0x9f834d),
-            NamedColor::DimBlue => rgb(0x556b7e),
-            NamedColor::DimMagenta => rgb(0x75627c),
-            NamedColor::DimCyan => rgb(0x5c7e7a),
-            NamedColor::DimWhite => rgb(0x828482),
+            NamedColor::Black => rgb(theme.ansi[0]),
+            NamedColor::Red => rgb(theme.ansi[1]),
+            NamedColor::Green => rgb(theme.ansi[2]),
+            NamedColor::Yellow => rgb(theme.ansi[3]),
+            NamedColor::Blue => rgb(theme.ansi[4]),
+            NamedColor::Magenta => rgb(theme.ansi[5]),
+            NamedColor::Cyan => rgb(theme.ansi[6]),
+            NamedColor::White => rgb(theme.ansi[7]),
+            NamedColor::BrightBlack => rgb(theme.ansi[8]),
+            NamedColor::BrightRed => rgb(theme.ansi[9]),
+            NamedColor::BrightGreen => rgb(theme.ansi[10]),
+            NamedColor::BrightYellow => rgb(theme.ansi[11]),
+            NamedColor::BrightBlue => rgb(theme.ansi[12]),
+            NamedColor::BrightMagenta => rgb(theme.ansi[13]),
+            NamedColor::BrightCyan => rgb(theme.ansi[14]),
+            NamedColor::BrightWhite => rgb(theme.ansi[15]),
+            NamedColor::Foreground => rgb(theme.fg),
+            NamedColor::Background => rgb(theme.bg),
+            NamedColor::Cursor => rgb(theme.cursor),
+            NamedColor::BrightForeground => rgb(theme.ansi[15]),
+            NamedColor::DimForeground => rgb(theme.dim[7]),
+            NamedColor::DimBlack => rgb(theme.dim[0]),
+            NamedColor::DimRed => rgb(theme.dim[1]),
+            NamedColor::DimGreen => rgb(theme.dim[2]),
+            NamedColor::DimYellow => rgb(theme.dim[3]),
+            NamedColor::DimBlue => rgb(theme.dim[4]),
+            NamedColor::DimMagenta => rgb(theme.dim[5]),
+            NamedColor::DimCyan => rgb(theme.dim[6]),
+            NamedColor::DimWhite => rgb(theme.dim[7]),
             _ => *default,
         },
         AnsiColor::Spec(rgb_color) => Rgba {
@@ -801,14 +1155,29 @@ fn convert_color(
             b: rgb_color.b as f32 / 255.0,
             a: 1.0,
         },
-        AnsiColor::Indexed(idx) => indexed_to_rgba(*idx),
+        AnsiColor::Indexed(idx) => indexed_to_rgba(*idx, theme),
     };
 
     if dim && is_fg {
+        // DIM attribute: reduce foreground brightness
         Rgba {
             r: base.r * 0.5,
             g: base.g * 0.5,
             b: base.b * 0.5,
+            a: base.a,
+        }
+    } else if !is_fg && !matches!(color,
+        AnsiColor::Named(NamedColor::Background | NamedColor::Foreground | NamedColor::Cursor)
+    ) && base != *default {
+        // Non-default ANSI background colors: dim to ~40% brightness so they
+        // don't overpower foreground text. Common trigger: `ls` in WSL where
+        // other-writable dirs get bright green/yellow backgrounds via LS_COLORS.
+        let bg = rgb(theme.bg);
+        let blend = 0.35_f32;
+        Rgba {
+            r: bg.r + (base.r - bg.r) * blend,
+            g: bg.g + (base.g - bg.g) * blend,
+            b: bg.b + (base.b - bg.b) * blend,
             a: base.a,
         }
     } else {
@@ -816,15 +1185,11 @@ fn convert_color(
     }
 }
 
-/// Convert 256-color index to Rgba.
+/// Convert 256-color index to Rgba using theme for indices 0-15.
 #[cfg(feature = "gpui")]
-fn indexed_to_rgba(idx: u8) -> Rgba {
+fn indexed_to_rgba(idx: u8, theme: &TerminalTheme) -> Rgba {
     if idx < 16 {
-        let colors: [u32; 16] = [
-            0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6,
-            0x969896, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xffffff,
-        ];
-        rgb(colors[idx as usize])
+        rgb(theme.ansi[idx as usize])
     } else if idx < 232 {
         let idx = idx - 16;
         let r = (idx / 36) % 6;
@@ -849,6 +1214,69 @@ fn indexed_to_rgba(idx: u8) -> Rgba {
 }
 
 // ─── Special Character Rendering ────────────────────────────────
+
+/// Push underline rectangles for a span of underlined text.
+/// Renders Single, Double, Dotted, and Dashed as quads. Curly uses GPUI wavy fallback.
+#[cfg(feature = "gpui")]
+fn push_underline(
+    kind: UnderlineKind,
+    color: Rgba,
+    x: Pixels,
+    y: Pixels,
+    w: f32,
+    rects: &mut Vec<PaintRect>,
+) {
+    match kind {
+        UnderlineKind::None => {}
+        UnderlineKind::Single | UnderlineKind::Curly => {
+            // Single line (curly would need wavy path — approximate as single for now)
+            rects.push(PaintRect {
+                origin: point(x, y),
+                size: size(px(w), px(1.0)),
+                color,
+            });
+        }
+        UnderlineKind::Double => {
+            // Two parallel lines, 2px apart
+            rects.push(PaintRect {
+                origin: point(x, y),
+                size: size(px(w), px(1.0)),
+                color,
+            });
+            rects.push(PaintRect {
+                origin: point(x, y + px(3.0)),
+                size: size(px(w), px(1.0)),
+                color,
+            });
+        }
+        UnderlineKind::Dotted => {
+            // Dots: 1px on, 2px off
+            let mut dx = 0.0_f32;
+            while dx < w {
+                let dot_w = 1.0_f32.min(w - dx);
+                rects.push(PaintRect {
+                    origin: point(x + px(dx), y),
+                    size: size(px(dot_w), px(1.0)),
+                    color,
+                });
+                dx += 3.0;
+            }
+        }
+        UnderlineKind::Dashed => {
+            // Dashes: 4px on, 2px off
+            let mut dx = 0.0_f32;
+            while dx < w {
+                let dash_w = 4.0_f32.min(w - dx);
+                rects.push(PaintRect {
+                    origin: point(x + px(dx), y),
+                    size: size(px(dash_w), px(1.0)),
+                    color,
+                });
+                dx += 6.0;
+            }
+        }
+    }
+}
 
 /// Check if a character should be rendered as geometric quads instead of text.
 fn is_special_render_char(ch: char) -> bool {
