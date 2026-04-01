@@ -9,6 +9,8 @@ mod gpui_command_palette;
 mod gpui_components;
 #[cfg(feature = "gpui")]
 mod gpui_clipboard;
+#[cfg(feature = "gpui")]
+mod gpui_compare_task;
 mod gpui_config;
 #[cfg(feature = "gpui")]
 mod gpui_entry;
@@ -25,6 +27,8 @@ mod gpui_keyboard_shortcuts;
 mod gpui_status_bar;
 #[cfg(feature = "gpui")]
 mod gpui_surface_views;
+#[cfg(feature = "gpui")]
+mod gpui_task_bar;
 #[cfg(feature = "gpui")]
 mod gpui_terminal;
 #[cfg(feature = "gpui")]

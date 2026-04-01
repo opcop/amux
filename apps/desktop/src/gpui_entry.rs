@@ -59,6 +59,12 @@ pub(crate) struct GpuiShellView {
     pub(crate) ime_preedit: Option<String>,
     /// Sidebar resize drag: (start_mouse_x, start_width)
     pub(crate) sidebar_drag_start: Option<(f32, f32)>,
+    /// Compare task setup dialog
+    pub(crate) compare_setup: Option<crate::gpui_compare_task::CompareSetupState>,
+    /// Active compare task
+    pub(crate) compare_task: Option<crate::gpui_compare_task::CompareTask>,
+    /// Pending prompt to inject into compare agents (waits until agents are ready)
+    pub(crate) compare_prompt_pending: Option<String>,
 }
 
 /// Right-click context menu
@@ -264,6 +270,9 @@ impl GpuiShellView {
             agent_picker: None,
             ime_preedit: None,
             sidebar_drag_start: None,
+            compare_setup: None,
+            compare_task: None,
+            compare_prompt_pending: None,
         }
     }
 
@@ -660,6 +669,165 @@ impl GpuiShellView {
         }
     }
 
+    // ─── Compare Task ────────────────────────────────────────────
+
+    /// Open the compare setup dialog.
+    pub(crate) fn open_compare_setup(&mut self) {
+        self.compare_setup = Some(
+            crate::gpui_compare_task::CompareSetupState::new(
+                &self.detected_vibe_tools,
+                self.wsl_detected,
+            )
+        );
+    }
+
+    /// Start the compare task: create side-by-side panes, launch agents, inject prompt.
+    pub(crate) fn start_compare_task(&mut self) {
+        use crate::gpui_compare_task::*;
+        use amux_platform::terminal::manager::SplitDirection;
+
+        let setup = match self.compare_setup.take() {
+            Some(s) if s.can_start() => s,
+            _ => return,
+        };
+
+        let selected: Vec<(String, String)> = setup.agents.iter()
+            .filter(|(_, _, sel)| *sel)
+            .map(|(id, name, _)| (id.clone(), name.clone()))
+            .collect();
+
+        let prompt = setup.prompt.clone();
+
+        // Create side-by-side layout: split first, then spawn agents
+        let mut agents: Vec<CompareAgent> = Vec::new();
+
+        // First agent: spawn in current active pane (no split needed)
+        if let Some((tool_id, display_name)) = selected.first() {
+            self.spawn_vibe_tool_in_active(tool_id, false);
+            let pane_id = self.terminal_manager().active_pane_id().cloned();
+            agents.push(CompareAgent {
+                tool_id: tool_id.clone(),
+                display_name: display_name.clone(),
+                pane_id,
+                status: CompareAgentStatus::Pending,
+            });
+        }
+
+        // Subsequent agents: split right, then spawn in the new pane
+        for (tool_id, display_name) in selected.iter().skip(1) {
+            self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
+            self.spawn_vibe_tool_in_active(tool_id, false);
+            let pane_id = self.terminal_manager().active_pane_id().cloned();
+            agents.push(CompareAgent {
+                tool_id: tool_id.clone(),
+                display_name: display_name.clone(),
+                pane_id,
+                status: CompareAgentStatus::Pending,
+            });
+        }
+
+        // Create the task
+        self.compare_task = Some(CompareTask {
+            prompt: prompt.clone(),
+            agents,
+            phase: ComparePhase::Running,
+            expanded: true,
+            created_frame: self.cursor_blink_frame,
+        });
+
+        // Inject the prompt into each agent pane after a brief delay
+        // (agents need time to start up before accepting input)
+        self.compare_prompt_pending = Some(prompt);
+
+        self.save_all_layouts();
+    }
+
+    /// Called from the polling loop to inject the prompt once agents are ready.
+    pub(crate) fn try_inject_compare_prompt(&mut self) {
+        use crate::gpui_compare_task::CompareAgentStatus;
+        let prompt = match &self.compare_prompt_pending {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        let task = match &self.compare_task {
+            Some(t) => t.clone(),
+            None => { self.compare_prompt_pending = None; return; }
+        };
+
+        // Check if all agents have started (status detected = they're alive)
+        let all_have_panes = task.agents.iter().all(|a| a.pane_id.is_some());
+        if !all_have_panes { return; }
+
+        // Check if agents are in a state where they can accept input
+        // (i.e., they show "waiting" status = prompt visible)
+        let any_waiting = task.agents.iter().any(|a| {
+            matches!(a.status, CompareAgentStatus::Waiting)
+        });
+
+        // Also inject if agents are still pending (they just started, give them time)
+        let all_pending = task.agents.iter().all(|a| {
+            matches!(a.status, CompareAgentStatus::Pending)
+        });
+
+        // Wait for at least one agent to be waiting (means it's ready for input)
+        if !any_waiting && !all_pending { return; }
+        if all_pending { return; } // still starting up
+
+        // Inject prompt into all waiting agents
+        for agent in &task.agents {
+            if let Some(ref pid) = agent.pane_id {
+                self.terminal_manager_mut().send_text_to_pane(pid, &prompt);
+            }
+        }
+
+        self.compare_prompt_pending = None;
+    }
+
+    /// Update compare task agent statuses from terminal manager poll.
+    pub(crate) fn update_compare_task_status(&mut self) {
+        use crate::gpui_compare_task::*;
+
+        let is_running = matches!(&self.compare_task, Some(t) if t.phase == ComparePhase::Running);
+        if !is_running { return; }
+
+        // Collect statuses from terminal manager first (immutable borrow)
+        let status_updates: Vec<(usize, CompareAgentStatus)> = self.compare_task.as_ref()
+            .map(|task| {
+                task.agents.iter().enumerate().filter_map(|(i, agent)| {
+                    let pid = agent.pane_id.as_ref()?;
+                    let pane = self.terminal_manager().get_pane(pid)?;
+                    let tab = pane.tabs.get(pane.active_tab)?;
+                    let status = tab.agent_status.as_ref()?;
+                    Some((i, CompareAgentStatus::from_agent_status(status)))
+                }).collect()
+            })
+            .unwrap_or_default();
+
+        // Apply updates (mutable borrow)
+        if let Some(ref mut task) = self.compare_task {
+            for (i, status) in status_updates {
+                if let Some(agent) = task.agents.get_mut(i) {
+                    agent.status = status;
+                }
+            }
+
+            // Auto-transition to Review when all agents are done
+            let all_done = task.agents.iter().all(|a| {
+                matches!(a.status, CompareAgentStatus::Done | CompareAgentStatus::Error)
+            });
+            if all_done {
+                task.phase = ComparePhase::Review;
+            }
+        }
+    }
+
+    /// Dismiss the compare task.
+    pub(crate) fn dismiss_compare_task(&mut self) {
+        self.compare_task = None;
+        self.compare_prompt_pending = None;
+    }
+
     /// Restart the terminal in a specific pane (used when process exits)
     pub(crate) fn restart_terminal_in_pane(&mut self, pane_id: &amux_platform::terminal::manager::PaneId) {
         self.terminal_manager_mut().set_active_pane(pane_id);
@@ -830,6 +998,10 @@ impl GpuiShellView {
         if has_launchers {
             items.push(ContextMenuItem::action("Launch Agent...", None, true));
         }
+        // Compare agents (need at least 2 detected tools)
+        if self.detected_vibe_tools.len() >= 2 {
+            items.push(ContextMenuItem::action("Compare Agents...", None, true));
+        }
         items
     }
 
@@ -869,6 +1041,9 @@ impl GpuiShellView {
             }
             "WSL Terminal" | "Launch Agent..." => {
                 self.open_agent_picker();
+            }
+            "Compare Agents..." => {
+                self.open_compare_setup();
             }
             "Clear" => {
                 if let Some(term) = self.terminal_manager_mut().active_terminal() {
@@ -1478,6 +1653,10 @@ impl Render for GpuiShellView {
                             .flex()
                             .flex_col()
                             .overflow_hidden()
+                            // Task Bar (shown when compare task is active)
+                            .when_some(self.compare_task.clone(), |this, task| {
+                                this.child(crate::gpui_task_bar::render_task_bar(&task, cx))
+                            })
                             // Terminal pane(s) — renders split layout recursively
                             .child({
                                 let active_pane_id = self.terminal_manager_mut().active_pane_id().cloned();
@@ -1628,6 +1807,10 @@ impl Render for GpuiShellView {
                 } else {
                     this
                 }
+            })
+            // Compare setup dialog overlay
+            .when_some(self.compare_setup.clone(), |this, setup| {
+                this.child(crate::gpui_task_bar::render_compare_setup(&setup, cx))
             })
             // Agent picker overlay (Launch Agent)
             .when_some(self.agent_picker.clone(), |this, picker| {
@@ -1792,6 +1975,9 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                 }
                                 // Clear activity for the active tab since user is looking at it
                                 this.terminal_manager_mut().clear_active_activity();
+                                // Update compare task agent statuses & inject prompt
+                                this.update_compare_task_status();
+                                this.try_inject_compare_prompt();
                                 // Expire old toasts (after ~3 seconds = 180 frames at 60fps)
                                 this.toasts.retain(|t| {
                                     frame.wrapping_sub(t.frame_created) < 180

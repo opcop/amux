@@ -266,6 +266,13 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
             "Send selection to pane",
             ShortcutCategory::Pane,
         ),
+        // Compare agents
+        Shortcut::new(
+            "ctrl+shift+t",
+            "Ctrl+Shift+T",
+            "Compare agents",
+            ShortcutCategory::App,
+        ),
         // Settings
         Shortcut::new(
             "ctrl+,",

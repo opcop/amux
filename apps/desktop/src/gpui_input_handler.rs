@@ -52,6 +52,12 @@ impl gpui::EntityInputHandler for GpuiShellView {
             cx.notify();
             return;
         }
+        // If compare setup dialog is open, send text to prompt field
+        if let Some(ref mut setup) = self.compare_setup {
+            setup.prompt.push_str(text);
+            cx.notify();
+            return;
+        }
         // If searching, append to search query and auto-navigate
         if let Some((ref mut query, _)) = self.search_state {
             query.push_str(text);
@@ -314,6 +320,26 @@ impl GpuiShellView {
             }
         }
 
+        // Compare setup dialog handling
+        if self.compare_setup.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.compare_setup = None;
+                }
+                "enter" => {
+                    self.start_compare_task();
+                }
+                "backspace" => {
+                    if let Some(ref mut setup) = self.compare_setup {
+                        setup.prompt.pop();
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
+
         // Agent picker handling (Launch Agent)
         if self.agent_picker.is_some() {
             match keystr.as_str() {
@@ -500,6 +526,11 @@ impl GpuiShellView {
                 }
                 "ctrl+shift+enter" => {
                     self.start_send_to_pane(cx);
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+t" => {
+                    self.open_compare_setup();
                     cx.notify();
                     return;
                 }

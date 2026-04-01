@@ -164,13 +164,18 @@ impl GpuiShellView {
     /// Launch a Vibe Coding CLI tool in a new split pane.
     /// `use_wsl`: true to force WSL launch, false for native.
     pub(crate) fn launch_vibe_tool_env(&mut self, tool: &str, use_wsl: bool) {
+        // Split right, then spawn in the new pane
+        self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
+        self.spawn_vibe_tool_in_active(tool, use_wsl);
+    }
+
+    /// Spawn a vibe tool in the current active pane (no split).
+    /// Used by compare task which manages its own layout.
+    pub(crate) fn spawn_vibe_tool_in_active(&mut self, tool: &str, use_wsl: bool) {
         let Some((linux_bin, win_bin, extra_args, tab_title)) = Self::vibe_tool_info(tool) else {
             return;
         };
         let env = if use_wsl { "wsl" } else { "native" };
-
-        // Split right
-        self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
         let cwd = Self::default_cwd();
 
         let tool_cmd = if extra_args.is_empty() {
@@ -180,21 +185,17 @@ impl GpuiShellView {
         };
 
         let (shell, shell_args, spawn_cwd) = if use_wsl && cfg!(target_os = "windows") {
-            // Windows host → launch inside WSL via wsl.exe
             let mut wsl_args = vec![];
             if let Some(ref cwd_str) = cwd {
                 let wsl_path = Self::windows_path_to_wsl(cwd_str);
                 wsl_args.extend(["--cd".to_string(), wsl_path]);
             }
-            // Use login shell inside WSL so PATH is complete
             wsl_args.extend(["--".to_string(), "bash".to_string(), "-ilc".to_string(), tool_cmd]);
             ("wsl.exe".to_string(), wsl_args, None)
         } else if use_wsl {
-            // Already inside WSL/Linux → just use login shell
             let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             (sh, vec!["-ilc".to_string(), tool_cmd], cwd.as_deref().map(|s| s.to_string()))
         } else if cfg!(target_os = "windows") {
-            // Windows native tool
             let bin = win_bin;
             let win_cmd = if extra_args.is_empty() {
                 bin.to_string()
@@ -204,7 +205,6 @@ impl GpuiShellView {
             let (ps, _) = Self::default_shell();
             (ps, vec!["-NoLogo".to_string(), "-Command".to_string(), win_cmd], cwd.as_deref().map(|s| s.to_string()))
         } else {
-            // Linux/Mac native tool
             let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             (sh, vec!["-ilc".to_string(), tool_cmd], cwd.as_deref().map(|s| s.to_string()))
         };
