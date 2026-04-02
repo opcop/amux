@@ -66,6 +66,8 @@ pub struct FilePickerState {
     /// Filtered matches for current query
     pub matches: Vec<String>,
     pub selected_index: usize,
+    /// The base directory these files are relative to
+    pub base_dir: Option<String>,
 }
 
 // ─── Markdown Parsing ──────────────────────────────────────────
@@ -74,18 +76,38 @@ pub struct FilePickerState {
 impl PreviewState {
     /// Load and parse a file for preview
     pub fn load(file_path: &str) -> Option<Self> {
+        // Guard: check file size before reading (skip files > 2MB)
+        let metadata = std::fs::metadata(file_path).ok()?;
+        if metadata.len() > 2 * 1024 * 1024 {
+            eprintln!("[amux-preview] skipping large file ({} bytes): {}", metadata.len(), file_path);
+            return None;
+        }
+
         let content = std::fs::read_to_string(file_path).ok()?;
         let file_name = std::path::Path::new(file_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| file_path.to_string());
 
-        let elements = if file_path.ends_with(".md") || file_path.ends_with(".markdown") {
-            parse_markdown(&content)
-        } else {
-            let lang = detect_language(file_path);
-            vec![format_code_block(&lang, &content)]
-        };
+        // Catch panics from markdown/syntax parsing to prevent crashes
+        let elements = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if file_path.ends_with(".md") || file_path.ends_with(".markdown") {
+                parse_markdown(&content)
+            } else {
+                let lang = detect_language(file_path);
+                vec![format_code_block(&lang, &content)]
+            }
+        })).unwrap_or_else(|_| {
+            eprintln!("[amux-preview] panic while parsing: {}", file_path);
+            // Fallback: show as plain text
+            vec![PreviewElement::CodeBlock {
+                language: "text".to_string(),
+                formatted_lines: content.lines().take(300).enumerate()
+                    .map(|(i, l)| (format!("{:>4} {}", i + 1, l), 0xc5c8c6))
+                    .collect(),
+                total_lines: content.lines().count(),
+            }]
+        });
 
         Some(Self {
             file_path: file_path.to_string(),
@@ -971,14 +993,15 @@ fn render_spans(spans: &[TextSpan]) -> AnyElement {
 #[cfg(feature = "gpui")]
 impl FilePickerState {
     pub fn new(cwd: Option<String>) -> Self {
-        // Scan once on open, cache the full file list
-        let all_files = Self::scan_all_files(cwd);
+        // Scan once on open, cache the full file list and base dir
+        let all_files = Self::scan_all_files(cwd.clone());
         let matches = Self::filter_files(&all_files, "", 20);
         Self {
             query: String::new(),
             all_files,
             matches,
             selected_index: 0,
+            base_dir: cwd,
         }
     }
 

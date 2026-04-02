@@ -189,7 +189,7 @@ impl AlacrittyTerminal {
         #[cfg(not(target_os = "windows"))]
         let child_pid = Some(pty.child().id());
         #[cfg(target_os = "windows")]
-        let child_pid: Option<u32> = None;
+        let child_pid: Option<u32> = pty.child_watcher().pid().map(|p| p.get());
 
         // Spawn the event loop
         let event_loop = EventLoop::new(
@@ -302,7 +302,8 @@ impl AlacrittyTerminal {
         }
         #[cfg(target_os = "windows")]
         {
-            None
+            let pid = self.child_pid?;
+            crate::terminal::win_process_cwd(pid)
         }
     }
 
@@ -343,6 +344,30 @@ impl AlacrittyTerminal {
         let history = term.grid().history_size();
         let visible = term.screen_lines();
         (offset, history, visible)
+    }
+
+    /// Read the text content of the line where the cursor is currently positioned.
+    /// Used for command interception — always reads the actual input line,
+    /// regardless of where it is on screen.
+    pub fn cursor_line_text(&self) -> String {
+        use alacritty_terminal::index::Column;
+
+        self.with_term(|t| {
+            let grid = t.grid();
+            let cursor_line = t.grid().cursor.point.line;
+            let cols = t.grid().columns();
+            let mut text = String::new();
+            for col in 0..cols {
+                let cell = &grid[cursor_line][Column(col)];
+                if cell.c != ' ' && cell.c != '\0' {
+                    while text.len() < col {
+                        text.push(' ');
+                    }
+                    text.push(cell.c);
+                }
+            }
+            text.trim_end().to_string()
+        })
     }
 
     /// Read the last N non-empty lines from the terminal screen.
