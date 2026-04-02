@@ -488,9 +488,20 @@ impl GpuiShellView {
             if let Some(ref t) = title {
                 if let Some(wsl_cmd) = Self::detect_wsl_from_title_str(t) {
                     let (shell, args) = Self::default_shell();
-                    // Extract the WSL path so it's recorded on the new tab for future splits
                     let wsl_cwd = Self::extract_wsl_path_from_title(t);
                     return CapturedEnv { shell, args, cwd: wsl_cwd, initial_input: Some(wsl_cmd) };
+                }
+            }
+            // Fallback: detect WSL from prompt line (user@host:/path$)
+            if let Some(prompt_line) = self.terminal_manager().active_terminal_ref()
+                .map(|t| t.cursor_line_text())
+            {
+                if let Some(linux_path) = extract_cwd_from_prompt_line(&prompt_line) {
+                    if linux_path.starts_with('/') {
+                        let (shell, args) = Self::default_shell();
+                        let wsl_cmd = format!("wsl --cd {}", linux_path);
+                        return CapturedEnv { shell, args, cwd: Some(linux_path), initial_input: Some(wsl_cmd) };
+                    }
                 }
             }
         }
@@ -498,9 +509,8 @@ impl GpuiShellView {
         let inherited = self.terminal_manager().active_shell_cmd()
             .map(|(s, a)| (s.to_string(), a.to_vec()));
 
-        // On Linux/Mac: /proc/PID/cwd gives live CWD.
-        // On Windows: falls back to spawn-time CWD saved in tab.cwd.
-        let live_cwd = self.terminal_manager().active_cwd();
+        // Best-effort CWD: use the same resolve chain as file picker
+        let live_cwd = self.resolve_active_cwd();
 
         let (shell, args) = inherited.unwrap_or_else(Self::default_shell);
         let cwd = live_cwd.or_else(Self::default_cwd);
@@ -938,26 +948,22 @@ impl GpuiShellView {
 
     // ─── File Preview ────────────────────────────────────────────
 
-    /// Open the file picker (Ctrl+P)
+    /// Open the file picker (Ctrl+P / right-click / amux preview)
     pub(crate) fn open_file_picker(&mut self) {
-        let cwd = self.resolve_active_cwd();
+        // Try prompt extraction first (most reliable for WSL), then resolve chain
+        let prompt_cwd = self.terminal_manager().active_terminal_ref()
+            .map(|t| t.cursor_line_text())
+            .and_then(|line| extract_cwd_from_prompt_line(&line));
+        let cwd = prompt_cwd.map(|p| self.maybe_convert_wsl_path(&p))
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .or_else(|| self.resolve_active_cwd());
         self.file_picker = Some(crate::gpui_preview::FilePickerState::new(cwd));
     }
 
     fn open_file_picker_with_cwd(&mut self, cwd: Option<String>) {
-        // Debug: trace every step of CWD resolution
-        eprintln!("[amux-cwd] step1 prompt_cwd={:?}", cwd);
-        let converted = cwd.map(|p| { let c = self.maybe_convert_wsl_path(&p); eprintln!("[amux-cwd] step2 converted={:?} is_dir={}", c, std::path::Path::new(&c).is_dir()); c });
-        let from_prompt = converted.filter(|p| std::path::Path::new(p).is_dir());
-        let cwd = if from_prompt.is_some() {
-            eprintln!("[amux-cwd] step3 using prompt cwd");
-            from_prompt
-        } else {
-            let resolved = self.resolve_active_cwd();
-            eprintln!("[amux-cwd] step3 resolve_active_cwd={:?}", resolved);
-            resolved
-        };
-        eprintln!("[amux-cwd] step4 final cwd={:?}", cwd);
+        let cwd = cwd.map(|p| self.maybe_convert_wsl_path(&p))
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .or_else(|| self.resolve_active_cwd());
         self.file_picker = Some(crate::gpui_preview::FilePickerState::new(cwd));
     }
 
@@ -1387,13 +1393,24 @@ fn extract_cwd_from_prompt_line(line: &str) -> Option<String> {
         }
     }
 
-    // Bash/Zsh: "user@host:~/dir$ " or "user@host:/path$ "
+    // Bash/Zsh: "user@host:~/dir$ cmd" or "user@host:/path$" (no command typed)
     if let Some(colon) = line.find(':') {
         if line[..colon].contains('@') {
             let after_colon = &line[colon + 1..];
-            // Find $ or % that ends the path
+            // Find $ or % that ends the path — with or without trailing space
             let end = after_colon.find("$ ")
-                .or_else(|| after_colon.find("% "));
+                .or_else(|| after_colon.find("% "))
+                .or_else(|| {
+                    // No space after $ — prompt with nothing typed, or $ at end of line
+                    let trimmed = after_colon.trim_end();
+                    if trimmed.ends_with('$') {
+                        Some(trimmed.len() - 1)
+                    } else if trimmed.ends_with('%') {
+                        Some(trimmed.len() - 1)
+                    } else {
+                        None
+                    }
+                });
             if let Some(pos) = end {
                 let path = after_colon[..pos].trim();
                 if !path.is_empty() {
@@ -1403,8 +1420,8 @@ fn extract_cwd_from_prompt_line(line: &str) -> Option<String> {
         }
     }
 
-    // Simple zsh: "~/project% " or "/path% "
-    if let Some(pct) = line.find("% ") {
+    // Simple zsh: "~/project% cmd" or "/path%" (no command)
+    if let Some(pct) = line.find('%') {
         if pct < 120 {
             let path = line[..pct].trim();
             if !path.is_empty() && (path.starts_with('/') || path.starts_with('~') || path.starts_with('\\')) {
