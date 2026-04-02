@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = []
 # Base GPUI feature (all platforms)
-gpui = ["amux-ui/gpui", "dep:gpui", "dep:gpui_platform", "dep:smol"]
+gpui = ["amux-ui/gpui", "dep:gpui", "dep:gpui_platform", "dep:smol", "dep:pulldown-cmark"]
 # Linux-specific: enable both Wayland and X11 backends
 gpui-linux = ["gpui", "gpui_platform/wayland", "gpui_platform/x11"]
 
@@ -20,6 +20,7 @@ amux-ui = { path = "../../crates/amux-ui" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 gpui = { git = "https://github.com/zed-industries/zed", optional = true }
+pulldown-cmark = { version = "0.12", optional = true }
 gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true }
 smol = { version = "2", optional = true }
 

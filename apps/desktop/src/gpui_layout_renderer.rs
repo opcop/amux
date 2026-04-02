@@ -183,10 +183,10 @@ pub(crate) fn render_layout(
                             .py(px(4.0))
                             .text_xs()
                             .cursor_grab()
-                            .text_color(if is_tab_active { rgb(0xcdd6f4) } else { rgb(0x7f849c) })
-                            .bg(if is_tab_active { rgb(0x1e1e2e) } else { rgb(0x11111b) })
+                            .text_color(if is_tab_active { rgb(0xc5c8c6) } else { rgb(0x7f849c) })
+                            .bg(if is_tab_active { rgb(0x1d1f21) } else { rgb(0x141618) })
                             .border_b_2()
-                            .border_color(if is_tab_active { rgb(0x89b4fa) } else { rgb(0x11111b) })
+                            .border_color(if is_tab_active { rgb(0x81a2be) } else { rgb(0x141618) })
                             .when(is_tab_active, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                             .hover(|d| d.bg(rgb(0x252530)))
                             .on_drag(
@@ -227,11 +227,11 @@ pub(crate) fn render_layout(
                                         .flex_1()
                                         .overflow_hidden()
                                         .text_sm()
-                                        .text_color(rgb(0xcdd6f4))
-                                        .bg(rgb(0x313244))
+                                        .text_color(rgb(0xc5c8c6))
+                                        .bg(rgb(0x282a2e))
                                         .rounded(px(2.0))
                                         .border_1()
-                                        .border_color(rgb(0x89b4fa))
+                                        .border_color(rgb(0x81a2be))
                                         .px_1()
                                         .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
                                         .into_any_element()
@@ -247,12 +247,12 @@ pub(crate) fn render_layout(
                                     if tab_exited {
                                         tab_content = tab_content.child(
                                             div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
-                                                .bg(rgb(0xf38ba8)).flex_shrink_0() // red
+                                                .bg(rgb(0xcc6666)).flex_shrink_0() // red
                                         );
                                     } else if has_activity && !is_tab_active {
                                         tab_content = tab_content.child(
                                             div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
-                                                .bg(rgb(0xa6e3a1)).flex_shrink_0() // green
+                                                .bg(rgb(0xb5bd68)).flex_shrink_0() // green
                                         );
                                     }
                                     tab_content = tab_content.child(
@@ -279,8 +279,8 @@ pub(crate) fn render_layout(
                                         ))
                                         .px(px(2.0))
                                         .rounded(px(3.0))
-                                        .text_color(rgb(0x585b70))
-                                        .hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
+                                        .text_color(rgb(0x969896))
+                                        .hover(|d| d.bg(rgb(0x373b41)).text_color(rgb(0xcc6666)))
                                         .child("×")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close_tab);
@@ -314,7 +314,7 @@ pub(crate) fn render_layout(
                             .rounded(px(3.0))
                             .text_xs()
                             .text_color(rgb(0x6c7086))
-                            .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
                             .child("+")
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.terminal_manager_mut().set_active_pane(&pid_new);
@@ -333,7 +333,7 @@ pub(crate) fn render_layout(
                             .rounded(px(3.0))
                             .text_xs()
                             .text_color(rgb(0x6c7086))
-                            .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
                             .child("⬕")
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.terminal_manager_mut().set_active_pane(&pid_sr);
@@ -352,7 +352,7 @@ pub(crate) fn render_layout(
                             .rounded(px(3.0))
                             .text_xs()
                             .text_color(rgb(0x6c7086))
-                            .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
                             .child("⬓")
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.terminal_manager_mut().set_active_pane(&pid_sd);
@@ -374,7 +374,7 @@ pub(crate) fn render_layout(
                                 .rounded(px(3.0))
                                 .text_xs()
                                 .text_color(rgb(0x6c7086))
-                                .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
                                 .child(zoom_icon)
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.terminal_manager_mut().set_active_pane(&pid_zoom);
@@ -391,9 +391,9 @@ pub(crate) fn render_layout(
                             .py(px(2.0))
                             .rounded(px(3.0))
                             .text_xs()
-                            .text_color(if has_multiple_panes { rgb(0x6c7086) } else { rgb(0x313244) })
+                            .text_color(if has_multiple_panes { rgb(0x6c7086) } else { rgb(0x282a2e) })
                             .when(has_multiple_panes, |d| {
-                                d.hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
+                                d.hover(|d| d.bg(rgb(0x373b41)).text_color(rgb(0xcc6666)))
                             })
                             .child("✕")
                             .when(has_multiple_panes, |d| {
@@ -411,7 +411,7 @@ pub(crate) fn render_layout(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .bg(rgb(0x11111b))
+                    .bg(rgb(0x141618))
                     .border_b_1()
                     .border_color(rgb(0x252530))
                     .child(tabs_row)
@@ -434,9 +434,9 @@ pub(crate) fn render_layout(
                                         .px_2()
                                         .py(px(2.0))
                                         .rounded(px(8.0))
-                                        .bg(rgb(0x1e1e2e))
+                                        .bg(rgb(0x1d1f21))
                                         .border_1()
-                                        .border_color(rgb(0x45475a))
+                                        .border_color(rgb(0x373b41))
                                         .flex()
                                         .flex_row()
                                         .items_center()
@@ -446,7 +446,7 @@ pub(crate) fn render_layout(
                                                 .w(px(6.0))
                                                 .h(px(6.0))
                                                 .rounded(px(3.0))
-                                                .bg(rgb(0xa6e3a1)) // green for "zoomed" state
+                                                .bg(rgb(0xb5bd68)) // green for "zoomed" state
                                         )
                                         .child(
                                             div()
@@ -471,7 +471,7 @@ pub(crate) fn render_layout(
                         .bg(rgb(0x1d1f21))
                         .child(
                             div().flex().flex_col().items_center().gap_2()
-                                .child(div().text_sm().text_color(rgb(0x585b70)).child("Starting terminal..."))
+                                .child(div().text_sm().text_color(rgb(0x969896)).child("Starting terminal..."))
                         )
                         .into_any_element()
                 };
@@ -479,7 +479,7 @@ pub(crate) fn render_layout(
             } else {
                 (
                     div().into_any_element(),
-                    div().flex_1().bg(rgb(0x1e1e2e)).child("Empty pane").into_any_element(),
+                    div().flex_1().bg(rgb(0x1d1f21)).child("Empty pane").into_any_element(),
                 )
             };
 
@@ -500,7 +500,7 @@ pub(crate) fn render_layout(
                 .child(content)
                 // Drag-and-drop: visual feedback when dragging a tab over this pane
                 .drag_over::<DragTab>(|style, _, _, _| {
-                    style.border_t_2().border_color(rgb(0x585b70))
+                    style.border_t_2().border_color(rgb(0x969896))
                 })
                 // Drag-and-drop: accept a dropped tab
                 .on_drop(cx.listener(move |this, drag: &DragTab, _window, cx| {
@@ -558,7 +558,7 @@ pub(crate) fn render_layout(
                         .h_full()
                         .mx_auto()
                         .bg(rgb(0x252530))
-                        .group_hover("resize-h", |d| d.w(px(2.0)).bg(rgb(0x585b70)))
+                        .group_hover("resize-h", |d| d.w(px(2.0)).bg(rgb(0x969896)))
                 )
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _window, _cx| {
                     this.resize_drag = Some(ResizeDragState {
@@ -619,7 +619,7 @@ pub(crate) fn render_layout(
                         .w_full()
                         .my_auto()
                         .bg(rgb(0x252530))
-                        .group_hover("resize-v", |d| d.h(px(2.0)).bg(rgb(0x585b70)))
+                        .group_hover("resize-v", |d| d.h(px(2.0)).bg(rgb(0x969896)))
                 )
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _window, _cx| {
                     this.resize_drag = Some(ResizeDragState {
@@ -672,23 +672,23 @@ pub(crate) fn render_agent_picker(
                 .flex()
                 .items_center()
                 .gap_2()
-                .bg(if is_selected { rgb(0x313244) } else { rgb(0x1e1e2e) })
-                .hover(|d| d.bg(rgb(0x313244)))
+                .bg(if is_selected { rgb(0x282a2e) } else { rgb(0x1d1f21) })
+                .hover(|d| d.bg(rgb(0x282a2e)))
                 .cursor_pointer()
                 .child(
-                    div().text_xs().text_color(rgb(0x89b4fa)).min_w(px(16.0))
+                    div().text_xs().text_color(rgb(0x81a2be)).min_w(px(16.0))
                         .child(format!("{}", i + 1))
                 )
                 .child(
                     div().text_sm()
-                        .text_color(if is_selected { rgb(0xcdd6f4) } else { rgb(0xa6adc8) })
+                        .text_color(if is_selected { rgb(0xc5c8c6) } else { rgb(0xa6adc8) })
                         .child(label.clone())
                 )
                 .when(*is_wsl, |d| {
                     d.child(
                         div().text_xs().px(px(4.0)).py(px(1.0))
-                            .rounded(px(3.0)).bg(rgb(0x313244))
-                            .text_color(rgb(0x585b70)).child("WSL")
+                            .rounded(px(3.0)).bg(rgb(0x282a2e))
+                            .text_color(rgb(0x969896)).child("WSL")
                     )
                 })
                 .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -719,26 +719,26 @@ pub(crate) fn render_agent_picker(
             div()
                 .w(px(320.0))
                 .rounded(px(8.0))
-                .bg(rgb(0x1e1e2e))
+                .bg(rgb(0x1d1f21))
                 .border_1()
-                .border_color(rgb(0x45475a))
+                .border_color(rgb(0x373b41))
                 .shadow_lg()
                 .flex().flex_col().overflow_hidden()
                 .child(
                     div().px_3().py(px(8.0))
-                        .border_b_1().border_color(rgb(0x313244))
+                        .border_b_1().border_color(rgb(0x282a2e))
                         .child(
                             div().text_sm()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xcdd6f4))
+                                .text_color(rgb(0xc5c8c6))
                                 .child("Launch Agent")
                         )
                 )
                 .child(div().p_1().child(list))
                 .child(
                     div().px_3().py(px(6.0))
-                        .border_t_1().border_color(rgb(0x313244))
-                        .text_xs().text_color(rgb(0x585b70))
+                        .border_t_1().border_color(rgb(0x282a2e))
+                        .text_xs().text_color(rgb(0x969896))
                         .child("↑↓ navigate  1-9 quick select  Enter launch  Esc cancel")
                 )
         )
@@ -767,27 +767,27 @@ pub(crate) fn render_template_picker(
             .flex()
             .items_center()
             .gap_2()
-            .bg(if is_selected { rgb(0x313244) } else { rgb(0x1e1e2e) })
-            .hover(|d| d.bg(rgb(0x313244)))
+            .bg(if is_selected { rgb(0x282a2e) } else { rgb(0x1d1f21) })
+            .hover(|d| d.bg(rgb(0x282a2e)))
             .cursor_pointer()
             .child(
-                div().text_xs().text_color(rgb(0x89b4fa)).min_w(px(16.0))
+                div().text_xs().text_color(rgb(0x81a2be)).min_w(px(16.0))
                     .child(format!("{}", i + 1))
             )
             .child(
                 div().flex().flex_col().flex_1().overflow_hidden()
                     .child(
                         div().text_sm().flex().gap_1().items_center()
-                            .text_color(if is_selected { rgb(0xcdd6f4) } else { rgb(0xa6adc8) })
+                            .text_color(if is_selected { rgb(0xc5c8c6) } else { rgb(0xa6adc8) })
                             .child(template.name.clone())
                             .when(is_custom, |d| {
                                 d.child(
-                                    div().text_xs().text_color(rgb(0x585b70)).child("(custom)")
+                                    div().text_xs().text_color(rgb(0x969896)).child("(custom)")
                                 )
                             })
                     )
                     .child(
-                        div().text_xs().text_color(rgb(0x585b70))
+                        div().text_xs().text_color(rgb(0x969896))
                             .child(format!("{} — {} panes", template.description, pane_count))
                     )
             )
@@ -808,9 +808,9 @@ pub(crate) fn render_template_picker(
                     .py(px(2.0))
                     .rounded(px(3.0))
                     .text_xs()
-                    .text_color(rgb(0x1e1e2e)) // invisible by default (matches bg)
-                    .group_hover("tpl-row", |d| d.text_color(rgb(0x585b70))) // visible on row hover
-                    .hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8))) // red on button hover
+                    .text_color(rgb(0x1d1f21)) // invisible by default (matches bg)
+                    .group_hover("tpl-row", |d| d.text_color(rgb(0x969896))) // visible on row hover
+                    .hover(|d| d.bg(rgb(0x373b41)).text_color(rgb(0xcc6666))) // red on button hover
                     .child("✕")
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         if let Some(ref mut p) = this.template_picker {
@@ -844,19 +844,19 @@ pub(crate) fn render_template_picker(
             div()
                 .w(px(360.0))
                 .rounded(px(8.0))
-                .bg(rgb(0x1e1e2e))
+                .bg(rgb(0x1d1f21))
                 .border_1()
-                .border_color(rgb(0x45475a))
+                .border_color(rgb(0x373b41))
                 .shadow_lg()
                 .flex().flex_col().overflow_hidden()
                 // Header
                 .child(
                     div().px_3().py(px(8.0))
-                        .border_b_1().border_color(rgb(0x313244))
+                        .border_b_1().border_color(rgb(0x282a2e))
                         .child(
                             div().text_sm()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xcdd6f4))
+                                .text_color(rgb(0xc5c8c6))
                                 .child("Apply Layout Template")
                         )
                 )
@@ -865,8 +865,8 @@ pub(crate) fn render_template_picker(
                 // Footer
                 .child(
                     div().px_3().py(px(6.0))
-                        .border_t_1().border_color(rgb(0x313244))
-                        .text_xs().text_color(rgb(0x585b70))
+                        .border_t_1().border_color(rgb(0x282a2e))
+                        .text_xs().text_color(rgb(0x969896))
                         .child("↑↓ navigate  1-9 select  Enter apply  Del remove  Esc cancel")
                 )
         )
@@ -902,20 +902,20 @@ pub(crate) fn render_pane_picker(
                 .flex()
                 .items_center()
                 .gap_2()
-                .bg(if is_selected { rgb(0x313244) } else { rgb(0x1e1e2e) })
-                .hover(|d| d.bg(rgb(0x313244)))
+                .bg(if is_selected { rgb(0x282a2e) } else { rgb(0x1d1f21) })
+                .hover(|d| d.bg(rgb(0x282a2e)))
                 .cursor_pointer()
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x89b4fa))
+                        .text_color(rgb(0x81a2be))
                         .min_w(px(16.0))
                         .child(format!("{}", i + 1))
                 )
                 .child(
                     div()
                         .text_sm()
-                        .text_color(if is_selected { rgb(0xcdd6f4) } else { rgb(0xa6adc8) })
+                        .text_color(if is_selected { rgb(0xc5c8c6) } else { rgb(0xa6adc8) })
                         .child(title.clone())
                 )
                 .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -952,9 +952,9 @@ pub(crate) fn render_pane_picker(
             div()
                 .w(px(320.0))
                 .rounded(px(8.0))
-                .bg(rgb(0x1e1e2e))
+                .bg(rgb(0x1d1f21))
                 .border_1()
-                .border_color(rgb(0x45475a))
+                .border_color(rgb(0x373b41))
                 .shadow_lg()
                 .flex()
                 .flex_col()
@@ -965,7 +965,7 @@ pub(crate) fn render_pane_picker(
                         .px_3()
                         .py(px(8.0))
                         .border_b_1()
-                        .border_color(rgb(0x313244))
+                        .border_color(rgb(0x282a2e))
                         .flex()
                         .flex_col()
                         .gap_1()
@@ -973,13 +973,13 @@ pub(crate) fn render_pane_picker(
                             div()
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xcdd6f4))
+                                .text_color(rgb(0xc5c8c6))
                                 .child("Send to Pane")
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x585b70))
+                                .text_color(rgb(0x969896))
                                 .child(text_preview)
                         )
                 )
@@ -993,9 +993,9 @@ pub(crate) fn render_pane_picker(
                         .px_3()
                         .py(px(6.0))
                         .border_t_1()
-                        .border_color(rgb(0x313244))
+                        .border_color(rgb(0x282a2e))
                         .text_xs()
-                        .text_color(rgb(0x585b70))
+                        .text_color(rgb(0x969896))
                         .child("↑↓ navigate  1-9 quick select  Enter send  Esc cancel")
                 )
         )
@@ -1051,10 +1051,10 @@ fn render_exited_overlay(
                                     div()
                                         .id(gpui::ElementId::Name(format!("{}-restart", pane_id.0).into()))
                                         .px_3().py_1().rounded(px(4.0))
-                                        .bg(rgb(0x313244))
-                                        .hover(|d| d.bg(rgb(0x45475a)))
+                                        .bg(rgb(0x282a2e))
+                                        .hover(|d| d.bg(rgb(0x373b41)))
                                         .cursor_pointer()
-                                        .text_sm().text_color(rgb(0xa6e3a1))
+                                        .text_sm().text_color(rgb(0xb5bd68))
                                         .child("↻ Restart")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.restart_terminal_in_pane(&pid_restart);
@@ -1065,10 +1065,10 @@ fn render_exited_overlay(
                                     div()
                                         .id(gpui::ElementId::Name(format!("{}-close-exited", pane_id.0).into()))
                                         .px_3().py_1().rounded(px(4.0))
-                                        .bg(rgb(0x313244))
-                                        .hover(|d| d.bg(rgb(0x45475a)))
+                                        .bg(rgb(0x282a2e))
+                                        .hover(|d| d.bg(rgb(0x373b41)))
                                         .cursor_pointer()
-                                        .text_sm().text_color(rgb(0xf38ba8))
+                                        .text_sm().text_color(rgb(0xcc6666))
                                         .child("✕ Close")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close);

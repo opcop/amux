@@ -17,6 +17,8 @@ mod gpui_input_handler;
 #[cfg(feature = "gpui")]
 mod gpui_layout_renderer;
 #[cfg(feature = "gpui")]
+mod gpui_preview;
+#[cfg(feature = "gpui")]
 mod gpui_vibe_tools;
 mod gpui_workspace_persistence;
 #[cfg(feature = "gpui")]

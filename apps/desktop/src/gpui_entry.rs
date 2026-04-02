@@ -59,6 +59,12 @@ pub(crate) struct GpuiShellView {
     pub(crate) ime_preedit: Option<String>,
     /// Sidebar resize drag: (start_mouse_x, start_width)
     pub(crate) sidebar_drag_start: Option<(f32, f32)>,
+    /// File preview panel
+    pub(crate) preview_state: Option<crate::gpui_preview::PreviewState>,
+    /// File picker (Ctrl+P)
+    pub(crate) file_picker: Option<crate::gpui_preview::FilePickerState>,
+    /// Preview panel resize drag: (start_mouse_x, start_width)
+    pub(crate) preview_drag_start: Option<(f32, f32)>,
 }
 
 /// Right-click context menu
@@ -131,12 +137,12 @@ impl Render for DragTab {
         div()
             .px_3()
             .py(px(4.0))
-            .bg(rgb(0x313244))
+            .bg(rgb(0x282a2e))
             .border_1()
-            .border_color(rgb(0x585b70))
+            .border_color(rgb(0x969896))
             .rounded(px(4.0))
             .text_xs()
-            .text_color(rgb(0xcdd6f4))
+            .text_color(rgb(0xc5c8c6))
             .shadow_md()
             .child(self.title.clone())
     }
@@ -159,10 +165,10 @@ impl Render for DragWorkspace {
             .py(px(4.0))
             .bg(rgb(0x252530))
             .border_1()
-            .border_color(rgb(0x585b70))
+            .border_color(rgb(0x969896))
             .rounded(px(4.0))
             .text_sm()
-            .text_color(rgb(0xcdd6f4))
+            .text_color(rgb(0xc5c8c6))
             .shadow_md()
             .child(self.name.clone())
     }
@@ -264,6 +270,9 @@ impl GpuiShellView {
             agent_picker: None,
             ime_preedit: None,
             sidebar_drag_start: None,
+            preview_state: None,
+            file_picker: None,
+            preview_drag_start: None,
         }
     }
 
@@ -825,6 +834,9 @@ impl GpuiShellView {
         items.push(ContextMenuItem::action("Apply Layout...", None, true));
         items.push(ContextMenuItem::action("Save Layout as Template", None, true).separator());
 
+        // File preview
+        items.push(ContextMenuItem::action("Preview File...", None, true).separator());
+
         // Terminal launchers
         let has_launchers = self.wsl_detected || !self.detected_vibe_tools.is_empty();
         if has_launchers {
@@ -881,6 +893,9 @@ impl GpuiShellView {
             "Edit Startup" => {
                 self.edit_startup_file();
             }
+            "Preview File..." => {
+                self.open_file_picker();
+            }
             "Apply Layout..." => {
                 self.open_template_picker();
             }
@@ -899,6 +914,170 @@ impl GpuiShellView {
         }
         self.context_menu = None;
         cx.notify();
+    }
+
+    // ─── File Preview ────────────────────────────────────────────
+
+    /// Open the file picker (Ctrl+P)
+    pub(crate) fn open_file_picker(&mut self) {
+        self.file_picker = Some(crate::gpui_preview::FilePickerState::new());
+    }
+
+    /// Open a file for preview from the picker
+    pub(crate) fn open_preview_from_picker(&mut self, index: usize) {
+        let path = if let Some(ref picker) = self.file_picker {
+            picker.matches.get(index).cloned()
+        } else {
+            None
+        };
+        self.file_picker = None;
+        if let Some(path) = path {
+            self.open_preview_file(&path);
+        }
+    }
+
+    /// Try to preview a file path at the given terminal cell position.
+    /// Extracts the path-like text around (col, row), checks if file exists.
+    /// Returns true if a preview was opened.
+    pub(crate) fn try_preview_path_at(&mut self, col: usize, row: usize) -> bool {
+        let path = match self.extract_path_at_cursor(col, row) {
+            Some(p) => p,
+            None => return false,
+        };
+
+        // Check if file exists (try relative to CWD, then absolute)
+        let resolved = if std::path::Path::new(&path).exists() {
+            path.clone()
+        } else if let Ok(cwd) = std::env::current_dir() {
+            let full = cwd.join(&path);
+            if full.exists() {
+                full.to_string_lossy().to_string()
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        };
+
+        // Check if it's a previewable file type
+        let is_previewable = matches!(
+            std::path::Path::new(&resolved).extension().and_then(|e| e.to_str()),
+            Some("md" | "markdown" | "txt" | "rs" | "js" | "ts" | "py" | "toml"
+                | "json" | "yaml" | "yml" | "sh" | "bash" | "css" | "html"
+                | "tsx" | "jsx" | "go" | "c" | "cpp" | "h" | "hpp" | "java"
+                | "rb" | "php" | "swift" | "kt" | "lua" | "sql" | "xml"
+                | "ini" | "cfg" | "conf" | "log" | "vim")
+        );
+        if !is_previewable { return false; }
+
+        self.open_preview_file(&resolved);
+        true
+    }
+
+    /// Extract a file-path-like string from the terminal grid at the given position.
+    /// Scans left and right from (col, row) collecting path characters.
+    fn extract_path_at_cursor(&self, col: usize, row: usize) -> Option<String> {
+        let term = self.terminal_manager().active_terminal_ref()?;
+        term.with_term(|t| {
+            use alacritty_terminal::grid::Dimensions;
+            use alacritty_terminal::index::{Line, Column};
+
+            let grid = t.grid();
+            let cols = grid.columns();
+            let rows = grid.screen_lines();
+            if row >= rows || col >= cols { return None; }
+
+            let line = Line(row as i32);
+
+            // Check if the character at cursor is a path-like character
+            let ch = grid[line][Column(col)].c;
+            if ch == ' ' || ch == '\0' { return None; }
+
+            // Path characters: alphanumeric, /, \, ., -, _, :, ~
+            let is_path_char = |c: char| -> bool {
+                c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '-' | '_' | ':' | '~' | '(' | ')')
+            };
+
+            // Scan left
+            let mut start = col;
+            while start > 0 {
+                let c = grid[line][Column(start - 1)].c;
+                if !is_path_char(c) { break; }
+                start -= 1;
+            }
+
+            // Scan right
+            let mut end = col;
+            while end + 1 < cols {
+                let c = grid[line][Column(end + 1)].c;
+                if !is_path_char(c) { break; }
+                end += 1;
+            }
+
+            // Collect the text
+            let mut path = String::new();
+            for c in start..=end {
+                let ch = grid[line][Column(c)].c;
+                if ch != '\0' {
+                    path.push(ch);
+                }
+            }
+
+            let path = path.trim().to_string();
+            if path.len() < 3 { return None; } // too short to be a useful path
+
+            Some(path)
+        })
+    }
+
+    /// Open a file for preview by path
+    pub(crate) fn open_preview_file(&mut self, path: &str) {
+        // Resolve relative paths against CWD
+        let full_path = if std::path::Path::new(path).is_absolute() {
+            path.to_string()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path).to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.to_string())
+        };
+        self.preview_state = crate::gpui_preview::PreviewState::load(&full_path);
+    }
+
+    /// Check if the current terminal input line is an `amux` command.
+    /// Returns Some(true) if intercepted, Some(false) if not an amux command, None if can't read.
+    fn try_intercept_amux_command(&mut self) -> Option<bool> {
+        // Read the last line from the terminal (the current input line)
+        let last_line = self.terminal_manager().active_terminal_ref()
+            .map(|t| t.last_lines(1))?
+            .into_iter().last()?;
+
+        // Extract the command after the prompt. Look for common prompt patterns:
+        // "PS C:\path> amux preview file.md"
+        // "user@host:~$ amux preview file.md"
+        // "> amux preview file.md"
+        let cmd = extract_command_after_prompt(&last_line);
+        let cmd = cmd.trim();
+
+        if !cmd.starts_with("amux ") && cmd != "amux" {
+            return Some(false);
+        }
+
+        let parts: Vec<&str> = cmd.splitn(3, ' ').collect();
+        match parts.get(1).map(|s| *s) {
+            Some("preview") | Some("view") | Some("open") => {
+                if let Some(path) = parts.get(2) {
+                    let path = path.trim();
+                    if !path.is_empty() {
+                        self.open_preview_file(path);
+                        return Some(true);
+                    }
+                }
+                // No file specified — open file picker
+                self.open_file_picker();
+                Some(true)
+            }
+            _ => Some(false),
+        }
     }
 
     /// Handle key input for the terminal
@@ -939,6 +1118,20 @@ impl GpuiShellView {
             _ => key,
         };
         
+        // Intercept `amux` commands on Enter before sending to PTY
+        if normalized_key == "Enter" && !ctrl && !alt {
+            if let Some(handled) = self.try_intercept_amux_command() {
+                if handled {
+                    // Send Enter to PTY so the shell gets a blank line (command was "eaten")
+                    // Then send Ctrl+C to cancel the partially typed command
+                    if let Some(terminal) = self.terminal_manager_mut().active_terminal() {
+                        terminal.send_input(b"\x03"); // Ctrl+C to clear the line
+                    }
+                    return;
+                }
+            }
+        }
+
         // Check app cursor key mode from active terminal
         let app_cursor = self.terminal_manager().active_terminal_ref()
             .map(|t| t.with_term(|term| term.mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR)))
@@ -955,6 +1148,35 @@ impl GpuiShellView {
     }
 }
 
+/// Extract the command portion from a terminal line, stripping the shell prompt.
+/// Handles: "PS C:\path> cmd", "user@host:~$ cmd", "% cmd", "> cmd"
+#[cfg(feature = "gpui")]
+fn extract_command_after_prompt(line: &str) -> &str {
+    // PowerShell: "PS C:\foo> command"
+    if let Some(pos) = line.find("> ") {
+        let after = &line[pos + 2..];
+        // Make sure it's actually a prompt (has PS prefix or short prefix)
+        if line[..pos].contains("PS ") || line[..pos].contains("❯") || pos < 80 {
+            return after;
+        }
+    }
+    // Bash/Zsh: "user@host:~/dir$ command"
+    if let Some(pos) = line.find("$ ") {
+        return &line[pos + 2..];
+    }
+    // Zsh: "% command"
+    if let Some(pos) = line.find("% ") {
+        if pos < 5 {
+            return &line[pos + 2..];
+        }
+    }
+    // Fallback: if line starts with "amux ", treat entire line as command
+    if line.trim_start().starts_with("amux ") {
+        return line.trim_start();
+    }
+    line
+}
+
 #[cfg(feature = "gpui")]
 impl Render for GpuiShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -965,7 +1187,6 @@ impl Render for GpuiShellView {
 
         let sidebar_visible = !self.sidebar_state.collapsed;
         let workspaces = self.model.workspace_items.clone();
-        let model_ref = &self.model;
 
         // Measure font metrics on first render
         let metrics = self.cell_metrics.get_or_insert_with(|| {
@@ -975,7 +1196,7 @@ impl Render for GpuiShellView {
         let cell_h = metrics.height.max(1.0);
 
         // Resize terminals — skip during drag to avoid content loss
-        if self.resize_drag.is_none() && self.sidebar_drag_start.is_none() {
+        if self.resize_drag.is_none() && self.sidebar_drag_start.is_none() && self.preview_drag_start.is_none() {
             let sidebar_w = self.sidebar_width();
             let vp = window.viewport_size();
             let content_w = vp.width.as_f32() - sidebar_w;
@@ -1047,6 +1268,14 @@ impl Render for GpuiShellView {
                 let (mouse_mode, _) = this.active_term_mouse_mode();
                 let (col, row) = this.pixel_to_term_cell(event.position);
 
+                // Ctrl+Click: try to preview file path under cursor
+                if event.modifiers.control && !mouse_mode {
+                    if this.try_preview_path_at(col, row) {
+                        cx.notify();
+                        return;
+                    }
+                }
+
                 if mouse_mode {
                     this.send_mouse_event(0, col, row, true);
                 } else {
@@ -1077,6 +1306,15 @@ impl Render for GpuiShellView {
                 if let Some((start_x, start_w)) = this.sidebar_drag_start {
                     let delta = event.position.x.as_f32() - start_x;
                     this.sidebar_state.width = (start_w + delta).clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+                    cx.notify();
+                    return;
+                }
+                // Handle preview panel resize drag (drag left = wider, drag right = narrower)
+                if let Some((start_x, start_w)) = this.preview_drag_start {
+                    let delta = start_x - event.position.x.as_f32(); // reversed: drag left increases width
+                    if let Some(ref mut state) = this.preview_state {
+                        state.width = (start_w + delta).clamp(250.0, 900.0);
+                    }
                     cx.notify();
                     return;
                 }
@@ -1133,6 +1371,7 @@ impl Render for GpuiShellView {
                 this.selecting = false;
                 this.resize_drag = None;
                 this.sidebar_drag_start = None;
+                this.preview_drag_start = None;
                 cx.notify();
             }))
             // Mouse: right button up — forward release to PTY
@@ -1223,7 +1462,7 @@ impl Render for GpuiShellView {
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0x585b70))
+                                                .text_color(rgb(0x969896))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .child("WORKSPACES"),
                                         )
@@ -1234,8 +1473,8 @@ impl Render for GpuiShellView {
                                                 .py(px(2.0))
                                                 .rounded(px(3.0))
                                                 .text_xs()
-                                                .text_color(rgb(0x585b70))
-                                                .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                                .text_color(rgb(0x969896))
+                                                .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
                                                 .child("◀")
                                                 .on_click(cx.listener(|this, _e, _w, cx| {
                                                     this.sidebar_state.collapsed = true;
@@ -1256,7 +1495,7 @@ impl Render for GpuiShellView {
                                                 .map(|tm| tm.has_any_activity())
                                                 .unwrap_or(false);
                                             let bg_color = if is_active { rgb(0x252530) } else { rgb(0x181818) };
-                                            let text_color = if is_active { rgb(0xcdd6f4) } else { rgb(0x7f849c) };
+                                            let text_color = if is_active { rgb(0xc5c8c6) } else { rgb(0x7f849c) };
                                             let ws_id = item.id.clone();
                                             let ws_id_dbl = item.id.clone();
                                             let ws_id_drop = item.id.clone();
@@ -1282,7 +1521,7 @@ impl Render for GpuiShellView {
                                                 .bg(bg_color)
                                                 .cursor_grab()
                                                 .hover(|d| d.bg(rgb(0x252530)))
-                                                .when(is_active, |d| d.border_l_2().border_color(rgb(0x89b4fa)))
+                                                .when(is_active, |d| d.border_l_2().border_color(rgb(0x81a2be)))
                                                 // Drag to reorder
                                                 .on_drag(
                                                     DragWorkspace { workspace_id: drag_id, name: drag_name, index: ws_idx },
@@ -1292,7 +1531,7 @@ impl Render for GpuiShellView {
                                                     },
                                                 )
                                                 .drag_over::<DragWorkspace>(|style, _, _, _| {
-                                                    style.bg(rgb(0x313244)).border_t_2().border_color(rgb(0x89b4fa))
+                                                    style.bg(rgb(0x282a2e)).border_t_2().border_color(rgb(0x81a2be))
                                                 })
                                                 .on_drop(cx.listener(move |this, drag: &DragWorkspace, _window, cx| {
                                                     this.reorder_workspace(drag.index, &ws_id_drop);
@@ -1321,12 +1560,12 @@ impl Render for GpuiShellView {
                                                         .unwrap_or_default();
                                                     div()
                                                         .text_sm()
-                                                        .text_color(rgb(0xcdd6f4))
+                                                        .text_color(rgb(0xc5c8c6))
                                                         .px_1()
-                                                        .bg(rgb(0x313244))
+                                                        .bg(rgb(0x282a2e))
                                                         .rounded(px(2.0))
                                                         .border_1()
-                                                        .border_color(rgb(0x89b4fa))
+                                                        .border_color(rgb(0x81a2be))
                                                         .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
                                                         .into_any_element()
                                                 } else {
@@ -1364,7 +1603,7 @@ impl Render for GpuiShellView {
                                                                     .text_xs()
                                                                     .text_color(rgb(0x181818)) // invisible by default
                                                                     .group_hover(&group_name, |d| {
-                                                                        d.text_color(rgb(0x585b70))
+                                                                        d.text_color(rgb(0x969896))
                                                                     })
                                                                     .hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
                                                                     .child("✕")
@@ -1402,9 +1641,9 @@ impl Render for GpuiShellView {
                                         .mb_1()
                                         .rounded(px(4.0))
                                         .text_xs()
-                                        .text_color(rgb(0x585b70))
+                                        .text_color(rgb(0x969896))
                                         .cursor_pointer()
-                                        .hover(|d| d.bg(rgb(0x252530)).text_color(rgb(0xcdd6f4)))
+                                        .hover(|d| d.bg(rgb(0x252530)).text_color(rgb(0xc5c8c6)))
                                         .child("+  New Workspace")
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             let cwd = std::env::current_dir().unwrap_or_default();
@@ -1434,7 +1673,7 @@ impl Render for GpuiShellView {
                                                 .w(px(1.0))
                                                 .h_full()
                                                 .bg(rgb(0x2a2a2a))
-                                                .group_hover("sidebar-handle", |d| d.w(px(2.0)).bg(rgb(0x89b4fa)))
+                                                .group_hover("sidebar-handle", |d| d.w(px(2.0)).bg(rgb(0x81a2be)))
                                         )
                                         .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _w, _cx| {
                                             this.sidebar_drag_start = Some(
@@ -1461,8 +1700,8 @@ impl Render for GpuiShellView {
                                         .py(px(4.0))
                                         .rounded(px(3.0))
                                         .text_xs()
-                                        .text_color(rgb(0x585b70))
-                                        .hover(|d| d.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                        .text_color(rgb(0x969896))
+                                        .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
                                         .child("▶")
                                         .on_click(cx.listener(|this, _e, _w, cx| {
                                             this.sidebar_state.collapsed = false;
@@ -1471,8 +1710,15 @@ impl Render for GpuiShellView {
                                 )
                         }
                     })
-                    // Main content area
+                    // Main content area (terminal + optional preview panel)
                     .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .overflow_hidden()
+                            // Terminal column
+                            .child(
                         div()
                             .flex_1()
                             .flex()
@@ -1508,6 +1754,19 @@ impl Render for GpuiShellView {
                                 } else {
                                     div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
                                 }
+                            })
+                            ) // end terminal column
+                            // Preview panel (right side, when open)
+                            .when(self.preview_state.is_some(), |this| {
+                                let preview = self.preview_state.as_ref().unwrap();
+                                let pw = preview.width;
+                                this.child(
+                                    div()
+                                        .w(px(pw))
+                                        .h_full()
+                                        .flex_shrink_0()
+                                        .child(crate::gpui_preview::render_preview_panel(preview, cx))
+                                )
                             })
                     ),
             )
@@ -1563,7 +1822,7 @@ impl Render for GpuiShellView {
                         .px_3()
                         .py(px(6.0))
                         .rounded(px(8.0))
-                        .bg(rgb(0x1e1e2e))
+                        .bg(rgb(0x1d1f21))
                         .border_1()
                         .border_color(rgb(0x45475a))
                         .shadow_lg()
@@ -1571,7 +1830,7 @@ impl Render for GpuiShellView {
                         .items_center()
                         .gap_2()
                         .child(
-                            div().text_xs().text_color(rgb(0x585b70)).child("Find:")
+                            div().text_xs().text_color(rgb(0x969896)).child("Find:")
                         )
                         .child(
                             div()
@@ -1581,18 +1840,18 @@ impl Render for GpuiShellView {
                                 .rounded(px(4.0))
                                 .bg(rgb(0x11111b))
                                 .border_1()
-                                .border_color(rgb(0x313244))
+                                .border_color(rgb(0x282a2e))
                                 .text_sm()
-                                .text_color(rgb(0xcdd6f4))
+                                .text_color(rgb(0xc5c8c6))
                                 .min_h(px(20.0))
                                 .child(if query.is_empty() {
-                                    div().text_color(rgb(0x585b70)).child("Type to search...").into_any_element()
+                                    div().text_color(rgb(0x969896)).child("Type to search...").into_any_element()
                                 } else {
                                     div().child(format!("{}▎", query)).into_any_element()
                                 })
                         )
                         .child(
-                            div().text_xs().text_color(rgb(0x585b70)).child("Enter/Shift+Enter  Esc close")
+                            div().text_xs().text_color(rgb(0x969896)).child("Enter/Shift+Enter  Esc close")
                         )
                 )
             })
@@ -1618,16 +1877,20 @@ impl Render for GpuiShellView {
                             .px_2()
                             .py(px(2.0))
                             .rounded(px(4.0))
-                            .bg(rgb(0x313244))
+                            .bg(rgb(0x282a2e))
                             .border_1()
-                            .border_color(rgb(0x89b4fa))
+                            .border_color(rgb(0x81a2be))
                             .text_sm()
-                            .text_color(rgb(0xcdd6f4))
+                            .text_color(rgb(0xc5c8c6))
                             .child(preedit)
                     )
                 } else {
                     this
                 }
+            })
+            // File picker overlay (Ctrl+P)
+            .when_some(self.file_picker.clone(), |this, picker| {
+                this.child(crate::gpui_preview::render_file_picker(&picker, cx))
             })
             // Agent picker overlay (Launch Agent)
             .when_some(self.agent_picker.clone(), |this, picker| {
@@ -1651,7 +1914,7 @@ impl Render for GpuiShellView {
                         .px_3()
                         .py(px(6.0))
                         .rounded(px(6.0))
-                        .bg(rgb(0x1e1e2e))
+                        .bg(rgb(0x1d1f21))
                         .border_1()
                         .border_color(rgb(t.color))
                         .shadow_lg()

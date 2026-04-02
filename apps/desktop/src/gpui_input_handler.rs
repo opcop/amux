@@ -52,6 +52,13 @@ impl gpui::EntityInputHandler for GpuiShellView {
             cx.notify();
             return;
         }
+        // If file picker is open, send text to search query
+        if let Some(ref mut picker) = self.file_picker {
+            let new_query = format!("{}{}", picker.query, text);
+            picker.update_query(&new_query);
+            cx.notify();
+            return;
+        }
         // If searching, append to search query and auto-navigate
         if let Some((ref mut query, _)) = self.search_state {
             query.push_str(text);
@@ -153,6 +160,13 @@ impl GpuiShellView {
             if keystr == "escape" {
                 return;
             }
+        }
+
+        // Close preview panel on Escape
+        if keystr == "escape" && self.preview_state.is_some() {
+            self.preview_state = None;
+            cx.notify();
+            return;
         }
 
         // Workspace rename handling
@@ -312,6 +326,39 @@ impl GpuiShellView {
                 }
                 _ => return,
             }
+        }
+
+        // File picker handling (Ctrl+P)
+        if self.file_picker.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.file_picker = None;
+                }
+                "enter" => {
+                    let idx = self.file_picker.as_ref().map(|p| p.selected_index).unwrap_or(0);
+                    self.open_preview_from_picker(idx);
+                }
+                "up" | "arrowup" => {
+                    if let Some(ref mut p) = self.file_picker {
+                        if p.selected_index > 0 { p.selected_index -= 1; }
+                    }
+                }
+                "down" | "arrowdown" => {
+                    if let Some(ref mut p) = self.file_picker {
+                        if p.selected_index + 1 < p.matches.len() { p.selected_index += 1; }
+                    }
+                }
+                "backspace" => {
+                    if let Some(ref mut p) = self.file_picker {
+                        let mut q = p.query.clone();
+                        q.pop();
+                        p.update_query(&q);
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
         }
 
         // Agent picker handling (Launch Agent)
@@ -500,6 +547,11 @@ impl GpuiShellView {
                 }
                 "ctrl+shift+enter" => {
                     self.start_send_to_pane(cx);
+                    cx.notify();
+                    return;
+                }
+                "ctrl+p" => {
+                    self.open_file_picker();
                     cx.notify();
                     return;
                 }

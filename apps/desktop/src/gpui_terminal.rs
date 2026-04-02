@@ -663,10 +663,10 @@ fn prepaint_terminal(
 
     let mut bg_rects = Vec::with_capacity(data.rows * 4);
     let mut special_rects = Vec::with_capacity(64);
-    let mut selection_rects = Vec::new();
-    let mut text_lines = Vec::with_capacity(data.rows * 8);
-    let mut underline_rects = Vec::new();
-    let mut cursor_rects = Vec::new();
+    let mut selection_rects = Vec::with_capacity(8);
+    let mut text_lines = Vec::with_capacity(data.rows * 4);
+    let mut underline_rects = Vec::with_capacity(32);
+    let mut cursor_rects = Vec::with_capacity(2);
 
     // Build selection highlight rects
     let selection_bg = data.selection_bg;
