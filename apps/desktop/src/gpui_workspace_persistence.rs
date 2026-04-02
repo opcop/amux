@@ -24,6 +24,24 @@ pub(crate) fn amux_config_path() -> std::path::PathBuf {
 #[cfg(feature = "gpui")]
 use crate::gpui_entry::GpuiShellView;
 
+/// Pane execution environment for .startup files
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug, PartialEq)]
+enum PaneEnv {
+    Win,
+    Wsl,
+}
+
+/// Parsed pane config from .startup file
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+struct PaneStartup {
+    pane_num: usize,
+    title: Option<String>,
+    env: PaneEnv,
+    commands: Vec<String>,
+}
+
 #[cfg(feature = "gpui")]
 impl GpuiShellView {
     /// Get the ~/.amux base directory
@@ -44,20 +62,24 @@ impl GpuiShellView {
 
     /// Parse a .startup file into pane commands.
     /// Format:
-    ///   [pane:1 title=My Title]
-    ///   cd /some/dir
-    ///   command arg1 arg2
-    ///   [pane:2]
-    ///   another-command
-    /// Returns vec of (pane_number, custom_title, vec_of_commands)
-    fn parse_startup_file(path: &std::path::Path) -> Vec<(usize, Option<String>, Vec<String>)> {
+    ///   [pane:1 title=My Title env=wsl]
+    ///   cd D:\projects\myapp
+    ///   claude
+    ///   [pane:2 env=win]
+    ///   cd /mnt/d/projects/backend
+    ///   npm run dev
+    ///
+    /// Each pane can specify its own `env=win` or `env=wsl` (default: win).
+    /// Paths in commands are auto-converted to match the target environment.
+    fn parse_startup_file(path: &std::path::Path) -> Vec<PaneStartup> {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
-        let mut result: Vec<(usize, Option<String>, Vec<String>)> = Vec::new();
+        let mut result: Vec<PaneStartup> = Vec::new();
         let mut current_pane: usize = 1;
         let mut current_title: Option<String> = None;
+        let mut current_env = PaneEnv::Win;
         let mut current_cmds: Vec<String> = Vec::new();
 
         for line in content.lines() {
@@ -65,27 +87,42 @@ impl GpuiShellView {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            // Check for [pane:N] or [pane:N title=xxx] header
+            // Check for [pane:N ...] header
             if trimmed.starts_with("[pane:") && trimmed.ends_with(']') {
                 // Save previous pane
                 if !current_cmds.is_empty() {
-                    result.push((current_pane, current_title.take(), current_cmds.clone()));
+                    result.push(PaneStartup {
+                        pane_num: current_pane,
+                        title: current_title.take(),
+                        env: current_env.clone(),
+                        commands: current_cmds.clone(),
+                    });
                     current_cmds.clear();
                 }
-                let inner = &trimmed[6..trimmed.len() - 1]; // "1 title=xxx" or "1"
-                if let Some(space_pos) = inner.find(' ') {
-                    current_pane = inner[..space_pos].parse().unwrap_or(1);
-                    // Parse key=value attributes
-                    let attrs = &inner[space_pos + 1..];
-                    if let Some(t) = attrs.strip_prefix("title=") {
-                        let t = t.trim();
-                        if !t.is_empty() {
-                            current_title = Some(t.to_string());
+                // Reset defaults
+                current_env = PaneEnv::Win;
+                current_title = None;
+
+                let inner = &trimmed[6..trimmed.len() - 1]; // e.g. "1 title=xxx env=wsl"
+                // Split into pane number and attributes
+                let (num_str, attrs_str) = match inner.find(' ') {
+                    Some(pos) => (&inner[..pos], &inner[pos + 1..]),
+                    None => (inner, ""),
+                };
+                current_pane = num_str.parse().unwrap_or(1);
+
+                // Parse space-separated key=value attributes
+                for attr in attrs_str.split_whitespace() {
+                    if let Some(val) = attr.strip_prefix("title=") {
+                        if !val.is_empty() {
+                            current_title = Some(val.to_string());
                         }
+                    } else if let Some(val) = attr.strip_prefix("env=") {
+                        current_env = match val.to_lowercase().as_str() {
+                            "wsl" | "linux" => PaneEnv::Wsl,
+                            _ => PaneEnv::Win,
+                        };
                     }
-                } else {
-                    current_pane = inner.parse().unwrap_or(1);
-                    current_title = None;
                 }
             } else {
                 current_cmds.push(trimmed.to_string());
@@ -93,7 +130,12 @@ impl GpuiShellView {
         }
         // Save last pane
         if !current_cmds.is_empty() {
-            result.push((current_pane, current_title, current_cmds));
+            result.push(PaneStartup {
+                pane_num: current_pane,
+                title: current_title,
+                env: current_env,
+                commands: current_cmds,
+            });
         }
         result
     }
@@ -106,6 +148,8 @@ impl GpuiShellView {
 
     /// Execute startup commands for the active workspace.
     /// Creates panes as needed and sends commands to each.
+    /// Supports per-pane `env=wsl` to run commands in WSL,
+    /// with automatic path conversion between Windows and WSL formats.
     pub(crate) fn run_startup_commands(&mut self) {
         let ws_name = self.model.active_workspace_name
             .clone()
@@ -116,10 +160,11 @@ impl GpuiShellView {
             return;
         }
 
-        let (shell, shell_args) = Self::default_shell();
         let cwd = Self::default_cwd();
 
-        for (i, (pane_num, custom_title, cmds)) in pane_cmds.iter().enumerate() {
+        for (i, pane_cfg) in pane_cmds.iter().enumerate() {
+            let is_wsl = pane_cfg.env == PaneEnv::Wsl;
+
             // First pane already exists, subsequent panes need split
             if i > 0 {
                 let direction = if i % 2 == 1 {
@@ -128,32 +173,46 @@ impl GpuiShellView {
                     SplitDirection::Vertical
                 };
                 self.terminal_manager_mut().split_active_pane(direction);
+            }
+
+            if is_wsl && cfg!(target_os = "windows") {
+                // Spawn a WSL shell in this pane
+                let mut wsl_args = vec![];
+                if let Some(ref cwd_str) = cwd {
+                    let wsl_path = Self::windows_path_to_wsl(cwd_str);
+                    wsl_args.extend(["--cd".to_string(), wsl_path]);
+                }
+                let _ = self.terminal_manager_mut().spawn_in_active("wsl.exe", &wsl_args, None);
+            } else if i > 0 {
+                // Spawn a native shell for non-first panes
                 self.spawn_terminal_in_active();
             }
 
-            // Send commands to the active terminal
+            // Send commands with path auto-conversion
             if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                for cmd in cmds {
-                    let input = format!("{}\r", cmd);
+                for cmd in &pane_cfg.commands {
+                    let converted = Self::convert_command_paths(cmd, is_wsl);
+                    let input = format!("{}\r", converted);
                     term.send_input(input.as_bytes());
                 }
             }
 
             // Set tab title: custom_title > last command name > pane:N
+            let env_suffix = if is_wsl { " (WSL)" } else { "" };
             let active_id = self.terminal_manager().active_pane_id().cloned();
             if let Some(ref pid) = active_id {
                 if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
                     if let Some(tab) = pane.tabs.get_mut(pane.active_tab) {
-                        let title = if let Some(t) = custom_title {
-                            t.clone()
-                        } else if let Some(last_cmd) = cmds.last() {
-                            last_cmd.split_whitespace().next()
-                                .unwrap_or("Terminal").to_string()
+                        let title = if let Some(ref t) = pane_cfg.title {
+                            format!("{}{}", t, env_suffix)
+                        } else if let Some(last_cmd) = pane_cfg.commands.last() {
+                            format!("{}{}", last_cmd.split_whitespace().next()
+                                .unwrap_or("Terminal"), env_suffix)
                         } else {
-                            format!("pane:{}", pane_num)
+                            format!("pane:{}{}", pane_cfg.pane_num, env_suffix)
                         };
                         tab.title = title;
-                        tab.custom_title = custom_title.is_some();
+                        tab.custom_title = pane_cfg.title.is_some();
                     }
                 }
             }
@@ -161,6 +220,26 @@ impl GpuiShellView {
 
         // Equalize splits after creating all panes
         self.terminal_manager_mut().equalize_splits();
+    }
+
+    /// Convert paths in a command to match the target environment.
+    /// Handles `cd` commands and other commands that contain paths.
+    fn convert_command_paths(cmd: &str, target_wsl: bool) -> String {
+        let parts: Vec<&str> = cmd.splitn(2, char::is_whitespace).collect();
+        if parts.len() < 2 {
+            return cmd.to_string();
+        }
+        let command = parts[0];
+        let arg = parts[1].trim();
+
+        // Commands that take a path as first argument
+        match command {
+            "cd" | "pushd" | "ls" | "dir" | "cat" | "type" | "code" | "vim" | "nano" => {
+                let converted = Self::normalize_path_for_env(arg, target_wsl);
+                format!("{} {}", command, converted)
+            }
+            _ => cmd.to_string(),
+        }
     }
 
     /// Open the startup file for editing in a new split pane.

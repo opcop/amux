@@ -41,7 +41,8 @@
       "Bash(cargo doc:*)",
       "Bash(python3 -c \"from PIL import Image; print\\(''''pillow ok''''\\)\")",
       "Bash(apt list:*)",
-      "Bash(dpkg -l)"
+      "Bash(dpkg -l)",
+      "WebFetch(domain:vibeisland.app)"
     ]
   }
 }

@@ -148,6 +148,47 @@ impl GpuiShellView {
         }
     }
 
+    /// Convert a WSL mount path to Windows path.
+    /// e.g. "/mnt/d/projects/myapp" → "D:\projects\myapp"
+    pub(crate) fn wsl_path_to_windows(path: &str) -> String {
+        if path.starts_with("/mnt/") && path.len() >= 6 && path.as_bytes()[5].is_ascii_alphabetic() {
+            let drive = (path.as_bytes()[5] as char).to_ascii_uppercase();
+            let rest = if path.len() > 6 { &path[6..] } else { "" };
+            format!("{}:{}", drive, rest.replace('/', "\\"))
+        } else {
+            path.to_string()
+        }
+    }
+
+    /// Detect if a path is WSL-style (/mnt/x/...) or Windows-style (X:\...).
+    pub(crate) fn is_wsl_path(path: &str) -> bool {
+        path.starts_with("/mnt/") || path.starts_with("/home/") || path.starts_with("/usr/") || path.starts_with("/tmp/")
+    }
+
+    pub(crate) fn is_windows_path(path: &str) -> bool {
+        path.len() >= 2 && path.as_bytes()[1] == b':' && path.as_bytes()[0].is_ascii_alphabetic()
+    }
+
+    /// Convert path to the correct format for the target environment.
+    /// Handles mixed path styles gracefully.
+    pub(crate) fn normalize_path_for_env(path: &str, target_wsl: bool) -> String {
+        if target_wsl {
+            // Target is WSL: convert Windows paths to WSL
+            if Self::is_windows_path(path) {
+                Self::windows_path_to_wsl(path)
+            } else {
+                path.to_string() // already WSL-style or relative
+            }
+        } else {
+            // Target is Windows: convert WSL paths to Windows
+            if Self::is_wsl_path(path) {
+                Self::wsl_path_to_windows(path)
+            } else {
+                path.to_string() // already Windows-style or relative
+            }
+        }
+    }
+
     /// Vibe Coding tool definitions: (linux_bin, win_bin, extra_args, tab_title)
     pub(crate) fn vibe_tool_info(tool: &str) -> Option<(&'static str, &'static str, Vec<String>, &'static str)> {
         Some(match tool {
