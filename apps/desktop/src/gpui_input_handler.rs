@@ -86,7 +86,8 @@ impl gpui::EntityInputHandler for GpuiShellView {
         _selected: Option<std::ops::Range<usize>>, _window: &mut Window, cx: &mut Context<Self>,
     ) {
         // IME composition in progress — show preedit text overlay
-        if new_text.is_empty() {
+        let trimmed = new_text.trim();
+        if trimmed.is_empty() {
             self.ime_preedit = None;
         } else {
             self.ime_preedit = Some(new_text.to_string());
@@ -98,6 +99,11 @@ impl gpui::EntityInputHandler for GpuiShellView {
         &mut self, _range: std::ops::Range<usize>, _element_bounds: Bounds<Pixels>,
         _window: &mut Window, _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        // Only return bounds when IME composition is active.
+        // Returning bounds when idle causes GPUI to draw a phantom blue cursor.
+        if self.ime_preedit.is_none() {
+            return None;
+        }
         // Position IME candidate window near the terminal cursor
         let metrics = self.cell_metrics.as_ref()?;
         let active_pid = self.terminal_manager().active_pane_id()?.clone();

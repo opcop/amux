@@ -1258,7 +1258,9 @@ impl Render for GpuiShellView {
         // Main layout - limux/mori style dark theme
         div()
             .track_focus(&self.focus_handle)
-            // Register IME handler with a zero-size canvas (invisible, no stray cursor)
+            // Register IME handler with a 1x1 canvas pushed off-screen.
+            // Using 0x0 can still cause Windows to draw a system caret at the
+            // canvas origin; moving it off-screen avoids that artifact.
             .child(gpui::canvas(
                 move |bounds, _window, _cx| bounds,
                 move |bounds, _, window, cx| {
@@ -1268,7 +1270,7 @@ impl Render for GpuiShellView {
                         cx,
                     );
                 },
-            ).w(px(0.0)).h(px(0.0)).absolute())
+            ).w(px(1.0)).h(px(1.0)).absolute().left(px(-10.0)).top(px(-10.0)))
             .flex()
             .flex_col()
             .size_full()
