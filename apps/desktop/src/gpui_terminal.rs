@@ -465,11 +465,14 @@ fn collect_render_data(
 
         for indexed in content.display_iter {
             let point = indexed.point;
-            let line_i32 = point.line.0;
-            if line_i32 < 0 {
+            // Convert grid coordinates to viewport row.
+            // Scrollback lines have negative line numbers (e.g. -1, -2, ...);
+            // adding display_offset maps them to viewport rows 0, 1, ...
+            let viewport_line = point.line.0 + display_offset as i32;
+            if viewport_line < 0 {
                 continue;
             }
-            let row = line_i32 as usize;
+            let row = viewport_line as usize;
             let col = point.column.0;
             if row < rows && col < cols {
                 let cell = &indexed.cell;

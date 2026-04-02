@@ -970,9 +970,9 @@ fn render_spans(spans: &[TextSpan]) -> AnyElement {
 
 #[cfg(feature = "gpui")]
 impl FilePickerState {
-    pub fn new() -> Self {
+    pub fn new(cwd: Option<String>) -> Self {
         // Scan once on open, cache the full file list
-        let all_files = Self::scan_all_files();
+        let all_files = Self::scan_all_files(cwd);
         let matches = Self::filter_files(&all_files, "", 20);
         Self {
             query: String::new(),
@@ -1012,8 +1012,9 @@ impl FilePickerState {
     }
 
     /// Scan filesystem once, return all previewable files
-    fn scan_all_files() -> Vec<String> {
-        let cwd = std::env::current_dir().unwrap_or_default();
+    fn scan_all_files(cwd: Option<String>) -> Vec<String> {
+        let cwd = cwd.map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let mut results = Vec::new();
         Self::walk_dir(&cwd, &cwd, &mut results, 200, 0);
         results

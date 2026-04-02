@@ -319,6 +319,30 @@ impl GpuiShellView {
         })
     }
 
+    /// Check if the active terminal is in alternate screen with alternate scroll mode.
+    /// When true, scroll wheel should send arrow keys to the application instead of
+    /// scrolling the (empty) scrollback buffer.
+    fn active_term_alt_screen_scroll(&self) -> bool {
+        let mgr = self.terminal_manager();
+        let pid = match mgr.active_pane_id() {
+            Some(id) => id,
+            None => return false,
+        };
+        let pane = match mgr.get_pane(pid) {
+            Some(p) => p,
+            None => return false,
+        };
+        let term = match pane.active_terminal_ref() {
+            Some(t) => t,
+            None => return false,
+        };
+        term.with_term(|t| {
+            let mode = t.mode();
+            mode.contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+                && mode.contains(alacritty_terminal::term::TermMode::ALTERNATE_SCROLL)
+        })
+    }
+
     /// Convert pixel position to terminal cell (col, row) for the active pane.
     /// Uses cached pane_bounds from render_layout for correct multi-pane coordinates.
     fn pixel_to_term_cell(&self, pos: gpui::Point<gpui::Pixels>) -> (usize, usize) {
@@ -354,7 +378,6 @@ impl GpuiShellView {
             if sgr_mode {
                 let suffix = if pressed { 'M' } else { 'm' };
                 let seq = format!("\x1b[<{};{};{}{}", button, cx_1, cy_1, suffix);
-
                 term.send_input(seq.as_bytes());
             } else {
                 // Legacy encoding — only supports press, release uses button 3
@@ -362,11 +385,8 @@ impl GpuiShellView {
                 let x = (col.min(222) as u8) + 33;
                 let y = (row.min(222) as u8) + 33;
                 let seq = [b'\x1b', b'[', b'M', b, x, y];
-
                 term.send_input(&seq);
             }
-        } else {
-
         }
     }
 
@@ -920,7 +940,8 @@ impl GpuiShellView {
 
     /// Open the file picker (Ctrl+P)
     pub(crate) fn open_file_picker(&mut self) {
-        self.file_picker = Some(crate::gpui_preview::FilePickerState::new());
+        let cwd = self.terminal_manager().active_cwd();
+        self.file_picker = Some(crate::gpui_preview::FilePickerState::new(cwd));
     }
 
     /// Open a file for preview from the picker
@@ -945,9 +966,17 @@ impl GpuiShellView {
             None => return false,
         };
 
-        // Check if file exists (try relative to CWD, then absolute)
-        let resolved = if std::path::Path::new(&path).exists() {
+        // Check if file exists (try relative to pane CWD, then absolute)
+        let pane_cwd = self.terminal_manager().active_cwd();
+        let resolved = if std::path::Path::new(&path).is_absolute() && std::path::Path::new(&path).exists() {
             path.clone()
+        } else if let Some(ref cwd) = pane_cwd {
+            let full = std::path::PathBuf::from(cwd).join(&path);
+            if full.exists() {
+                full.to_string_lossy().to_string()
+            } else {
+                return false;
+            }
         } else if let Ok(cwd) = std::env::current_dir() {
             let full = cwd.join(&path);
             if full.exists() {
@@ -1032,13 +1061,19 @@ impl GpuiShellView {
 
     /// Open a file for preview by path
     pub(crate) fn open_preview_file(&mut self, path: &str) {
-        // Resolve relative paths against CWD
+        // Resolve relative paths against active pane's CWD (not the GUI process CWD)
         let full_path = if std::path::Path::new(path).is_absolute() {
             path.to_string()
         } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path).to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.to_string())
+            let pane_cwd = self.terminal_manager().active_cwd();
+            pane_cwd
+                .map(|cwd| std::path::PathBuf::from(cwd).join(path).to_string_lossy().to_string())
+                .unwrap_or_else(|| {
+                    // Last resort: GUI process CWD
+                    std::env::current_dir()
+                        .map(|cwd| cwd.join(path).to_string_lossy().to_string())
+                        .unwrap_or_else(|_| path.to_string())
+                })
         };
         self.preview_state = crate::gpui_preview::PreviewState::load(&full_path);
     }
@@ -1387,24 +1422,49 @@ impl Render for GpuiShellView {
                 this.paste_clipboard(cx);
             }))
             // Mouse wheel: scroll terminal or forward to PTY
+            //
+            // When an app enables mouse mode (Claude Code, vim, fzf), it expects
+            // to receive scroll events so it can handle scrolling internally.
+            // This matches Alacritty/kitty/WezTerm behavior: mouse mode → app
+            // gets the events. Shift+scroll bypasses mouse mode to scroll our
+            // scrollback buffer (for apps in primary screen with history).
+            //
+            // For alt screen apps without mouse mode (less with ALTERNATE_SCROLL),
+            // convert scroll to arrow keys.
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                // GPUI on Windows: pt.y > 0 when user scrolls UP (wheel away).
+                // We keep this sign: positive = scroll up = see earlier content.
                 let lines = match event.delta {
-                    gpui::ScrollDelta::Lines(pt) => -pt.y,
-                    gpui::ScrollDelta::Pixels(pt) => -pt.y.as_f32() / this.cell_dims().1,
+                    gpui::ScrollDelta::Lines(pt) => pt.y,
+                    gpui::ScrollDelta::Pixels(pt) => pt.y.as_f32() / this.cell_dims().1,
                 };
                 if lines == 0.0 { return; }
 
-                let (mouse_mode, sgr) = this.active_term_mouse_mode();
-                let (col, row) = this.pixel_to_term_cell(event.position);
+                let (mouse_mode, _sgr) = this.active_term_mouse_mode();
+                let alt_scroll = this.active_term_alt_screen_scroll();
+                let shift = event.modifiers.shift;
 
-                if mouse_mode {
+                if mouse_mode && !shift {
+                    // Mouse mode ON: forward scroll events to the app.
+                    // Apps like Claude Code handle their own scrolling.
+                    let (col, row) = this.pixel_to_term_cell(event.position);
                     let count = lines.abs().ceil().max(1.0) as usize;
                     let button: u8 = if lines > 0.0 { 64 } else { 65 };
                     for _ in 0..count {
                         this.send_mouse_event(button, col, row, true);
                     }
+                } else if alt_scroll && !mouse_mode && !shift {
+                    // Alt screen + ALTERNATE_SCROLL, no mouse mode: send arrow keys.
+                    // (e.g. `less` without mouse mode)
+                    let count = lines.abs().ceil().max(1.0) as usize;
+                    let arrow: &[u8] = if lines > 0.0 { b"\x1b[A" } else { b"\x1b[B" };
+                    if let Some(term) = this.terminal_manager().active_terminal_ref() {
+                        for _ in 0..count {
+                            term.send_input(arrow);
+                        }
+                    }
                 } else if let Some(term) = this.terminal_manager_mut().active_terminal() {
-                    // No mouse mode: scroll scrollback buffer
+                    // No mouse mode (or Shift held): scroll scrollback buffer
                     if lines > 0.0 {
                         term.scroll_up(lines.ceil() as usize);
                     } else {
