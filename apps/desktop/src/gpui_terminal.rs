@@ -303,13 +303,9 @@ pub fn render_alacritty_terminal(
 ) -> impl IntoElement {
     let mut data = collect_render_data(term, cursor_blink_on, theme);
 
-    // Active pane: always show beam cursor.
-    // TUI apps (Claude/Codex/OpenCode) hide the terminal cursor but track position
-    // at the input field. We force-show a beam so the user always sees where they're typing.
-    if is_active_pane && data.cursor_row < data.rows && data.cursor_col < data.cols {
-        data.cursor_visible = true;
-        data.cursor_shape = 1; // beam
-    }
+    // Respect the terminal's cursor visibility and shape.
+    // TUI apps (Claude Code, vim, etc.) manage their own cursor display
+    // via ANSI escape sequences — forcing a beam cursor creates duplicates.
     let m = metrics.clone();
     let ff = font_family.to_string();
     let fs = font_size;
