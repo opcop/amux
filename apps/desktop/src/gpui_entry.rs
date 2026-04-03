@@ -1953,29 +1953,17 @@ impl Render for GpuiShellView {
                 };
                 if lines == 0.0 { return; }
 
-                // If active tab is a preview, scroll the preview content instead of terminal
+                // If active tab is NOT a terminal, don't forward scroll to PTY.
+                // Preview tabs use GPUI's built-in overflow_y_scroll().
+                // Browser tabs have their own WebView2 scroll.
                 {
-                    let is_preview = this.terminal_manager().active_pane_id()
+                    let active_kind = this.terminal_manager().active_pane_id()
                         .and_then(|pid| this.terminal_manager().get_pane(pid))
-                        .and_then(|p| p.active_tab_kind())
-                        .map(|k| k.is_preview())
-                        .unwrap_or(false);
-                    if is_preview {
-                        let preview_path = this.terminal_manager().active_pane_id()
-                            .and_then(|pid| this.terminal_manager().get_pane(pid))
-                            .and_then(|p| p.active_tab_kind())
-                            .and_then(|k| match k {
-                                amux_platform::terminal::manager::TabKind::Preview { path } => Some(path.clone()),
-                                _ => None,
-                            });
-                        if let Some(path) = preview_path {
-                            if let Some(state) = this.preview_tabs.get_mut(&path) {
-                                let scroll_px = lines * 40.0; // ~40px per scroll line
-                                state.scroll_offset = (state.scroll_offset - scroll_px).max(0.0);
-                                cx.notify();
-                            }
+                        .and_then(|p| p.active_tab_kind().cloned());
+                    if let Some(ref k) = active_kind {
+                        if !k.is_terminal() {
+                            return; // let GPUI's built-in scroll handle it
                         }
-                        return;
                     }
                 }
 

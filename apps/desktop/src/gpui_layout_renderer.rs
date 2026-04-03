@@ -513,8 +513,10 @@ pub(crate) fn render_layout(
                         }
                     }
                     Some(TabKind::Preview { path }) => {
+                        let preview_w = avail_w;
+                        let preview_h = (avail_h - tab_strip_h).max(0.0);
                         if let Some(preview) = preview_tabs.get(path) {
-                            crate::gpui_preview::render_preview_panel(preview, cx).into_any_element()
+                            crate::gpui_preview::render_preview_panel(preview, preview_w, preview_h, cx).into_any_element()
                         } else {
                             div().flex_1().bg(rgb(0x1d1f21))
                                 .child(format!("Preview: {}", path))

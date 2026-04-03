@@ -591,6 +591,8 @@ fn file_type_icon(name: &str) -> &'static str {
 #[cfg(feature = "gpui")]
 pub fn render_preview_panel(
     state: &PreviewState,
+    content_w: f32,
+    content_h: f32,
     cx: &mut gpui::Context<GpuiShellView>,
 ) -> AnyElement {
     let copy_path = state.file_path.clone();
@@ -598,7 +600,8 @@ pub fn render_preview_panel(
         .id("preview-panel")
         .flex()
         .flex_row()
-        .h_full()
+        .w(px(content_w))
+        .h(px(content_h))
         .overflow_hidden()
         // Resize handle (left edge)
         .child(
