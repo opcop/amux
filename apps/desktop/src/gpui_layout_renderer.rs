@@ -131,6 +131,7 @@ pub(crate) fn render_layout(
     font_family: &str,
     font_size: f32,
     theme: &crate::gpui_terminal::TerminalTheme,
+    browser_tabs: &std::collections::HashMap<u64, crate::gpui_browser::BrowserTabEntry>,
     cx: &mut Context<GpuiShellView>,
 ) -> gpui::AnyElement {
     use amux_platform::terminal::manager::{PaneId, TabLayout};
@@ -471,18 +472,13 @@ pub(crate) fn render_layout(
                 let active_kind = pane.active_tab_kind().cloned();
                 let content = match active_kind.as_ref() {
                     Some(TabKind::Browser { browser_id, .. }) => {
-                        // Render browser tab content (URL bar + WebView2).
-                        // Access browser_tabs from GpuiShellView via cx.entity().
+                        // Render browser tab content (URL bar + WebView2)
                         let bid = *browser_id;
-                        let view = cx.entity().clone();
-                        let shell = view.read(cx);
-                        if let Some(entry) = shell.browser_tabs.get(&bid) {
+                        if let Some(entry) = browser_tabs.get(&bid) {
                             let input = entry.url_input.clone();
                             let bcell = entry.bounds_cell.clone();
-                            drop(shell);
                             crate::gpui_browser::render_browser_tab_content(input, bcell, bid, cx).into_any_element()
                         } else {
-                            drop(shell);
                             div().flex_1().bg(rgb(0x1d1f21)).child("Browser loading...").into_any_element()
                         }
                     }
@@ -580,7 +576,7 @@ pub(crate) fn render_layout(
                 .w(px(left_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, cx));
+                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-h-{}", split_id).into()))
@@ -611,7 +607,7 @@ pub(crate) fn render_layout(
                 .w(px(right_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, cx));
+                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, cx));
 
             div()
                 .w(px(avail_w))
@@ -641,7 +637,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(top_h))
                 .overflow_hidden()
-                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, cx));
+                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-v-{}", split_id).into()))
@@ -672,7 +668,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(bottom_h))
                 .overflow_hidden()
-                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, cx));
+                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, browser_tabs, cx));
 
             div()
                 .w(px(avail_w))

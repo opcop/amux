@@ -2299,9 +2299,9 @@ impl Render for GpuiShellView {
                                 // Zoom mode: render only the zoomed pane at full size
                                 if let Some(zpid) = zoomed {
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, cx)
                                 } else if let Some(layout) = layout_cloned {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, cx)
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, cx)
                                 } else {
                                     div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
                                 }
