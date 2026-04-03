@@ -1953,6 +1953,32 @@ impl Render for GpuiShellView {
                 };
                 if lines == 0.0 { return; }
 
+                // If active tab is a preview, scroll the preview content instead of terminal
+                {
+                    let is_preview = this.terminal_manager().active_pane_id()
+                        .and_then(|pid| this.terminal_manager().get_pane(pid))
+                        .and_then(|p| p.active_tab_kind())
+                        .map(|k| k.is_preview())
+                        .unwrap_or(false);
+                    if is_preview {
+                        let preview_path = this.terminal_manager().active_pane_id()
+                            .and_then(|pid| this.terminal_manager().get_pane(pid))
+                            .and_then(|p| p.active_tab_kind())
+                            .and_then(|k| match k {
+                                amux_platform::terminal::manager::TabKind::Preview { path } => Some(path.clone()),
+                                _ => None,
+                            });
+                        if let Some(path) = preview_path {
+                            if let Some(state) = this.preview_tabs.get_mut(&path) {
+                                let scroll_px = lines * 40.0; // ~40px per scroll line
+                                state.scroll_offset = (state.scroll_offset - scroll_px).max(0.0);
+                                cx.notify();
+                            }
+                        }
+                        return;
+                    }
+                }
+
                 let (mouse_mode, _sgr) = this.active_term_mouse_mode();
                 let alt_scroll = this.active_term_alt_screen_scroll();
                 let shift = event.modifiers.shift;
