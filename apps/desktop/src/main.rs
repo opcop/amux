@@ -31,6 +31,8 @@ mod gpui_surface_views;
 mod gpui_terminal;
 #[cfg(feature = "gpui")]
 mod gpui_workspace_sidebar;
+#[cfg(feature = "gpui")]
+mod gpui_browser;
 #[cfg(not(feature = "gpui"))]
 mod text_entry;
 

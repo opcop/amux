@@ -43,7 +43,9 @@
       "Bash(apt list:*)",
       "Bash(dpkg -l)",
       "WebFetch(domain:vibeisland.app)",
-      "Bash(python3 -c \"import sys,json; pkgs=json.loads\\(sys.stdin.read\\(\\)\\)['packages']; [print\\(p['manifest_path']\\) for p in pkgs if 'alacritty' in p['name']]\")"
+      "Bash(python3 -c \"import sys,json; pkgs=json.loads\\(sys.stdin.read\\(\\)\\)['packages']; [print\\(p['manifest_path']\\) for p in pkgs if 'alacritty' in p['name']]\")",
+      "Bash(python3:*)",
+      "Bash(grep -E \"\\\\.\\(rs|toml\\)$\")"
     ]
   }
 }
