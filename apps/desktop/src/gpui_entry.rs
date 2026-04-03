@@ -2557,13 +2557,22 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                 }
                             }
 
-                            // Determine which browser_id (if any) should be visible:
-                            // only the active tab in the active pane.
-                            let visible_browser_id: Option<u64> = this.active_browser_entry().map(|(bid, _)| bid);
+                            // Collect which browser_ids should be visible: any browser tab
+                            // that is the active tab in its pane (regardless of which pane
+                            // has focus). This way the user can see the browser while working
+                            // in a different terminal pane.
+                            let mut visible_bids = std::collections::HashSet::new();
+                            for tm in this.workspace_terminals.values() {
+                                for pane in tm.all_panes() {
+                                    if let Some(amux_platform::terminal::manager::TabKind::Browser { browser_id, .. }) = pane.active_tab_kind() {
+                                        visible_bids.insert(*browser_id);
+                                    }
+                                }
+                            }
 
                             // Sync browser WebView2 bounds, visibility, and pending navigations.
                             for (&bid, entry) in this.browser_tabs.iter_mut() {
-                                let should_show = visible_browser_id == Some(bid);
+                                let should_show = visible_bids.contains(&bid);
                                 if should_show {
                                     if let Some(bounds) = entry.bounds_cell.get() {
                                         entry.browser.sync_bounds(bounds);

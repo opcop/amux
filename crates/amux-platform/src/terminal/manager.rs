@@ -673,6 +673,11 @@ impl TerminalManager {
         self.panes.get(pane_id)
     }
 
+    /// Iterate all panes
+    pub fn all_panes(&self) -> impl Iterator<Item = &TerminalPane> {
+        self.panes.values()
+    }
+
     pub fn get_pane_mut(&mut self, pane_id: &PaneId) -> Option<&mut TerminalPane> {
         self.panes.get_mut(pane_id)
     }
