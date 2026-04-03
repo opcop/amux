@@ -704,14 +704,21 @@ fn prepaint_terminal(
         let y = bounds.origin.y + px(row as f32 * cell_h);
 
         // ── Phase 1: Background quads ──
-        // Group consecutive cells with same bg color into single quads
+        // Group consecutive cells with same bg color into single quads.
+        // Skip wide_continuation cells — the wide character's start cell
+        // already covers the visual width via text shaping.
         let mut col = 0;
         while col < data.cols {
             let cell = &data.grid[row][col];
+            if cell.wide_continuation {
+                col += 1;
+                continue;
+            }
             let bg = cell.bg;
             let start_col = col;
             col += 1;
-            while col < data.cols && data.grid[row][col].bg == bg {
+            while col < data.cols && data.grid[row][col].bg == bg
+                && !data.grid[row][col].wide_continuation {
                 col += 1;
             }
             let x = content_origin_x + px(start_col as f32 * cell_w);
