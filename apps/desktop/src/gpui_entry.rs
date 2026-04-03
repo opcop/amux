@@ -889,7 +889,10 @@ impl GpuiShellView {
 
     /// Build context menu items based on current state
     fn build_context_menu_items(&self) -> Vec<ContextMenuItem> {
-        let has_selection = false; // TODO: integrate alacritty selection
+        let has_selection = self.terminal_manager().active_terminal_ref()
+            .and_then(|t| t.with_term(|term| term.selection_to_string()))
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
 
         let mut items = vec![
             ContextMenuItem::action("Copy", Some("Ctrl+Shift+C"), has_selection),
