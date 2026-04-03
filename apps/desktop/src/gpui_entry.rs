@@ -1889,11 +1889,23 @@ impl Render for GpuiShellView {
                     let (col, row) = this.pixel_to_term_cell(event.position);
                     this.send_mouse_event(32, col, row, true);
                 } else if this.selecting {
-                    // Extend selection
+                    // Extend selection — use cell side based on direction relative
+                    // to the mouse position within the cell. This ensures the leftmost
+                    // character can be selected when dragging right-to-left.
                     use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Direction};
+                    let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
+                    let (cw, _ch) = this.cell_dims();
+                    let cw = cw.max(1.0);
+                    // Compute sub-cell position to determine which side of the cell the cursor is on
+                    let raw_x = if let Some(pid) = this.terminal_manager().active_pane_id() {
+                        this.pane_bounds.get(&pid.0)
+                            .map(|&(px_x, _, _, _)| event.position.x.as_f32() - px_x - pad)
+                            .unwrap_or(0.0)
+                    } else { 0.0 };
                     let (col, row) = this.pixel_to_term_cell(event.position);
+                    let cell_offset = raw_x - col as f32 * cw;
+                    let side = if cell_offset < cw * 0.5 { Direction::Left } else { Direction::Right };
                     let point = AlacPoint::new(Line(row as i32), Column(col));
-                    let side = Direction::Right;
                     if let Some(term) = this.terminal_manager_mut().active_terminal() {
                         term.with_term_mut(|t| {
                             if let Some(ref mut sel) = t.selection {
