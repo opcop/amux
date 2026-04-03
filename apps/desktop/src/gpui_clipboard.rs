@@ -77,6 +77,7 @@ impl GpuiShellView {
     }
 
     /// Save a clipboard image to ~/.amux/screenshots/ and return the path string.
+    /// BMP images are converted to PNG since most AI tools don't accept BMP.
     fn save_clipboard_image(&self, image: &gpui::Image) -> Option<String> {
         let dir = Self::amux_dir().join("screenshots");
         std::fs::create_dir_all(&dir).ok()?;
@@ -85,18 +86,40 @@ impl GpuiShellView {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+
+        // BMP → convert to PNG; all other formats save directly
+        if matches!(image.format, gpui::ImageFormat::Bmp) {
+            let filename = format!("screenshot_{}.png", timestamp);
+            let path = dir.join(&filename);
+            if let Some(png_bytes) = Self::bmp_to_png(&image.bytes) {
+                std::fs::write(&path, &png_bytes).ok()?;
+                return Some(path.to_string_lossy().to_string());
+            }
+            // Fallback: save as bmp if conversion fails
+            let path = dir.join(format!("screenshot_{}.bmp", timestamp));
+            std::fs::write(&path, &image.bytes).ok()?;
+            return Some(path.to_string_lossy().to_string());
+        }
+
         let ext = match image.format {
             gpui::ImageFormat::Png => "png",
             gpui::ImageFormat::Jpeg => "jpg",
             gpui::ImageFormat::Gif => "gif",
             gpui::ImageFormat::Webp => "webp",
-            gpui::ImageFormat::Bmp => "bmp",
             _ => "png",
         };
         let filename = format!("screenshot_{}.{}", timestamp, ext);
         let path = dir.join(&filename);
         std::fs::write(&path, &image.bytes).ok()?;
         Some(path.to_string_lossy().to_string())
+    }
+
+    /// Convert BMP bytes to PNG bytes using the image crate.
+    fn bmp_to_png(bmp_bytes: &[u8]) -> Option<Vec<u8>> {
+        let img = image::load_from_memory_with_format(bmp_bytes, image::ImageFormat::Bmp).ok()?;
+        let mut png_buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png_buf, image::ImageFormat::Png).ok()?;
+        Some(png_buf.into_inner())
     }
 
     /// Initiate "Send to Pane": grab the current selection and either send
