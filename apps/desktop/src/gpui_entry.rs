@@ -362,11 +362,12 @@ impl GpuiShellView {
         let (cw, ch) = self.cell_dims();
         let cw = cw.max(1.0);
         let ch = ch.max(1.0);
+        let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
 
         // Look up active pane's screen bounds
         if let Some(pid) = self.terminal_manager().active_pane_id() {
             if let Some(&(px_x, px_y, _pw, _ph)) = self.pane_bounds.get(&pid.0) {
-                let x = (pos.x.as_f32() - px_x).max(0.0);
+                let x = (pos.x.as_f32() - px_x - pad).max(0.0);
                 let y = (pos.y.as_f32() - px_y).max(0.0);
                 return ((x / cw) as usize, (y / ch) as usize);
             }
@@ -375,7 +376,7 @@ impl GpuiShellView {
         // Fallback: assume single pane after sidebar + tab strip
         let sidebar_w = self.sidebar_width();
         let tab_strip_h = 28.0_f32;
-        let x = (pos.x.as_f32() - sidebar_w).max(0.0);
+        let x = (pos.x.as_f32() - sidebar_w - pad).max(0.0);
         let y = (pos.y.as_f32() - tab_strip_h).max(0.0);
         ((x / cw) as usize, (y / ch) as usize)
     }

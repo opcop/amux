@@ -10,6 +10,10 @@ use gpui::{
     Point, Rgba, SharedString, Size, Styled, Window,
 };
 
+/// Left padding (in pixels) so terminal content doesn't hug the pane edge.
+/// Applied in both rendering and mouse hit-testing.
+pub const TERMINAL_LEFT_PADDING: f32 = 4.0;
+
 // ─── Glyph Cache ───────────────────────────────────────────────
 
 /// Thread-local shaped text cache to avoid re-shaping unchanged text runs.
@@ -663,6 +667,9 @@ fn prepaint_terminal(
     let cell_w = metrics.width;
     let cell_h = metrics.height;
     let line_height = px(cell_h);
+    // Apply left padding so content doesn't hug the pane edge
+    let pad_x = px(TERMINAL_LEFT_PADDING);
+    let content_origin_x = bounds.origin.x + pad_x;
 
     let mut bg_rects = Vec::with_capacity(data.rows * 4);
     let mut special_rects = Vec::with_capacity(64);
@@ -674,7 +681,7 @@ fn prepaint_terminal(
     // Build selection highlight rects
     let selection_bg = data.selection_bg;
     for &(row, c_start, c_end) in &data.selection_ranges {
-        let x = bounds.origin.x + px(c_start as f32 * cell_w);
+        let x = content_origin_x + px(c_start as f32 * cell_w);
         let y = bounds.origin.y + px(row as f32 * cell_h);
         let w = ((c_end + 1).saturating_sub(c_start)) as f32 * cell_w;
         selection_rects.push(PaintRect {
@@ -707,7 +714,7 @@ fn prepaint_terminal(
             while col < data.cols && data.grid[row][col].bg == bg {
                 col += 1;
             }
-            let x = bounds.origin.x + px(start_col as f32 * cell_w);
+            let x = content_origin_x + px(start_col as f32 * cell_w);
             let w = (col - start_col) as f32 * cell_w;
             // Block cursor: if this rect spans the cursor position, split it
             // to insert the cursor-colored cell.
@@ -719,7 +726,7 @@ fn prepaint_terminal(
 
             if has_block_cursor {
                 let cc = data.cursor_col;
-                let cx = bounds.origin.x + cursor_shaped_x;
+                let cx = content_origin_x + cursor_shaped_x;
                 // Part before cursor
                 if cc > start_col {
                     let w_before = cx - x;
@@ -741,7 +748,7 @@ fn prepaint_terminal(
                 let after_col = cc + 1;
                 if after_col < col {
                     let x_after = cx + px(cursor_w * cell_w);
-                    let w_after = bounds.origin.x + px(col as f32 * cell_w) - x_after;
+                    let w_after = content_origin_x + px(col as f32 * cell_w) - x_after;
                     bg_rects.push(PaintRect {
                         origin: point(x_after, y),
                         size: size(w_after, px(cell_h)),
@@ -770,7 +777,7 @@ fn prepaint_terminal(
 
             // Handle block/box drawing characters as quads
             if is_special_render_char(cell.ch) {
-                let x = bounds.origin.x + px(col as f32 * cell_w);
+                let x = content_origin_x + px(col as f32 * cell_w);
                 // Check if this is a wide special char
                 let char_cells =
                     if col + 1 < data.cols && data.grid[row][col + 1].wide_continuation {
@@ -865,7 +872,7 @@ fn prepaint_terminal(
                         let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
                         let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
                         let shaped = shape_cached(&narrow_text, sk, run, font_size, &text_system);
-                        let x = bounds.origin.x + px(narrow_start as f32 * cell_w);
+                        let x = content_origin_x + px(narrow_start as f32 * cell_w);
                         text_lines.push(PaintText { origin: point(x, y), shaped });
                     }
                     narrow_text.clear();
@@ -884,7 +891,7 @@ fn prepaint_terminal(
                         let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
                         let run = build_run(ch_str.len(), fg, bold, italic, underline, strikethrough, hidden);
                         let shaped = shape_cached(&ch_str, sk, run, font_size, &text_system);
-                        let x = bounds.origin.x + px(col as f32 * cell_w);
+                        let x = content_origin_x + px(col as f32 * cell_w);
                         text_lines.push(PaintText { origin: point(x, y), shaped });
                     }
 
@@ -919,7 +926,7 @@ fn prepaint_terminal(
                 let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
                 let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
                 let shaped = shape_cached(&narrow_text, sk, run, font_size, &text_system);
-                let x = bounds.origin.x + px(narrow_start as f32 * cell_w);
+                let x = content_origin_x + px(narrow_start as f32 * cell_w);
                 text_lines.push(PaintText { origin: point(x, y), shaped });
             }
         }
@@ -945,7 +952,7 @@ fn prepaint_terminal(
                 {
                     ucol += 1;
                 }
-                let x = bounds.origin.x + px(start as f32 * cell_w);
+                let x = content_origin_x + px(start as f32 * cell_w);
                 let w = (ucol - start) as f32 * cell_w;
                 let baseline_y = y + px(cell_h - metrics.descent.abs().max(2.0));
                 push_underline(ul, ul_color, x, baseline_y, w, &mut underline_rects);
@@ -956,7 +963,7 @@ fn prepaint_terminal(
     // ── Phase 3: Cursor overlay (beam/underline) ──
     // Reuse pre-computed cursor_shaped_x for precise positioning.
     if data.cursor_visible && data.cursor_shape > 0 {
-        let cx = bounds.origin.x + cursor_shaped_x;
+        let cx = content_origin_x + cursor_shaped_x;
         let cy = bounds.origin.y + px(data.cursor_row as f32 * cell_h);
 
         // Wide char: underline spans 2 cells, beam stays at left edge
@@ -993,7 +1000,7 @@ fn prepaint_terminal(
             let total = history + visible;
             let track_h = data.rows as f32 * cell_h;
             let bar_w = 4.0_f32;
-            let track_x = bounds.origin.x + px(data.cols as f32 * cell_w - bar_w);
+            let track_x = content_origin_x + px(data.cols as f32 * cell_w - bar_w);
             let track_y = bounds.origin.y;
 
             // Thumb: proportional to visible/total, position based on offset
