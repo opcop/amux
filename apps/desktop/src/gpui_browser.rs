@@ -194,6 +194,7 @@ impl BrowserPaneState {
     }
 
     pub fn open_devtools(&self) {
+        #[cfg(debug_assertions)]
         if let Some(ref wv) = self.webview { wv.open_devtools(); }
     }
 }
