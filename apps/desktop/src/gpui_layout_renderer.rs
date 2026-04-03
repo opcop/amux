@@ -498,12 +498,15 @@ pub(crate) fn render_layout(
                 let active_kind = pane.active_tab_kind().cloned();
                 let content = match active_kind.as_ref() {
                     Some(TabKind::Browser { browser_id, .. }) => {
-                        // Render browser tab content (URL bar + WebView2)
+                        // Render browser tab content (URL bar + WebView2).
+                        // Pass the pane's content size so the canvas gets exact pixel dimensions.
                         let bid = *browser_id;
+                        let browser_content_w = avail_w;
+                        let browser_content_h = (avail_h - tab_strip_h).max(0.0);
                         if let Some(entry) = browser_tabs.get(&bid) {
                             let input = entry.url_input.clone();
                             let bcell = entry.bounds_cell.clone();
-                            crate::gpui_browser::render_browser_tab_content(input, bcell, bid, cx).into_any_element()
+                            crate::gpui_browser::render_browser_tab_content(input, bcell, bid, browser_content_w, browser_content_h, cx).into_any_element()
                         } else {
                             div().flex_1().bg(rgb(0x1d1f21)).child("Browser loading...").into_any_element()
                         }

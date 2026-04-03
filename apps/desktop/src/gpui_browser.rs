@@ -222,6 +222,8 @@ pub fn render_browser_tab_content(
     url_input: gpui::Entity<gpui_component::input::InputState>,
     bounds_cell: Rc<Cell<Option<Bounds<Pixels>>>>,
     browser_id: u64,
+    content_w: f32,
+    content_h: f32,
     cx: &mut Context<crate::gpui_entry::GpuiShellView>,
 ) -> impl IntoElement {
     use crate::gpui_entry::GpuiShellView;
@@ -232,7 +234,8 @@ pub fn render_browser_tab_content(
         .flex_1()
         .flex()
         .flex_col()
-        .size_full()
+        .w_full()
+        .overflow_hidden()
         .bg(rgb(0x1d1f21))
         // URL bar
         .child(
@@ -282,18 +285,13 @@ pub fn render_browser_tab_content(
                         this.close_browser(); cx.notify();
                     })))
         )
-        // WebView content area
+        // WebView content area — canvas with exact pixel size (like the terminal canvas).
+        // URL bar takes 32px; remaining height goes to the WebView2 content.
         .child(
-            div()
-                .id("browser-content")
-                .flex_1()
-                .size_full()
-                .child(
-                    canvas(
-                        move |bounds, _window, _cx| { bounds_cell.set(Some(bounds)); bounds },
-                        |_, _, _, _| {},
-                    ).absolute().size_full()
-                )
+            canvas(
+                move |bounds, _window, _cx| { bounds_cell.set(Some(bounds)); bounds },
+                |_, _, _, _| {},
+            ).w(px(content_w)).h(px((content_h - 32.0).max(0.0)))
         )
 }
 
