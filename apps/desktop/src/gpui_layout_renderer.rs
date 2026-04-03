@@ -74,8 +74,8 @@ pub(crate) fn render_context_menu(
             .items_center()
             .when(enabled, |d| d.hover(|d| d.bg(rgb(0x373b41))))
             .when(enabled, |d| {
-                d.on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.execute_context_menu_action(label, cx);
+                d.on_click(cx.listener(move |this, _event, window, cx| {
+                    this.execute_context_menu_action(label, window, cx);
                 }))
             })
             .child(left)
@@ -161,7 +161,7 @@ pub(crate) fn render_layout(
                     .gap_px()
                     .flex_1()
                     .overflow_hidden()
-                    .children(tabs.into_iter().map(|(idx, title, is_tab_active, has_activity, tab_exited, agent_status)| {
+                    .children(tabs.into_iter().map(|(idx, title, is_tab_active, has_activity, tab_exited, agent_status, tab_kind)| {
                         let pid_click = pid_for_tabs.clone();
                         let pid_close_tab = pid_for_tabs.clone();
                         let pid_drag = pid_for_tabs.clone();
@@ -253,6 +253,13 @@ pub(crate) fn render_layout(
                                         tab_content = tab_content.child(
                                             div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
                                                 .bg(rgb(0xb5bd68)).flex_shrink_0() // green
+                                        );
+                                    }
+                                    // Show tab kind icon for non-terminal tabs
+                                    let icon = tab_kind.icon();
+                                    if !icon.is_empty() {
+                                        tab_content = tab_content.child(
+                                            div().whitespace_nowrap().flex_shrink_0().child(icon)
                                         );
                                     }
                                     tab_content = tab_content.child(
