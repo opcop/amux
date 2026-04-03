@@ -304,12 +304,14 @@ pub(crate) fn render_layout(
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close_tab);
                                             // If closing a browser tab, clean up its WebView2 state
-                                            if let Some(pane) = this.terminal_manager().get_pane(&pid_close_tab) {
-                                                if let Some(tab) = pane.tabs.get(idx) {
-                                                    if let amux_platform::terminal::manager::TabKind::Browser { browser_id, .. } = &tab.kind {
-                                                        this.browser_tabs.remove(browser_id);
-                                                    }
-                                                }
+                                            let bid_to_remove = this.terminal_manager().get_pane(&pid_close_tab)
+                                                .and_then(|p| p.tabs.get(idx))
+                                                .and_then(|t| match &t.kind {
+                                                    amux_platform::terminal::manager::TabKind::Browser { browser_id, .. } => Some(*browser_id),
+                                                    _ => None,
+                                                });
+                                            if let Some(bid) = bid_to_remove {
+                                                this.browser_tabs.remove(&bid);
                                             }
                                             if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pid_close_tab) {
                                                 pane.close_tab(idx);
