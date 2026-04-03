@@ -433,6 +433,7 @@ pub(crate) fn render_layout(
                             .when(has_multiple_panes, |d| {
                                 d.on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.terminal_manager_mut().set_active_pane(&pid_close);
+                                    this.cleanup_pane_tab_entries();
                                     this.terminal_manager_mut().close_active_pane();
                                     cx.notify();
                                 }))
@@ -1136,6 +1137,7 @@ fn render_exited_overlay(
                                         .child("✕ Close")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close);
+                                            this.cleanup_pane_tab_entries();
                                             this.terminal_manager_mut().close_active_pane();
                                             cx.notify();
                                         }))

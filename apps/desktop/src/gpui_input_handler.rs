@@ -201,12 +201,7 @@ impl GpuiShellView {
         }
 
 
-        // Close preview panel on Escape
-        if keystr == "escape" && self.preview_state.is_some() {
-            self.preview_state = None;
-            cx.notify();
-            return;
-        }
+        // (Legacy standalone preview_state removed — preview is now tab-based)
 
         // Workspace rename handling
         if let Some((ref ws_id, ref mut text)) = self.renaming_workspace {
@@ -534,6 +529,7 @@ impl GpuiShellView {
                     return;
                 }
                 "ctrl+shift+w" => {
+                    self.cleanup_pane_tab_entries();
                     if self.terminal_manager_mut().close_active_pane() {
                         cx.notify();
                     }

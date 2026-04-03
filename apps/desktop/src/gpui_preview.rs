@@ -593,6 +593,7 @@ pub fn render_preview_panel(
     state: &PreviewState,
     cx: &mut gpui::Context<GpuiShellView>,
 ) -> AnyElement {
+    let copy_path = state.file_path.clone();
     div()
         .id("preview-panel")
         .flex()
@@ -615,13 +616,7 @@ pub fn render_preview_panel(
                         .bg(rgb(0x282a2e))
                         .group_hover("preview-handle", |d| d.w(px(2.0)).bg(rgb(0x81a2be)))
                 )
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _w, _cx| {
-                    if let Some(ref state) = this.preview_state {
-                        this.preview_drag_start = Some(
-                            (event.position.x.as_f32(), state.width)
-                        );
-                    }
-                }))
+                // (Resize drag removed — preview is now tab-based)
         )
         // Content column
         .child(
@@ -686,11 +681,9 @@ pub fn render_preview_panel(
                                 .cursor_pointer()
                                 .hover(|d| d.text_color(rgb(0xb5bd68)).bg(rgb(0x282a2e)))
                                 .child("Copy")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(ref state) = this.preview_state {
-                                        if let Ok(content) = std::fs::read_to_string(&state.file_path) {
-                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(content));
-                                        }
+                                .on_click(cx.listener(move |_this, _, _, cx| {
+                                    if let Ok(content) = std::fs::read_to_string(&copy_path) {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(content));
                                     }
                                 }))
                         )
@@ -710,10 +703,7 @@ pub fn render_preview_panel(
                                 .cursor_pointer()
                                 .hover(|d| d.text_color(rgb(0xcc6666)).bg(rgb(0x282a2e)))
                                 .child("✕")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.preview_state = None;
-                                    cx.notify();
-                                }))
+                                // Close is handled via tab close button
                         )
                 )
         )

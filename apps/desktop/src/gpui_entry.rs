@@ -59,24 +59,16 @@ pub(crate) struct GpuiShellView {
     pub(crate) ime_preedit: Option<String>,
     /// Sidebar resize drag: (start_mouse_x, start_width)
     pub(crate) sidebar_drag_start: Option<(f32, f32)>,
-    /// File preview panel (legacy standalone — kept for backward compat, will be removed)
-    pub(crate) preview_state: Option<crate::gpui_preview::PreviewState>,
     /// Preview tab states keyed by file path
     pub(crate) preview_tabs: std::collections::HashMap<String, crate::gpui_preview::PreviewState>,
     /// File picker (Ctrl+P)
     pub(crate) file_picker: Option<crate::gpui_preview::FilePickerState>,
-    /// Preview panel resize drag: (start_mouse_x, start_width)
-    pub(crate) preview_drag_start: Option<(f32, f32)>,
-    /// Browser panel resize drag: (start_mouse_x, start_width)
-    pub(crate) browser_drag_start: Option<(f32, f32)>,
     /// Browser tab states keyed by browser_id (each browser tab has its own WebView2)
     pub(crate) browser_tabs: std::collections::HashMap<u64, crate::gpui_browser::BrowserTabEntry>,
     /// Next browser_id to assign
     pub(crate) next_browser_id: u64,
     /// Flag: restore terminal focus on next render (set after URL input Enter)
     pub(crate) restore_terminal_focus: bool,
-    /// Flag: focus the browser URL Input on next render (deferred to avoid track_focus race)
-    pub(crate) pending_url_input_focus: bool,
     /// Pending URL to sync to the address bar Input (set by timer, consumed by render)
     pub(crate) pending_url_bar_update: Option<String>,
     /// Cached raw window handle for WebView2 creation (avoids RefCell re-borrow)
@@ -287,15 +279,11 @@ impl GpuiShellView {
             agent_picker: None,
             ime_preedit: None,
             sidebar_drag_start: None,
-            preview_state: None,
             preview_tabs: std::collections::HashMap::new(),
             file_picker: None,
-            preview_drag_start: None,
-            browser_drag_start: None,
             browser_tabs: std::collections::HashMap::new(),
             next_browser_id: 1,
             restore_terminal_focus: false,
-            pending_url_input_focus: false,
             pending_url_bar_update: None,
             cached_window_handle: None,
         }
@@ -416,6 +404,38 @@ impl GpuiShellView {
     }
 
     /// Get the terminal manager for the active workspace (immutable)
+    /// Remove browser_tabs and preview_tabs entries for the active pane's tabs.
+    /// Must be called BEFORE close_active_pane() so the pane data is still available.
+    pub(crate) fn cleanup_pane_tab_entries(&mut self) {
+        use amux_platform::terminal::manager::TabKind;
+        let manager = self.workspace_terminals.get(&self.active_workspace_id);
+        if let Some(mgr) = manager {
+            if let Some(pane_id) = mgr.active_pane_id().cloned() {
+                if let Some(pane) = mgr.get_pane(&pane_id) {
+                    let mut browser_ids = Vec::new();
+                    let mut preview_paths = Vec::new();
+                    for tab in &pane.tabs {
+                        match &tab.kind {
+                            TabKind::Browser { browser_id, .. } => {
+                                browser_ids.push(*browser_id);
+                            }
+                            TabKind::Preview { path } => {
+                                preview_paths.push(path.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    for bid in browser_ids {
+                        self.browser_tabs.remove(&bid);
+                    }
+                    for path in preview_paths {
+                        self.preview_tabs.remove(&path);
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn terminal_manager(&self) -> &TerminalManager {
         self.workspace_terminals.get(&self.active_workspace_id)
             .expect("active workspace must have a terminal manager")
@@ -943,6 +963,7 @@ impl GpuiShellView {
             }
             "Close Pane" => {
                 self.zoomed_pane = None; // unzoom on close
+                self.cleanup_pane_tab_entries();
                 self.terminal_manager_mut().close_active_pane();
             }
             "Zoom Pane" | "Restore Pane" => {
@@ -1719,7 +1740,7 @@ impl Render for GpuiShellView {
         let cell_h = metrics.height.max(1.0);
 
         // Resize terminals — skip during drag to avoid content loss
-        if self.resize_drag.is_none() && self.sidebar_drag_start.is_none() && self.preview_drag_start.is_none() && self.browser_drag_start.is_none() {
+        if self.resize_drag.is_none() && self.sidebar_drag_start.is_none() {
             let sidebar_w = self.sidebar_width();
             let vp = window.viewport_size();
             let content_w = vp.width.as_f32() - sidebar_w;
@@ -1845,16 +1866,7 @@ impl Render for GpuiShellView {
                     cx.notify();
                     return;
                 }
-                // Handle preview panel resize drag (drag left = wider, drag right = narrower)
-                if let Some((start_x, start_w)) = this.preview_drag_start {
-                    let delta = start_x - event.position.x.as_f32();
-                    if let Some(ref mut state) = this.preview_state {
-                        state.width = (start_w + delta).clamp(250.0, 900.0);
-                    }
-                    cx.notify();
-                    return;
-                }
-                // (Browser panel resize drag removed — browser is now a pane tab)
+                // (Preview/browser panel resize drag removed — both are now pane tabs)
                 // Handle split resize drag
                 if let Some(ref drag) = this.resize_drag.clone() {
                     let current_pos = if drag.is_horizontal {
@@ -1908,8 +1920,6 @@ impl Render for GpuiShellView {
                 this.selecting = false;
                 this.resize_drag = None;
                 this.sidebar_drag_start = None;
-                this.preview_drag_start = None;
-                this.browser_drag_start = None;
                 cx.notify();
             }))
             // Mouse: right button up — forward release to PTY
