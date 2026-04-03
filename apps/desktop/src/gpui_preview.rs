@@ -591,39 +591,18 @@ fn file_type_icon(name: &str) -> &'static str {
 #[cfg(feature = "gpui")]
 pub fn render_preview_panel(
     state: &PreviewState,
+    content_w: f32,
+    content_h: f32,
     cx: &mut gpui::Context<GpuiShellView>,
 ) -> AnyElement {
+    let copy_path = state.file_path.clone();
     div()
         .id("preview-panel")
         .flex()
-        .flex_row()
-        .h_full()
+        .flex_col()
+        .w(px(content_w))
+        .h(px(content_h))
         .overflow_hidden()
-        // Resize handle (left edge)
-        .child(
-            div()
-                .id("preview-resize-handle")
-                .group("preview-handle")
-                .w(px(4.0))
-                .h_full()
-                .flex_shrink_0()
-                .cursor_col_resize()
-                .child(
-                    div()
-                        .w(px(1.0))
-                        .h_full()
-                        .bg(rgb(0x282a2e))
-                        .group_hover("preview-handle", |d| d.w(px(2.0)).bg(rgb(0x81a2be)))
-                )
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _w, _cx| {
-                    if let Some(ref state) = this.preview_state {
-                        this.preview_drag_start = Some(
-                            (event.position.x.as_f32(), state.width)
-                        );
-                    }
-                }))
-        )
-        // Content column
         .child(
         div()
         .flex_1()
@@ -686,33 +665,10 @@ pub fn render_preview_panel(
                                 .cursor_pointer()
                                 .hover(|d| d.text_color(rgb(0xb5bd68)).bg(rgb(0x282a2e)))
                                 .child("Copy")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(ref state) = this.preview_state {
-                                        if let Ok(content) = std::fs::read_to_string(&state.file_path) {
-                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(content));
-                                        }
+                                .on_click(cx.listener(move |_this, _, _, cx| {
+                                    if let Ok(content) = std::fs::read_to_string(&copy_path) {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(content));
                                     }
-                                }))
-                        )
-                        // Keyboard hint
-                        .child(
-                            div().text_xs().text_color(rgb(0x969896)).child("Esc")
-                        )
-                        // Close button
-                        .child(
-                            div()
-                                .id("preview-close")
-                                .text_xs()
-                                .text_color(rgb(0x969896))
-                                .px(px(5.0))
-                                .py(px(2.0))
-                                .rounded(px(3.0))
-                                .cursor_pointer()
-                                .hover(|d| d.text_color(rgb(0xcc6666)).bg(rgb(0x282a2e)))
-                                .child("✕")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.preview_state = None;
-                                    cx.notify();
                                 }))
                         )
                 )

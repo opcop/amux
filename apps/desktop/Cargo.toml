@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = []
 # Base GPUI feature (all platforms)
-gpui = ["amux-ui/gpui", "dep:gpui", "dep:gpui_platform", "dep:smol", "dep:pulldown-cmark"]
+gpui = ["amux-ui/gpui", "dep:gpui", "dep:gpui_platform", "dep:smol", "dep:pulldown-cmark", "dep:wry", "dep:raw-window-handle", "dep:gpui-component"]
 # Linux-specific: enable both Wayland and X11 backends
 gpui-linux = ["gpui", "gpui_platform/wayland", "gpui_platform/x11"]
 
@@ -20,9 +20,13 @@ amux-ui = { path = "../../crates/amux-ui" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 gpui = { git = "https://github.com/zed-industries/zed", optional = true }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", optional = true }
 pulldown-cmark = { version = "0.12", optional = true }
 gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true }
 smol = { version = "2", optional = true }
+wry = { version = "0.53", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+image = { version = "0.25", default-features = false, features = ["bmp", "png"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 git2 = { version = "0.20", features = ["https", "ssh", "vendored-libgit2", "vendored-openssl"] }

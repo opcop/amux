@@ -83,11 +83,40 @@ pub enum AgentKind {
     Copilot,
 }
 
-/// A terminal tab inside a pane
+/// The kind of content a tab holds.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TabKind {
+    /// Terminal emulator (default)
+    Terminal,
+    /// Embedded browser (WebView2). `browser_id` links to desktop-layer state.
+    Browser { url: String, #[serde(default)] browser_id: u64 },
+    /// File preview (markdown, syntax highlight)
+    Preview { path: String },
+}
+
+impl TabKind {
+    pub fn is_terminal(&self) -> bool { matches!(self, TabKind::Terminal) }
+    pub fn is_browser(&self) -> bool { matches!(self, TabKind::Browser { .. }) }
+    pub fn is_preview(&self) -> bool { matches!(self, TabKind::Preview { .. }) }
+
+    /// Short label for the tab bar
+    pub fn icon(&self) -> &'static str {
+        match self {
+            TabKind::Terminal => "",
+            TabKind::Browser { .. } => "\u{1F310}", // 🌐
+            TabKind::Preview { .. } => "\u{1F4C4}", // 📄
+        }
+    }
+}
+
+/// A tab inside a pane — can be terminal, browser, or preview.
 pub struct PaneTab {
     pub title: String,
     /// User set a custom title (overrides terminal-reported title)
     pub custom_title: bool,
+    /// What kind of content this tab holds
+    pub kind: TabKind,
+    /// Terminal emulator (only for TabKind::Terminal)
     pub terminal: Option<AlacrittyTerminal>,
     /// Activity indicator: set when new output detected, cleared when user views the tab
     pub has_activity: bool,
@@ -119,6 +148,7 @@ impl TerminalPane {
             tabs: vec![PaneTab {
                 title: "Terminal".to_string(),
                 custom_title: false,
+                kind: TabKind::Terminal,
                 terminal: None,
                 has_activity: false,
                 exited: false,
@@ -174,12 +204,35 @@ impl TerminalPane {
         self.tabs.get(self.active_tab)?.terminal.as_ref()
     }
 
-    /// Add a new tab to this pane and make it active
+    /// Add a new terminal tab to this pane and make it active
     pub fn add_tab(&mut self, title: String) -> usize {
+        self.add_tab_with_kind(title, TabKind::Terminal)
+    }
+
+    /// Add a new browser tab to this pane and make it active.
+    /// `browser_id` is an opaque ID linking to desktop-layer WebView2 state.
+    pub fn add_browser_tab(&mut self, url: &str, browser_id: u64) -> usize {
+        let title = if url.is_empty() { "Browser".to_string() } else { url.to_string() };
+        self.add_tab_with_kind(title, TabKind::Browser { url: url.to_string(), browser_id })
+    }
+
+    /// Add a new preview tab to this pane and make it active
+    pub fn add_preview_tab(&mut self, path: &str) -> usize {
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string());
+        self.add_tab_with_kind(filename, TabKind::Preview { path: path.to_string() })
+    }
+
+    /// Add a tab with a specific kind
+    fn add_tab_with_kind(&mut self, title: String, kind: TabKind) -> usize {
+        let terminal = if kind.is_terminal() { None } else { None };
         self.tabs.push(PaneTab {
             title,
             custom_title: false,
-            terminal: None,
+            kind,
+            terminal,
             has_activity: false,
             exited: false,
             cwd: None,
@@ -209,9 +262,14 @@ impl TerminalPane {
         self.tabs.len()
     }
 
+    /// Get the kind of the active tab
+    pub fn active_tab_kind(&self) -> Option<&TabKind> {
+        self.tabs.get(self.active_tab).map(|t| &t.kind)
+    }
+
     /// Tab titles for rendering
-    /// Returns (index, title, is_active, has_activity, exited, agent_status_label_with_color) for each tab.
-    pub fn tab_titles(&self) -> Vec<(usize, String, bool, bool, bool, Option<(String, u32)>)> {
+    /// Returns (index, title, is_active, has_activity, exited, agent_status_label_with_color, tab_kind) for each tab.
+    pub fn tab_titles(&self) -> Vec<(usize, String, bool, bool, bool, Option<(String, u32)>, &TabKind)> {
         self.tabs
             .iter()
             .enumerate()
@@ -219,14 +277,34 @@ impl TerminalPane {
                 let title = if t.custom_title {
                     t.title.clone()
                 } else {
-                    t.terminal.as_ref()
-                        .and_then(|term| term.title())
-                        .unwrap_or_else(|| t.title.clone())
+                    match &t.kind {
+                        TabKind::Terminal => {
+                            t.terminal.as_ref()
+                                .and_then(|term| term.title())
+                                .unwrap_or_else(|| t.title.clone())
+                        }
+                        TabKind::Browser { url, .. } => {
+                            if t.title.is_empty() || t.title == "Browser" {
+                                // Shorten URL for display
+                                url.replace("https://", "").replace("http://", "")
+                                    .trim_end_matches('/')
+                                    .to_string()
+                            } else {
+                                t.title.clone()
+                            }
+                        }
+                        TabKind::Preview { path } => {
+                            std::path::Path::new(path)
+                                .file_name()
+                                .map(|f| f.to_string_lossy().to_string())
+                                .unwrap_or_else(|| t.title.clone())
+                        }
+                    }
                 };
                 let status_info = t.agent_status.as_ref().map(|s| {
                     (format!("{} {}", s.icon(), s.label()), s.color_rgb())
                 });
-                (i, title, i == self.active_tab, t.has_activity, t.exited, status_info)
+                (i, title, i == self.active_tab, t.has_activity, t.exited, status_info, &t.kind)
             })
             .collect()
     }
@@ -379,10 +457,17 @@ pub struct TabId(pub String);
 struct SavedTab {
     title: String,
     custom_title: bool,
+    /// Tab content type (defaults to Terminal for backward compat with old layouts)
+    #[serde(default = "SavedTab::default_kind")]
+    kind: TabKind,
     cwd: Option<String>,
     /// Shell program and args (e.g. ["wsl.exe", "--cd", "/path"]) for restoring WSL tabs
     #[serde(default)]
     shell_cmd: Option<(String, Vec<String>)>,
+}
+
+impl SavedTab {
+    fn default_kind() -> TabKind { TabKind::Terminal }
 }
 
 /// Saved pane metadata for session persistence
@@ -586,6 +671,11 @@ impl TerminalManager {
 
     pub fn get_pane(&self, pane_id: &PaneId) -> Option<&TerminalPane> {
         self.panes.get(pane_id)
+    }
+
+    /// Iterate all panes
+    pub fn all_panes(&self) -> impl Iterator<Item = &TerminalPane> {
+        self.panes.values()
     }
 
     pub fn get_pane_mut(&mut self, pane_id: &PaneId) -> Option<&mut TerminalPane> {
@@ -1190,6 +1280,7 @@ impl TerminalManager {
             let tabs: Vec<SavedTab> = pane.tabs.iter().map(|t| SavedTab {
                 title: t.title.clone(),
                 custom_title: t.custom_title,
+                kind: t.kind.clone(),
                 cwd: t.cwd.clone(),
                 shell_cmd: t.shell_cmd.clone(),
             }).collect();
@@ -1239,14 +1330,15 @@ impl TerminalManager {
                     let tabs: Vec<PaneTab> = saved.tabs.iter().map(|st| PaneTab {
                         title: st.title.clone(),
                         custom_title: st.custom_title,
+                        kind: st.kind.clone(),
                         terminal: None,
                         has_activity: false,
                         exited: false,
                         cwd: st.cwd.clone(),
                         shell_cmd: st.shell_cmd.clone(),
                         agent_kind: None,
-                agent_status: None,
-                last_cursor_line: 0,
+                        agent_status: None,
+                        last_cursor_line: 0,
                     }).collect();
                     let active_tab = if saved.active_tab < tabs.len() { saved.active_tab } else { 0 };
                     if tabs.is_empty() {

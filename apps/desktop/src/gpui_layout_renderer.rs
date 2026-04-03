@@ -74,8 +74,8 @@ pub(crate) fn render_context_menu(
             .items_center()
             .when(enabled, |d| d.hover(|d| d.bg(rgb(0x373b41))))
             .when(enabled, |d| {
-                d.on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.execute_context_menu_action(label, cx);
+                d.on_click(cx.listener(move |this, _event, window, cx| {
+                    this.execute_context_menu_action(label, window, cx);
                 }))
             })
             .child(left)
@@ -131,6 +131,8 @@ pub(crate) fn render_layout(
     font_family: &str,
     font_size: f32,
     theme: &crate::gpui_terminal::TerminalTheme,
+    browser_tabs: &std::collections::HashMap<u64, crate::gpui_browser::BrowserTabEntry>,
+    preview_tabs: &std::collections::HashMap<String, crate::gpui_preview::PreviewState>,
     cx: &mut Context<GpuiShellView>,
 ) -> gpui::AnyElement {
     use amux_platform::terminal::manager::{PaneId, TabLayout};
@@ -161,7 +163,7 @@ pub(crate) fn render_layout(
                     .gap_px()
                     .flex_1()
                     .overflow_hidden()
-                    .children(tabs.into_iter().map(|(idx, title, is_tab_active, has_activity, tab_exited, agent_status)| {
+                    .children(tabs.into_iter().map(|(idx, title, is_tab_active, has_activity, tab_exited, agent_status, tab_kind)| {
                         let pid_click = pid_for_tabs.clone();
                         let pid_close_tab = pid_for_tabs.clone();
                         let pid_drag = pid_for_tabs.clone();
@@ -211,6 +213,17 @@ pub(crate) fn render_layout(
                                         // Single click: switch tab
                                         this.terminal_manager_mut().set_active_pane(&pid_click);
                                         this.terminal_manager_mut().set_active_tab_in_pane(idx);
+                                        // When switching to a non-browser tab, reclaim OS focus
+                                        // from any WebView2 that may hold it.
+                                        let switched_to_browser = this.has_visible_browser();
+                                        if !switched_to_browser {
+                                            for entry in this.browser_tabs.values() {
+                                                if entry.browser.is_initialized() {
+                                                    entry.browser.focus_parent();
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
                                     cx.notify();
                                 })
@@ -255,6 +268,13 @@ pub(crate) fn render_layout(
                                                 .bg(rgb(0xb5bd68)).flex_shrink_0() // green
                                         );
                                     }
+                                    // Show tab kind icon for non-terminal tabs
+                                    let icon = tab_kind.icon();
+                                    if !icon.is_empty() {
+                                        tab_content = tab_content.child(
+                                            div().whitespace_nowrap().flex_shrink_0().child(icon)
+                                        );
+                                    }
                                     tab_content = tab_content.child(
                                         div().whitespace_nowrap().child(title)
                                     );
@@ -284,6 +304,20 @@ pub(crate) fn render_layout(
                                         .child("×")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close_tab);
+                                            // If closing a browser tab, clean up its WebView2 state
+                                            // Clean up tab-specific state before closing
+                                            let tab_kind = this.terminal_manager().get_pane(&pid_close_tab)
+                                                .and_then(|p| p.tabs.get(idx))
+                                                .map(|t| t.kind.clone());
+                                            match tab_kind.as_ref() {
+                                                Some(amux_platform::terminal::manager::TabKind::Browser { browser_id, .. }) => {
+                                                    this.browser_tabs.remove(browser_id);
+                                                }
+                                                Some(amux_platform::terminal::manager::TabKind::Preview { path }) => {
+                                                    this.preview_tabs.remove(path);
+                                                }
+                                                _ => {}
+                                            }
                                             if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pid_close_tab) {
                                                 pane.close_tab(idx);
                                             }
@@ -399,6 +433,7 @@ pub(crate) fn render_layout(
                             .when(has_multiple_panes, |d| {
                                 d.on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.terminal_manager_mut().set_active_pane(&pid_close);
+                                    this.cleanup_pane_tab_entries();
                                     this.terminal_manager_mut().close_active_pane();
                                     cx.notify();
                                 }))
@@ -460,20 +495,52 @@ pub(crate) fn render_layout(
                     .into_any_element();
 
                 let active_tab_exited = pane.active_tab_exited();
-                let content = if let Some(term) = pane.active_terminal_ref() {
-                    if active_tab_exited {
-                        render_exited_overlay(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, pane_id, cx)
-                    } else {
-                        crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme).into_any_element()
+                use amux_platform::terminal::manager::TabKind;
+                let active_kind = pane.active_tab_kind().cloned();
+                let content = match active_kind.as_ref() {
+                    Some(TabKind::Browser { browser_id, .. }) => {
+                        // Render browser tab content (URL bar + WebView2).
+                        // Pass the pane's content size so the canvas gets exact pixel dimensions.
+                        let bid = *browser_id;
+                        let browser_content_w = avail_w;
+                        let browser_content_h = (avail_h - tab_strip_h).max(0.0);
+                        if let Some(entry) = browser_tabs.get(&bid) {
+                            let input = entry.url_input.clone();
+                            let bcell = entry.bounds_cell.clone();
+                            crate::gpui_browser::render_browser_tab_content(input, bcell, bid, browser_content_w, browser_content_h, cx).into_any_element()
+                        } else {
+                            div().flex_1().bg(rgb(0x1d1f21)).child("Browser loading...").into_any_element()
+                        }
                     }
-                } else {
-                    div().flex_1().flex().items_center().justify_center()
-                        .bg(rgb(0x1d1f21))
-                        .child(
-                            div().flex().flex_col().items_center().gap_2()
-                                .child(div().text_sm().text_color(rgb(0x969896)).child("Starting terminal..."))
-                        )
-                        .into_any_element()
+                    Some(TabKind::Preview { path }) => {
+                        let preview_w = avail_w;
+                        let preview_h = (avail_h - tab_strip_h).max(0.0);
+                        if let Some(preview) = preview_tabs.get(path) {
+                            crate::gpui_preview::render_preview_panel(preview, preview_w, preview_h, cx).into_any_element()
+                        } else {
+                            div().flex_1().bg(rgb(0x1d1f21))
+                                .child(format!("Preview: {}", path))
+                                .into_any_element()
+                        }
+                    }
+                    _ => {
+                        // Terminal tab (default)
+                        if let Some(term) = pane.active_terminal_ref() {
+                            if active_tab_exited {
+                                render_exited_overlay(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, pane_id, cx)
+                            } else {
+                                crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme).into_any_element()
+                            }
+                        } else {
+                            div().flex_1().flex().items_center().justify_center()
+                                .bg(rgb(0x1d1f21))
+                                .child(
+                                    div().flex().flex_col().items_center().gap_2()
+                                        .child(div().text_sm().text_color(rgb(0x969896)).child("Starting terminal..."))
+                                )
+                                .into_any_element()
+                        }
+                    }
                 };
                 (tab_strip, content)
             } else {
@@ -544,7 +611,7 @@ pub(crate) fn render_layout(
                 .w(px(left_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, cx));
+                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-h-{}", split_id).into()))
@@ -575,7 +642,7 @@ pub(crate) fn render_layout(
                 .w(px(right_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, cx));
+                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, cx));
 
             div()
                 .w(px(avail_w))
@@ -605,7 +672,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(top_h))
                 .overflow_hidden()
-                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, cx));
+                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-v-{}", split_id).into()))
@@ -636,7 +703,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(bottom_h))
                 .overflow_hidden()
-                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, cx));
+                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, cx));
 
             div()
                 .w(px(avail_w))
@@ -1072,6 +1139,7 @@ fn render_exited_overlay(
                                         .child("✕ Close")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close);
+                                            this.cleanup_pane_tab_entries();
                                             this.terminal_manager_mut().close_active_pane();
                                             cx.notify();
                                         }))
