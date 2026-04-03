@@ -303,9 +303,11 @@ pub fn render_alacritty_terminal(
 ) -> impl IntoElement {
     let mut data = collect_render_data(term, cursor_blink_on, theme);
 
-    // Respect the terminal's cursor visibility and shape.
-    // TUI apps (Claude Code, vim, etc.) manage their own cursor display
-    // via ANSI escape sequences — forcing a beam cursor creates duplicates.
+    // Active pane: respect the terminal's cursor visibility and shape.
+    // Inactive pane: hide cursor so the user can identify which pane is active.
+    if !is_active_pane {
+        data.cursor_visible = false;
+    }
     let m = metrics.clone();
     let ff = font_family.to_string();
     let fs = font_size;
