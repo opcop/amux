@@ -599,29 +599,10 @@ pub fn render_preview_panel(
     div()
         .id("preview-panel")
         .flex()
-        .flex_row()
+        .flex_col()
         .w(px(content_w))
         .h(px(content_h))
         .overflow_hidden()
-        // Resize handle (left edge)
-        .child(
-            div()
-                .id("preview-resize-handle")
-                .group("preview-handle")
-                .w(px(4.0))
-                .h_full()
-                .flex_shrink_0()
-                .cursor_col_resize()
-                .child(
-                    div()
-                        .w(px(1.0))
-                        .h_full()
-                        .bg(rgb(0x282a2e))
-                        .group_hover("preview-handle", |d| d.w(px(2.0)).bg(rgb(0x81a2be)))
-                )
-                // (Resize drag removed — preview is now tab-based)
-        )
-        // Content column
         .child(
         div()
         .flex_1()
@@ -689,24 +670,6 @@ pub fn render_preview_panel(
                                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(content));
                                     }
                                 }))
-                        )
-                        // Keyboard hint
-                        .child(
-                            div().text_xs().text_color(rgb(0x969896)).child("Esc")
-                        )
-                        // Close button
-                        .child(
-                            div()
-                                .id("preview-close")
-                                .text_xs()
-                                .text_color(rgb(0x969896))
-                                .px(px(5.0))
-                                .py(px(2.0))
-                                .rounded(px(3.0))
-                                .cursor_pointer()
-                                .hover(|d| d.text_color(rgb(0xcc6666)).bg(rgb(0x282a2e)))
-                                .child("✕")
-                                // Close is handled via tab close button
                         )
                 )
         )
