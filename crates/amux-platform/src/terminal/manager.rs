@@ -146,13 +146,26 @@ impl TerminalPane {
     /// Prefers live /proc/PID/cwd if available, falls back to saved spawn-time cwd.
     pub fn active_tab_live_cwd(&self) -> Option<String> {
         let tab = self.tabs.get(self.active_tab)?;
-        // Try reading live cwd from the running process
         if let Some(ref term) = tab.terminal {
             if let Some(live_cwd) = term.current_cwd() {
                 return Some(live_cwd);
             }
         }
-        // Fall back to saved cwd
+        tab.cwd.clone()
+    }
+
+    /// Get ONLY the live cwd from the running process (sysinfo/proc).
+    /// Returns None if it can't be determined (common on Windows).
+    /// Does NOT fall back to saved spawn-time cwd.
+    pub fn active_tab_process_cwd(&self) -> Option<String> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let term = tab.terminal.as_ref()?;
+        term.current_cwd()
+    }
+
+    /// Get the saved spawn-time cwd (may be stale after `cd`).
+    pub fn active_tab_saved_cwd(&self) -> Option<String> {
+        let tab = self.tabs.get(self.active_tab)?;
         tab.cwd.clone()
     }
 
@@ -495,6 +508,16 @@ impl TerminalManager {
     /// Reads live /proc/PID/cwd if available, falls back to saved spawn-time cwd.
     pub fn active_cwd(&self) -> Option<String> {
         self.panes.get(&self.active_pane)?.active_tab_live_cwd()
+    }
+
+    /// Get ONLY the live process cwd (no fallback to saved cwd).
+    pub fn active_process_cwd(&self) -> Option<String> {
+        self.panes.get(&self.active_pane)?.active_tab_process_cwd()
+    }
+
+    /// Get the saved spawn-time cwd (may be stale).
+    pub fn active_saved_cwd(&self) -> Option<String> {
+        self.panes.get(&self.active_pane)?.active_tab_saved_cwd()
     }
 
     /// Get the active pane's active tab's shell command (program + args)

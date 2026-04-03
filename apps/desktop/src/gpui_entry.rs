@@ -510,7 +510,19 @@ impl GpuiShellView {
             .map(|(s, a)| (s.to_string(), a.to_vec()));
 
         // Best-effort CWD: use the same resolve chain as file picker
-        let live_cwd = self.resolve_active_cwd();
+        // Prompt extraction is the most reliable source on Windows —
+        // PowerShell prompt always shows the real current directory.
+        // sysinfo often returns the spawn-time CWD, not the live one after `cd`.
+        let prompt_cwd = self.terminal_manager().active_terminal_ref()
+            .map(|t| t.cursor_line_text())
+            .and_then(|line| extract_cwd_from_prompt_line(&line))
+            .map(|p| self.maybe_convert_wsl_path(&p));
+        let process_cwd = self.terminal_manager().active_process_cwd();
+        let saved_cwd = self.terminal_manager().active_saved_cwd();
+
+        let live_cwd = prompt_cwd.filter(|p| std::path::Path::new(p).is_dir())
+            .or_else(|| process_cwd.filter(|p| std::path::Path::new(p).is_dir()))
+            .or_else(|| saved_cwd.filter(|p| std::path::Path::new(p).is_dir()));
 
         let (shell, args) = inherited.unwrap_or_else(Self::default_shell);
         let cwd = live_cwd.or_else(Self::default_cwd);
@@ -988,16 +1000,25 @@ impl GpuiShellView {
     /// 3. Saved spawn-time cwd from tab
     /// 4. GUI process cwd (last resort)
     fn resolve_active_cwd(&self) -> Option<String> {
-        // 1. Try live cwd via sysinfo (Windows) or /proc/PID/cwd (Linux)
-        if let Some(cwd) = self.terminal_manager().active_cwd() {
+        // 1. Parse from terminal prompt line — most reliable, always shows live cwd
+        //    (sysinfo on Windows often returns stale spawn-time cwd)
+        if let Some(cwd) = self.extract_cwd_from_prompt() {
             let resolved = self.maybe_convert_wsl_path(&cwd);
             if std::path::Path::new(&resolved).is_dir() {
                 return Some(resolved);
             }
         }
 
-        // 2. Try extracting from the terminal prompt
-        if let Some(cwd) = self.extract_cwd_from_prompt() {
+        // 2. Live process cwd (sysinfo on Windows, /proc on Linux)
+        if let Some(cwd) = self.terminal_manager().active_process_cwd() {
+            let resolved = self.maybe_convert_wsl_path(&cwd);
+            if std::path::Path::new(&resolved).is_dir() {
+                return Some(resolved);
+            }
+        }
+
+        // 3. Saved spawn-time cwd — last resort, may be stale after `cd`
+        if let Some(cwd) = self.terminal_manager().active_saved_cwd() {
             let resolved = self.maybe_convert_wsl_path(&cwd);
             if std::path::Path::new(&resolved).is_dir() {
                 return Some(resolved);
