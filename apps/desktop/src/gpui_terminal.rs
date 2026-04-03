@@ -736,18 +736,17 @@ fn prepaint_terminal(
                         color: bg,
                     });
                 }
-                // Cursor cell
-                let cursor_w = if cc + 1 < data.cols
-                    && data.grid[row][cc + 1].wide_continuation { 2.0 } else { 1.0 };
+                // Cursor cell — always 1 cell wide even on wide characters,
+                // so the cursor doesn't look abnormally large on CJK text.
                 bg_rects.push(PaintRect {
                     origin: point(cx, y),
-                    size: size(px(cursor_w * cell_w), px(cell_h)),
+                    size: size(px(cell_w), px(cell_h)),
                     color: data.cursor_color,
                 });
                 // Part after cursor
                 let after_col = cc + 1;
                 if after_col < col {
-                    let x_after = cx + px(cursor_w * cell_w);
+                    let x_after = cx + px(cell_w);
                     let w_after = content_origin_x + px(col as f32 * cell_w) - x_after;
                     bg_rects.push(PaintRect {
                         origin: point(x_after, y),
