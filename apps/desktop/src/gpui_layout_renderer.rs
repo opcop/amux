@@ -132,6 +132,7 @@ pub(crate) fn render_layout(
     font_size: f32,
     theme: &crate::gpui_terminal::TerminalTheme,
     browser_tabs: &std::collections::HashMap<u64, crate::gpui_browser::BrowserTabEntry>,
+    preview_tabs: &std::collections::HashMap<String, crate::gpui_preview::PreviewState>,
     cx: &mut Context<GpuiShellView>,
 ) -> gpui::AnyElement {
     use amux_platform::terminal::manager::{PaneId, TabLayout};
@@ -304,14 +305,18 @@ pub(crate) fn render_layout(
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close_tab);
                                             // If closing a browser tab, clean up its WebView2 state
-                                            let bid_to_remove = this.terminal_manager().get_pane(&pid_close_tab)
+                                            // Clean up tab-specific state before closing
+                                            let tab_kind = this.terminal_manager().get_pane(&pid_close_tab)
                                                 .and_then(|p| p.tabs.get(idx))
-                                                .and_then(|t| match &t.kind {
-                                                    amux_platform::terminal::manager::TabKind::Browser { browser_id, .. } => Some(*browser_id),
-                                                    _ => None,
-                                                });
-                                            if let Some(bid) = bid_to_remove {
-                                                this.browser_tabs.remove(&bid);
+                                                .map(|t| t.kind.clone());
+                                            match tab_kind.as_ref() {
+                                                Some(amux_platform::terminal::manager::TabKind::Browser { browser_id, .. }) => {
+                                                    this.browser_tabs.remove(browser_id);
+                                                }
+                                                Some(amux_platform::terminal::manager::TabKind::Preview { path }) => {
+                                                    this.preview_tabs.remove(path);
+                                                }
+                                                _ => {}
                                             }
                                             if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pid_close_tab) {
                                                 pane.close_tab(idx);
@@ -504,10 +509,13 @@ pub(crate) fn render_layout(
                         }
                     }
                     Some(TabKind::Preview { path }) => {
-                        // TODO: Wave 4 — render preview tab content
-                        div().flex_1().bg(rgb(0x1d1f21))
-                            .child(format!("Preview: {}", path))
-                            .into_any_element()
+                        if let Some(preview) = preview_tabs.get(path) {
+                            crate::gpui_preview::render_preview_panel(preview, cx).into_any_element()
+                        } else {
+                            div().flex_1().bg(rgb(0x1d1f21))
+                                .child(format!("Preview: {}", path))
+                                .into_any_element()
+                        }
                     }
                     _ => {
                         // Terminal tab (default)
@@ -597,7 +605,7 @@ pub(crate) fn render_layout(
                 .w(px(left_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, cx));
+                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-h-{}", split_id).into()))
@@ -628,7 +636,7 @@ pub(crate) fn render_layout(
                 .w(px(right_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, cx));
+                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, cx));
 
             div()
                 .w(px(avail_w))
@@ -658,7 +666,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(top_h))
                 .overflow_hidden()
-                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, cx));
+                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-v-{}", split_id).into()))
@@ -689,7 +697,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(bottom_h))
                 .overflow_hidden()
-                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, browser_tabs, cx));
+                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, cx));
 
             div()
                 .w(px(avail_w))

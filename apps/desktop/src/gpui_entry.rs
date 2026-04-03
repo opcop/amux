@@ -59,8 +59,10 @@ pub(crate) struct GpuiShellView {
     pub(crate) ime_preedit: Option<String>,
     /// Sidebar resize drag: (start_mouse_x, start_width)
     pub(crate) sidebar_drag_start: Option<(f32, f32)>,
-    /// File preview panel
+    /// File preview panel (legacy standalone — kept for backward compat, will be removed)
     pub(crate) preview_state: Option<crate::gpui_preview::PreviewState>,
+    /// Preview tab states keyed by file path
+    pub(crate) preview_tabs: std::collections::HashMap<String, crate::gpui_preview::PreviewState>,
     /// File picker (Ctrl+P)
     pub(crate) file_picker: Option<crate::gpui_preview::FilePickerState>,
     /// Preview panel resize drag: (start_mouse_x, start_width)
@@ -286,6 +288,7 @@ impl GpuiShellView {
             ime_preedit: None,
             sidebar_drag_start: None,
             preview_state: None,
+            preview_tabs: std::collections::HashMap::new(),
             file_picker: None,
             preview_drag_start: None,
             browser_drag_start: None,
@@ -1020,7 +1023,7 @@ impl GpuiShellView {
                 .map(|cwd| std::path::PathBuf::from(cwd).join(path).to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string())
         };
-        self.preview_state = crate::gpui_preview::PreviewState::load(&full_path);
+        self.open_preview_file(&full_path);
     }
 
     /// Best-effort resolve the current working directory of the active pane.
@@ -1173,7 +1176,7 @@ impl GpuiShellView {
             } else {
                 path
             };
-            self.preview_state = crate::gpui_preview::PreviewState::load(&full_path);
+            self.open_preview_file(&full_path);
         }
     }
 
@@ -1283,7 +1286,16 @@ impl GpuiShellView {
                 .map(|cwd| std::path::PathBuf::from(cwd).join(path).to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string())
         };
-        self.preview_state = crate::gpui_preview::PreviewState::load(&full_path);
+        // Load preview and open as a tab in the active pane
+        if let Some(state) = crate::gpui_preview::PreviewState::load(&full_path) {
+            let active_pid = self.terminal_manager().active_pane_id().cloned();
+            if let Some(ref pid) = active_pid {
+                if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
+                    pane.add_preview_tab(&full_path);
+                }
+            }
+            self.preview_tabs.insert(full_path, state);
+        }
     }
 
     // ─── Browser Pane ────────────────────────────────────────────
@@ -2299,26 +2311,15 @@ impl Render for GpuiShellView {
                                 // Zoom mode: render only the zoomed pane at full size
                                 if let Some(zpid) = zoomed {
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, cx)
                                 } else if let Some(layout) = layout_cloned {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, cx)
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, cx)
                                 } else {
                                     div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
                                 }
                             })
                             ) // end terminal column
-                            // Preview panel (right side, when open)
-                            .when(self.preview_state.is_some(), |this| {
-                                let preview = self.preview_state.as_ref().unwrap();
-                                let pw = preview.width;
-                                this.child(
-                                    div()
-                                        .w(px(pw))
-                                        .h_full()
-                                        .flex_shrink_0()
-                                        .child(crate::gpui_preview::render_preview_panel(preview, cx))
-                                )
-                            })
+                            // (Preview is now rendered inside pane tabs, not as a separate column)
                             // (Browser is now rendered inside pane tabs, not as a separate column)
                     ),
             )
