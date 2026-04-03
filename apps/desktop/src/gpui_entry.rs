@@ -2556,11 +2556,22 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                 }
                             }
 
-                            // Sync browser WebView2 bounds and process pending navigations
-                            // for all browser tabs.
-                            for entry in this.browser_tabs.values_mut() {
-                                if let Some(bounds) = entry.bounds_cell.get() {
-                                    entry.browser.sync_bounds(bounds);
+                            // Determine which browser_id (if any) should be visible:
+                            // only the active tab in the active pane.
+                            let visible_browser_id: Option<u64> = this.active_browser_entry().map(|(bid, _)| bid);
+
+                            // Sync browser WebView2 bounds, visibility, and pending navigations.
+                            for (&bid, entry) in this.browser_tabs.iter_mut() {
+                                let should_show = visible_browser_id == Some(bid);
+                                if should_show {
+                                    if let Some(bounds) = entry.bounds_cell.get() {
+                                        entry.browser.sync_bounds(bounds);
+                                    }
+                                    if !entry.browser.is_visible() {
+                                        entry.browser.show();
+                                    }
+                                } else if entry.browser.is_visible() {
+                                    entry.browser.hide();
                                 }
                                 entry.browser.process_pending_nav();
                                 if let Some(url) = entry.browser.take_current_url() {

@@ -212,6 +212,17 @@ pub(crate) fn render_layout(
                                         // Single click: switch tab
                                         this.terminal_manager_mut().set_active_pane(&pid_click);
                                         this.terminal_manager_mut().set_active_tab_in_pane(idx);
+                                        // When switching to a non-browser tab, reclaim OS focus
+                                        // from any WebView2 that may hold it.
+                                        let switched_to_browser = this.has_visible_browser();
+                                        if !switched_to_browser {
+                                            for entry in this.browser_tabs.values() {
+                                                if entry.browser.is_initialized() {
+                                                    entry.browser.focus_parent();
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
                                     cx.notify();
                                 })
@@ -292,6 +303,14 @@ pub(crate) fn render_layout(
                                         .child("×")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close_tab);
+                                            // If closing a browser tab, clean up its WebView2 state
+                                            if let Some(pane) = this.terminal_manager().get_pane(&pid_close_tab) {
+                                                if let Some(tab) = pane.tabs.get(idx) {
+                                                    if let amux_platform::terminal::manager::TabKind::Browser { browser_id, .. } = &tab.kind {
+                                                        this.browser_tabs.remove(browser_id);
+                                                    }
+                                                }
+                                            }
                                             if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pid_close_tab) {
                                                 pane.close_tab(idx);
                                             }
