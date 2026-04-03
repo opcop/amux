@@ -467,20 +467,49 @@ pub(crate) fn render_layout(
                     .into_any_element();
 
                 let active_tab_exited = pane.active_tab_exited();
-                let content = if let Some(term) = pane.active_terminal_ref() {
-                    if active_tab_exited {
-                        render_exited_overlay(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, pane_id, cx)
-                    } else {
-                        crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme).into_any_element()
+                use amux_platform::terminal::manager::TabKind;
+                let active_kind = pane.active_tab_kind().cloned();
+                let content = match active_kind.as_ref() {
+                    Some(TabKind::Browser { browser_id, .. }) => {
+                        // Render browser tab content (URL bar + WebView2).
+                        // Access browser_tabs from GpuiShellView via cx.entity().
+                        let bid = *browser_id;
+                        let view = cx.entity().clone();
+                        let shell = view.read(cx);
+                        if let Some(entry) = shell.browser_tabs.get(&bid) {
+                            let input = entry.url_input.clone();
+                            let bcell = entry.bounds_cell.clone();
+                            drop(shell);
+                            crate::gpui_browser::render_browser_tab_content(input, bcell, bid, cx).into_any_element()
+                        } else {
+                            drop(shell);
+                            div().flex_1().bg(rgb(0x1d1f21)).child("Browser loading...").into_any_element()
+                        }
                     }
-                } else {
-                    div().flex_1().flex().items_center().justify_center()
-                        .bg(rgb(0x1d1f21))
-                        .child(
-                            div().flex().flex_col().items_center().gap_2()
-                                .child(div().text_sm().text_color(rgb(0x969896)).child("Starting terminal..."))
-                        )
-                        .into_any_element()
+                    Some(TabKind::Preview { path }) => {
+                        // TODO: Wave 4 — render preview tab content
+                        div().flex_1().bg(rgb(0x1d1f21))
+                            .child(format!("Preview: {}", path))
+                            .into_any_element()
+                    }
+                    _ => {
+                        // Terminal tab (default)
+                        if let Some(term) = pane.active_terminal_ref() {
+                            if active_tab_exited {
+                                render_exited_overlay(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, pane_id, cx)
+                            } else {
+                                crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme).into_any_element()
+                            }
+                        } else {
+                            div().flex_1().flex().items_center().justify_center()
+                                .bg(rgb(0x1d1f21))
+                                .child(
+                                    div().flex().flex_col().items_center().gap_2()
+                                        .child(div().text_sm().text_color(rgb(0x969896)).child("Starting terminal..."))
+                                )
+                                .into_any_element()
+                        }
+                    }
                 };
                 (tab_strip, content)
             } else {

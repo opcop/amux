@@ -65,6 +65,21 @@ pub(crate) struct GpuiShellView {
     pub(crate) file_picker: Option<crate::gpui_preview::FilePickerState>,
     /// Preview panel resize drag: (start_mouse_x, start_width)
     pub(crate) preview_drag_start: Option<(f32, f32)>,
+    /// Browser panel resize drag: (start_mouse_x, start_width)
+    pub(crate) browser_drag_start: Option<(f32, f32)>,
+    /// Browser tab states keyed by browser_id (each browser tab has its own WebView2)
+    pub(crate) browser_tabs: std::collections::HashMap<u64, crate::gpui_browser::BrowserTabEntry>,
+    /// Next browser_id to assign
+    pub(crate) next_browser_id: u64,
+    /// Flag: restore terminal focus on next render (set after URL input Enter)
+    pub(crate) restore_terminal_focus: bool,
+    /// Flag: focus the browser URL Input on next render (deferred to avoid track_focus race)
+    pub(crate) pending_url_input_focus: bool,
+    /// Pending URL to sync to the address bar Input (set by timer, consumed by render)
+    pub(crate) pending_url_bar_update: Option<String>,
+    /// Cached raw window handle for WebView2 creation (avoids RefCell re-borrow)
+    #[cfg(feature = "gpui")]
+    pub(crate) cached_window_handle: Option<raw_window_handle::RawWindowHandle>,
 }
 
 /// Right-click context menu
@@ -273,6 +288,13 @@ impl GpuiShellView {
             preview_state: None,
             file_picker: None,
             preview_drag_start: None,
+            browser_drag_start: None,
+            browser_tabs: std::collections::HashMap::new(),
+            next_browser_id: 1,
+            restore_terminal_focus: false,
+            pending_url_input_focus: false,
+            pending_url_bar_update: None,
+            cached_window_handle: None,
         }
     }
 
@@ -876,8 +898,10 @@ impl GpuiShellView {
         items.push(ContextMenuItem::action("Apply Layout...", None, true));
         items.push(ContextMenuItem::action("Save Layout as Template", None, true).separator());
 
-        // File preview
-        items.push(ContextMenuItem::action("Preview File...", None, true).separator());
+        // File preview & browser
+        items.push(ContextMenuItem::action("Preview File...", None, true));
+        let browser_label = if self.has_visible_browser() { "Close Browser" } else { "Open Browser" };
+        items.push(ContextMenuItem::action(browser_label, None, true).separator());
 
         // Terminal launchers
         let has_launchers = self.wsl_detected || !self.detected_vibe_tools.is_empty();
@@ -888,7 +912,7 @@ impl GpuiShellView {
     }
 
     /// Execute a context menu action by label
-    pub(crate) fn execute_context_menu_action(&mut self, label: &str, cx: &mut Context<Self>) {
+    pub(crate) fn execute_context_menu_action(&mut self, label: &str, window: &mut Window, cx: &mut Context<Self>) {
         match label {
             "Copy" => {
                 self.copy_selection(cx);
@@ -937,6 +961,12 @@ impl GpuiShellView {
             }
             "Preview File..." => {
                 self.open_file_picker();
+            }
+            "Open Browser" => {
+                self.open_browser("http://localhost:3000", window, cx);
+            }
+            "Close Browser" => {
+                self.close_browser();
             }
             "Apply Layout..." => {
                 self.open_template_picker();
@@ -1158,8 +1188,9 @@ impl GpuiShellView {
 
         // Check if file exists (try relative to pane CWD, then absolute)
         let pane_cwd = self.resolve_active_cwd();
-        let resolved = if std::path::Path::new(&path).is_absolute() && std::path::Path::new(&path).exists() {
-            path.clone()
+        let converted = self.maybe_convert_wsl_path(&path);
+        let resolved = if std::path::Path::new(&converted).is_absolute() && std::path::Path::new(&converted).exists() {
+            converted
         } else if let Some(ref cwd) = pane_cwd {
             let full = std::path::PathBuf::from(cwd).join(&path);
             if full.exists() {
@@ -1255,9 +1286,142 @@ impl GpuiShellView {
         self.preview_state = crate::gpui_preview::PreviewState::load(&full_path);
     }
 
+    // ─── Browser Pane ────────────────────────────────────────────
+
+    /// Open a browser tab in the active pane (limux-style).
+    /// WebView2 creation is deferred via cx.spawn to avoid RefCell re-borrow.
+    pub(crate) fn open_browser(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_component::input::{InputState, InputEvent};
+        use crate::gpui_browser::{BrowserPaneState, BrowserTabEntry};
+
+        let url = if url.is_empty() { "http://localhost:3000" } else { url };
+        let raw_handle = match self.cached_window_handle {
+            Some(h) => h,
+            None => {
+                eprintln!("[amux-browser] no cached window handle yet");
+                return;
+            }
+        };
+
+        // Assign a unique browser_id
+        let browser_id = self.next_browser_id;
+        self.next_browser_id += 1;
+
+        // Add browser tab to the active pane
+        let active_pid = self.terminal_manager().active_pane_id().cloned();
+        if let Some(ref pid) = active_pid {
+            if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
+                pane.add_browser_tab(url, browser_id);
+            }
+        }
+
+        // Create URL bar Input entity
+        let url_owned = url.to_string();
+        let url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(url_owned)
+                .placeholder("Enter URL and press Enter...")
+        });
+
+        // Subscribe: Enter navigates
+        let bid = browser_id;
+        cx.subscribe(&url_input, move |this: &mut GpuiShellView, input_entity, event: &InputEvent, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    let url = input_entity.read(cx).value().to_string();
+                    if url.is_empty() { return; }
+                    let url = if !url.contains("://") {
+                        if url.starts_with("localhost") || url.contains(':') {
+                            format!("http://{}", url)
+                        } else {
+                            format!("https://{}", url)
+                        }
+                    } else { url };
+                    if let Some(entry) = this.browser_tabs.get_mut(&bid) {
+                        entry.browser.navigate(&url);
+                    }
+                    this.restore_terminal_focus = true;
+                    cx.notify();
+                }
+                InputEvent::Blur => { cx.notify(); }
+                _ => {}
+            }
+        }).detach();
+
+        let bounds_cell = std::rc::Rc::new(std::cell::Cell::new(None));
+
+        // Store the browser tab entry
+        self.browser_tabs.insert(browser_id, BrowserTabEntry {
+            browser: BrowserPaneState::new(url),
+            url_input,
+            bounds_cell: bounds_cell.clone(),
+        });
+
+        // Defer WebView2 creation
+        cx.spawn(async move |this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(50)).await;
+            let _ = this.update(cx, |this: &mut GpuiShellView, cx| {
+                if let Some(entry) = this.browser_tabs.get_mut(&bid) {
+                    if !entry.browser.is_initialized() {
+                        entry.browser.init_webview(raw_handle);
+                        if let Some(bounds) = entry.bounds_cell.get() {
+                            entry.browser.sync_bounds(bounds);
+                        }
+                        entry.browser.focus_parent();
+                    }
+                }
+                this.restore_terminal_focus = true;
+                cx.notify();
+            });
+        }).detach();
+
+        cx.notify();
+    }
+
+    /// Close the browser tab that is active in the current pane.
+    pub(crate) fn close_browser(&mut self) {
+        // Find the active pane's active tab — if it's a browser, close it
+        let active_pid = self.terminal_manager().active_pane_id().cloned();
+        if let Some(ref pid) = active_pid {
+            let browser_id = self.terminal_manager().get_pane(pid)
+                .and_then(|p| p.active_tab_kind())
+                .and_then(|k| match k {
+                    amux_platform::terminal::manager::TabKind::Browser { browser_id, .. } => Some(*browser_id),
+                    _ => None,
+                });
+            if let Some(bid) = browser_id {
+                self.browser_tabs.remove(&bid);
+                // Close the tab in the pane
+                if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
+                    let idx = pane.active_tab;
+                    pane.close_tab(idx);
+                }
+            }
+        }
+        self.restore_terminal_focus = true;
+    }
+
+    /// Get the active browser tab entry (if the active pane's active tab is a browser).
+    pub(crate) fn active_browser_entry(&self) -> Option<(u64, &crate::gpui_browser::BrowserTabEntry)> {
+        let pid = self.terminal_manager().active_pane_id()?;
+        let pane = self.terminal_manager().get_pane(pid)?;
+        match pane.active_tab_kind()? {
+            amux_platform::terminal::manager::TabKind::Browser { browser_id, .. } => {
+                self.browser_tabs.get(browser_id).map(|e| (*browser_id, e))
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if any browser tab exists and is visible (active in its pane).
+    pub(crate) fn has_visible_browser(&self) -> bool {
+        self.active_browser_entry().is_some()
+    }
+
+
     /// Check if the current terminal input line is an `amux` command.
     /// Returns Some(true) if intercepted, Some(false) if not an amux command, None if can't read.
-    fn try_intercept_amux_command(&mut self) -> Option<bool> {
+    fn try_intercept_amux_command(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<bool> {
         // Read the cursor line — this is always the line the user just typed on,
         // regardless of screen position or leftover content below.
         let last_line = self.terminal_manager().active_terminal_ref()
@@ -1293,12 +1457,17 @@ impl GpuiShellView {
                 self.open_file_picker_with_cwd(prompt_cwd);
                 Some(true)
             }
+            Some("browser") | Some("web") => {
+                let url = parts.get(2).map(|s| s.trim()).unwrap_or("http://localhost:3000");
+                self.open_browser(url, window, cx);
+                Some(true)
+            }
             _ => Some(false),
         }
     }
 
     /// Handle key input for the terminal
-    pub fn handle_terminal_input(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool) {
+    pub fn handle_terminal_input(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Reset cursor blink on any terminal input
         self.cursor_blink_frame = 0;
         use amux_platform::terminal::keys;
@@ -1337,7 +1506,7 @@ impl GpuiShellView {
         
         // Intercept `amux` commands on Enter before sending to PTY
         if normalized_key == "Enter" && !ctrl && !alt {
-            if let Some(handled) = self.try_intercept_amux_command() {
+            if let Some(handled) = self.try_intercept_amux_command(window, cx) {
                 if handled {
                     // Send Enter to PTY so the shell gets a blank line (command was "eaten")
                     // Then send Ctrl+C to cancel the partially typed command
@@ -1469,10 +1638,63 @@ fn expand_tilde(path: &str) -> String {
 #[cfg(feature = "gpui")]
 impl Render for GpuiShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Ensure we have keyboard focus
-        if !self.focus_handle.is_focused(window) {
+        // Focus management.
+        // When the browser is open, trust GPUI's own focus system:
+        // - Input's track_focus + prevent_default handles URL bar focus correctly
+        // - Root's track_focus handles terminal focus on clicks outside Input
+        // Only use explicit flags for specific transitions (Enter navigate, close browser).
+        if self.restore_terminal_focus {
+            self.restore_terminal_focus = false;
             self.focus_handle.focus(window, cx);
+            // Reclaim OS focus from any active browser WebView2
+            if let Some((_, entry)) = self.active_browser_entry() {
+                entry.browser.focus_parent();
+            }
+        } else if self.has_visible_browser() {
+            // Browser is open AND visible — do NOT aggressively grab focus.
+            // WebView2 is a child HWND that takes OS focus on click, which may
+            // cause GPUI to clear its internal focus state. If we force-focus root
+            // here every frame, we'd fight WebView2 and break the URL Input.
+            // Focus is managed entirely by click events:
+            //   - Click terminal  → root's track_focus + focus_parent()
+            //   - Click URL Input → Input's track_focus (with prevent_default)
+            //   - Click WebView2  → WebView2 gets OS focus, GPUI does nothing
+        } else {
+            // No browser — safe to ensure terminal always has focus.
+            if !self.focus_handle.is_focused(window) {
+                self.focus_handle.focus(window, cx);
+            }
         }
+
+        // Sync URL bar when navigation changed the page address.
+        // Only update when the Input is NOT focused (don't overwrite user's editing).
+        if let Some(url) = self.pending_url_bar_update.take() {
+            let child_input_focused = self.active_browser_entry()
+                .map(|(_, e)| {
+                    use gpui::Focusable;
+                    e.url_input.read(cx).focus_handle(cx).is_focused(window)
+                })
+                .unwrap_or(false);
+            if child_input_focused {
+                self.pending_url_bar_update = Some(url);
+            } else if let Some((_, entry)) = self.active_browser_entry() {
+                let input = entry.url_input.clone();
+                input.update(cx, |state, cx| {
+                    state.set_value(url, window, cx);
+                });
+            }
+        }
+
+        // Cache native window handle on first render (needed for WebView2 creation later)
+        if self.cached_window_handle.is_none() {
+            use raw_window_handle::HasWindowHandle;
+            if let Ok(handle) = window.window_handle() {
+                self.cached_window_handle = Some(handle.as_raw());
+            }
+        }
+
+        // Browser bounds sync is done in the 60fps timer, not here in render,
+        // to avoid timing issues with canvas prepaint.
 
         let sidebar_visible = !self.sidebar_state.collapsed;
         let workspaces = self.model.workspace_items.clone();
@@ -1485,7 +1707,7 @@ impl Render for GpuiShellView {
         let cell_h = metrics.height.max(1.0);
 
         // Resize terminals — skip during drag to avoid content loss
-        if self.resize_drag.is_none() && self.sidebar_drag_start.is_none() && self.preview_drag_start.is_none() {
+        if self.resize_drag.is_none() && self.sidebar_drag_start.is_none() && self.preview_drag_start.is_none() && self.browser_drag_start.is_none() {
             let sidebar_w = self.sidebar_width();
             let vp = window.viewport_size();
             let content_w = vp.width.as_f32() - sidebar_w;
@@ -1505,16 +1727,16 @@ impl Render for GpuiShellView {
 
 
         
-        // Register IME input handler for Chinese/Japanese/Korean input
+        // Always register our IME input handler. When the browser URL Input has
+        // focus, our handler detects this and returns early (letting the platform
+        // deliver text to the focused Input's own handler via its paint-phase
+        // handle_input call which runs AFTER ours and takes precedence).
         let view_entity = cx.entity().clone();
         let focus_for_ime = self.focus_handle.clone();
 
         // Main layout - limux/mori style dark theme
         div()
             .track_focus(&self.focus_handle)
-            // Register IME handler with a 1x1 canvas pushed off-screen.
-            // Using 0x0 can still cause Windows to draw a system caret at the
-            // canvas origin; moving it off-screen avoids that artifact.
             .child(gpui::canvas(
                 move |bounds, _window, _cx| bounds,
                 move |bounds, _, window, cx| {
@@ -1547,6 +1769,16 @@ impl Render for GpuiShellView {
                 if event.position.x.as_f32() < sidebar_w {
                     return;
                 }
+                // If any browser tab exists, reclaim OS focus from WebView2 on every
+                // click in the GPUI area (terminal, URL bar, etc.). WebView2 is a
+                // child HWND that steals OS keyboard focus; this ensures GPUI gets
+                // keyboard events after clicking anywhere in our window.
+                for entry in this.browser_tabs.values() {
+                    if entry.browser.is_initialized() {
+                        entry.browser.focus_parent();
+                        break; // one call is enough
+                    }
+                }
                 // Click outside sidebar: dismiss any active rename/search
                 if this.renaming_workspace.is_some() {
                     this.renaming_workspace = None;
@@ -1559,8 +1791,9 @@ impl Render for GpuiShellView {
                 let (mouse_mode, _) = this.active_term_mouse_mode();
                 let (col, row) = this.pixel_to_term_cell(event.position);
 
-                // Ctrl+Click: try to preview file path under cursor
-                if event.modifiers.control && !mouse_mode {
+                // Ctrl+Click: try to preview file path under cursor.
+                // Always takes priority, even when mouse mode is on (e.g. Claude Code).
+                if event.modifiers.control {
                     if this.try_preview_path_at(col, row) {
                         cx.notify();
                         return;
@@ -1602,13 +1835,14 @@ impl Render for GpuiShellView {
                 }
                 // Handle preview panel resize drag (drag left = wider, drag right = narrower)
                 if let Some((start_x, start_w)) = this.preview_drag_start {
-                    let delta = start_x - event.position.x.as_f32(); // reversed: drag left increases width
+                    let delta = start_x - event.position.x.as_f32();
                     if let Some(ref mut state) = this.preview_state {
                         state.width = (start_w + delta).clamp(250.0, 900.0);
                     }
                     cx.notify();
                     return;
                 }
+                // (Browser panel resize drag removed — browser is now a pane tab)
                 // Handle split resize drag
                 if let Some(ref drag) = this.resize_drag.clone() {
                     let current_pos = if drag.is_horizontal {
@@ -1663,6 +1897,7 @@ impl Render for GpuiShellView {
                 this.resize_drag = None;
                 this.sidebar_drag_start = None;
                 this.preview_drag_start = None;
+                this.browser_drag_start = None;
                 cx.notify();
             }))
             // Mouse: right button up — forward release to PTY
@@ -2084,6 +2319,7 @@ impl Render for GpuiShellView {
                                         .child(crate::gpui_preview::render_preview_panel(preview, cx))
                                 )
                             })
+                            // (Browser is now rendered inside pane tabs, not as a separate column)
                     ),
             )
             // Status bar
@@ -2270,10 +2506,19 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
     use amux_ui::GpuiRenderer;
     use smol::Timer;
 
+    // Required for WebView2 to render correctly inside GPUI's DirectComposition window.
+    #[cfg(target_os = "windows")]
+    unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true"); }
+
     let mut app = app.clone();
     let model = app.render_with(&GpuiRenderer);
 
     application().run(move |cx: &mut App| {
+        // Initialize gpui-component (registers Input keybindings, theme, etc.)
+        gpui_component::init(cx);
+        // Set dark theme to match Amux's Tomorrow Night palette
+        gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
+
         let model = model.clone();
         let app = app.clone();
         let config = config.clone();
@@ -2288,8 +2533,8 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
             window_min_size: Some(gpui::Size { width: px(480.0), height: px(320.0) }),
             ..Default::default()
         };
-        let window_result = cx.open_window(window_opts, |_, cx| {
-            cx.new(|cx| {
+        let window_result = cx.open_window(window_opts, |window, cx| {
+            let view = cx.new(|cx| {
                 // Start a ~60fps polling timer to drain PTY output into the emulator
                 cx.spawn(async move |this, cx| {
                     loop {
@@ -2308,6 +2553,19 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                         any_dirty = true;
                                         break 'outer;
                                     }
+                                }
+                            }
+
+                            // Sync browser WebView2 bounds and process pending navigations
+                            // for all browser tabs.
+                            for entry in this.browser_tabs.values_mut() {
+                                if let Some(bounds) = entry.bounds_cell.get() {
+                                    entry.browser.sync_bounds(bounds);
+                                }
+                                entry.browser.process_pending_nav();
+                                if let Some(url) = entry.browser.take_current_url() {
+                                    this.pending_url_bar_update = Some(url);
+                                    cx.notify();
                                 }
                             }
 
@@ -2389,7 +2647,9 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                 .detach();
 
                 GpuiShellView::new(app, model, config, cx)
-            })
+            });
+            // Wrap in gpui-component Root (required for Input component)
+            cx.new(|cx| gpui_component::Root::new(view, window, cx))
         });
         
         match window_result {

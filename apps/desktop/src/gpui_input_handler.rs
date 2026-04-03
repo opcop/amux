@@ -40,6 +40,14 @@ impl gpui::EntityInputHandler for GpuiShellView {
     ) {
         if text.is_empty() { return; }
 
+        // If browser URL Input is focused, don't intercept text
+        if let Some((_, entry)) = self.active_browser_entry() {
+            use gpui::Focusable;
+            if entry.url_input.read(cx).focus_handle(cx).is_focused(_window) {
+                return;
+            }
+        }
+
         // If renaming workspace, send text to rename field
         if let Some((_, ref mut rename_text)) = self.renaming_workspace {
             rename_text.push_str(text);
@@ -133,9 +141,24 @@ impl GpuiShellView {
     pub(crate) fn on_global_key_down(
         &mut self,
         event: &gpui::KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // If a gpui-component Input has focus, let it handle keys.
+        // Only intercept Escape (return focus to terminal).
+        if let Some((_, entry)) = self.active_browser_entry() {
+            use gpui::Focusable;
+            let input_focused = entry.url_input.read(cx).focus_handle(cx).is_focused(window);
+            if input_focused {
+                if event.keystroke.key == "escape" {
+                    self.focus_handle.focus(window, cx);
+                    entry.browser.focus_parent();
+                    cx.notify();
+                }
+                return;
+            }
+        }
+
         let keystroke = &event.keystroke;
         let ctrl = keystroke.modifiers.control;
         let shift = keystroke.modifiers.shift;
@@ -167,6 +190,16 @@ impl GpuiShellView {
                 return;
             }
         }
+
+        // F12: toggle inline DevTools panel inside the browser
+        if keystr == "f12" {
+            if let Some((_, entry)) = self.active_browser_entry() {
+                entry.browser.open_devtools();
+                cx.notify();
+                return;
+            }
+        }
+
 
         // Close preview panel on Escape
         if keystr == "escape" && self.preview_state.is_some() {
@@ -521,6 +554,12 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
+                "ctrl+shift+b" => {
+                    // Open a new browser tab in the active pane
+                    self.open_browser("", window, cx);
+                    cx.notify();
+                    return;
+                }
                 "ctrl+shift+p" => {
                     let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
                     self.refresh_model();
@@ -654,7 +693,7 @@ impl GpuiShellView {
                 }
                 // All other Ctrl+key → forward to PTY (readline: Ctrl+A/E/B/F/D/U/K/W/P/N/etc.)
                 _ => {
-                    self.handle_terminal_input(key, ctrl, shift, alt);
+                    self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
                     cx.notify();
                     return;
                 }
@@ -663,7 +702,7 @@ impl GpuiShellView {
 
         // Alt+key → forward to PTY (readline word navigation: Alt+B/F/D, Alt+Backspace, etc.)
         if alt && !ctrl {
-            self.handle_terminal_input(key, ctrl, shift, alt);
+            self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
             cx.notify();
             return;
         }
@@ -671,7 +710,7 @@ impl GpuiShellView {
         // Terminal special keys (non-modifier or with any modifier)
         match keystr.as_str() {
             "enter" | "tab" | "backspace" | "escape" => {
-                self.handle_terminal_input(key, ctrl, shift, alt);
+                self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
                 cx.notify();
                 return;
             }
@@ -683,7 +722,7 @@ impl GpuiShellView {
                 || s.starts_with("f11") || s.starts_with("f12") || s.starts_with("page")
                 || s.starts_with("home") || s.starts_with("end") || s.starts_with("insert")
                 || s.starts_with("delete") => {
-                self.handle_terminal_input(key, ctrl, shift, alt);
+                self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
                 cx.notify();
                 return;
             }

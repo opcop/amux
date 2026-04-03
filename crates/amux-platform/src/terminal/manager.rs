@@ -88,8 +88,8 @@ pub enum AgentKind {
 pub enum TabKind {
     /// Terminal emulator (default)
     Terminal,
-    /// Embedded browser (WebView2)
-    Browser { url: String },
+    /// Embedded browser (WebView2). `browser_id` links to desktop-layer state.
+    Browser { url: String, #[serde(default)] browser_id: u64 },
     /// File preview (markdown, syntax highlight)
     Preview { path: String },
 }
@@ -209,10 +209,11 @@ impl TerminalPane {
         self.add_tab_with_kind(title, TabKind::Terminal)
     }
 
-    /// Add a new browser tab to this pane and make it active
-    pub fn add_browser_tab(&mut self, url: &str) -> usize {
+    /// Add a new browser tab to this pane and make it active.
+    /// `browser_id` is an opaque ID linking to desktop-layer WebView2 state.
+    pub fn add_browser_tab(&mut self, url: &str, browser_id: u64) -> usize {
         let title = if url.is_empty() { "Browser".to_string() } else { url.to_string() };
-        self.add_tab_with_kind(title, TabKind::Browser { url: url.to_string() })
+        self.add_tab_with_kind(title, TabKind::Browser { url: url.to_string(), browser_id })
     }
 
     /// Add a new preview tab to this pane and make it active
@@ -282,7 +283,7 @@ impl TerminalPane {
                                 .and_then(|term| term.title())
                                 .unwrap_or_else(|| t.title.clone())
                         }
-                        TabKind::Browser { url } => {
+                        TabKind::Browser { url, .. } => {
                             if t.title.is_empty() || t.title == "Browser" {
                                 // Shorten URL for display
                                 url.replace("https://", "").replace("http://", "")
