@@ -596,11 +596,6 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
-                "ctrl+p" => {
-                    self.open_file_picker();
-                    cx.notify();
-                    return;
-                }
                 _ => {}
             }
         }

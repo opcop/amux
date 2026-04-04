@@ -77,8 +77,24 @@ impl PreviewState {
         // Guard: check file size before reading (skip files > 2MB)
         let metadata = std::fs::metadata(file_path).ok()?;
         if metadata.len() > 2 * 1024 * 1024 {
-            eprintln!("[amux-preview] skipping large file ({} bytes): {}", metadata.len(), file_path);
-            return None;
+            let file_name = std::path::Path::new(file_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| file_path.to_string());
+            return Some(Self {
+                file_path: file_path.to_string(),
+                file_name,
+                elements: vec![PreviewElement::Paragraph {
+                    spans: vec![TextSpan {
+                        text: format!("File too large to preview ({:.1} MB)", metadata.len() as f64 / 1024.0 / 1024.0),
+                        bold: false,
+                        italic: true,
+                        code: false,
+                        link_url: None,
+                    }],
+                }],
+                width: 680.0,
+            });
         }
 
         let content = std::fs::read_to_string(file_path).ok()?;
@@ -193,7 +209,7 @@ fn parse_markdown(content: &str) -> Vec<PreviewElement> {
                 Tag::CodeBlock(kind) => {
                     in_code_block = true;
                     code_block_lang = match kind {
-                        CodeBlockKind::Fenced(lang) => lang.to_string(),
+                        CodeBlockKind::Fenced(lang) => lang.to_lowercase(),
                         CodeBlockKind::Indented => String::new(),
                     };
                     code_block_content.clear();

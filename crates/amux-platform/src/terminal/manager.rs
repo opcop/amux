@@ -1260,22 +1260,12 @@ impl TerminalManager {
         self.panes.values().map(|p| p.tab_count()).sum()
     }
 
-    pub fn tab_titles(&self) -> Vec<(TabId, String, bool)> {
-        vec![]
-    }
-
     fn first_pane(layout: &PaneLayout) -> Option<PaneId> {
         match layout {
             PaneLayout::Single(id) => Some(id.clone()),
             PaneLayout::Horizontal { left, .. } => Self::first_pane(left),
             PaneLayout::Vertical { top, .. } => Self::first_pane(top),
         }
-    }
-
-    // === Polling (no longer needed — alacritty has its own event loop) ===
-
-    pub fn poll_all(&mut self) -> bool {
-        false
     }
 
     // === Layout persistence ===
