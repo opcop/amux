@@ -846,7 +846,11 @@ impl TerminalManager {
         self.panes.insert(new_pane_id.clone(), new_pane);
 
         let active = self.active_pane.clone();
-        Self::split_in_layout(&mut self.layout, &active, &new_pane_id, direction);
+        if !Self::split_in_layout(&mut self.layout, &active, &new_pane_id, direction) {
+            eprintln!("[amux] split_in_layout failed: active pane {:?} not found in layout", active);
+            self.panes.remove(&new_pane_id);
+            return;
+        }
         self.active_pane = new_pane_id;
     }
 
@@ -975,8 +979,11 @@ impl TerminalManager {
         // If source pane is now empty, remove it from layout
         let source_empty = self.panes.get(source_pane).map_or(true, |p| p.tabs.is_empty());
         if source_empty {
-            Self::remove_from_layout(&mut self.layout, source_pane);
-            self.panes.remove(source_pane);
+            if Self::remove_from_layout(&mut self.layout, source_pane) {
+                self.panes.remove(source_pane);
+            } else {
+                eprintln!("[amux] remove_from_layout failed in move_tab_to_pane: source pane {:?} not found in layout", source_pane);
+            }
             // If the closed pane was active, switch to target
             if &self.active_pane == source_pane {
                 self.active_pane = target_pane.clone();
@@ -1295,7 +1302,10 @@ impl TerminalManager {
             next_pane_num: self.next_pane_num,
             pane_states: Some(pane_states),
         };
-        serde_json::to_string(&state).unwrap_or_default()
+        serde_json::to_string(&state).unwrap_or_else(|e| {
+            eprintln!("[amux] save_layout serialization failed: {}", e);
+            String::new()
+        })
     }
 
     /// Ensure all pane IDs in the layout have corresponding pane entries.

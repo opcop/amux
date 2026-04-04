@@ -385,6 +385,8 @@ impl GpuiShellView {
     /// `button`: 0=left, 1=middle, 2=right, 64=scroll_up, 65=scroll_down
     /// `pressed`: true for press (M), false for release (m)
     fn send_mouse_event(&mut self, button: u8, col: usize, row: usize, pressed: bool) {
+        let col = col.min(223);
+        let row = row.min(223);
         let cx_1 = col + 1;
         let cy_1 = row + 1;
         let (_, sgr_mode) = self.active_term_mouse_mode();

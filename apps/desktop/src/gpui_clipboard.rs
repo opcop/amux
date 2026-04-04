@@ -85,7 +85,7 @@ impl GpuiShellView {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis();
 
         // BMP → convert to PNG; all other formats save directly
         if matches!(image.format, gpui::ImageFormat::Bmp) {
