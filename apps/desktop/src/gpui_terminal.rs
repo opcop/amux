@@ -696,6 +696,7 @@ fn prepaint_terminal(
     // Fallback: grid-aligned position.
     let mut cursor_shaped_x = px(data.cursor_col as f32 * cell_w);
     let mut cursor_x_found = false;
+    let mut narrow_text = String::new();
 
     for row in 0..data.rows {
         let is_cursor_row = data.cursor_visible && row == data.cursor_row;
@@ -813,7 +814,7 @@ fn prepaint_terminal(
             let strikethrough = cell.strikethrough;
             let hidden = cell.hidden;
             let mut narrow_start = col;
-            let mut narrow_text = String::new();
+            narrow_text.clear();
             let mut has_visible = false; // track if run has non-space chars
 
             // Helper: build TextRun with current style

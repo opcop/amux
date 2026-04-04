@@ -2605,11 +2605,11 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                             // that is the active tab in its pane (regardless of which pane
                             // has focus). This way the user can see the browser while working
                             // in a different terminal pane.
-                            let mut visible_bids = std::collections::HashSet::new();
+                            let mut visible_bids: Vec<u64> = Vec::new();
                             for tm in this.workspace_terminals.values() {
                                 for pane in tm.all_panes() {
                                     if let Some(amux_platform::terminal::manager::TabKind::Browser { browser_id, .. }) = pane.active_tab_kind() {
-                                        visible_bids.insert(*browser_id);
+                                        visible_bids.push(*browser_id);
                                     }
                                 }
                             }

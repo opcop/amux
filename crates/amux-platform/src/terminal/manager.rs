@@ -227,12 +227,12 @@ impl TerminalPane {
 
     /// Add a tab with a specific kind
     fn add_tab_with_kind(&mut self, title: String, kind: TabKind) -> usize {
-        let terminal = if kind.is_terminal() { None } else { None };
+        // Terminal is spawned separately after tab creation
         self.tabs.push(PaneTab {
             title,
             custom_title: false,
             kind,
-            terminal,
+            terminal: None,
             has_activity: false,
             exited: false,
             cwd: None,
