@@ -960,7 +960,7 @@ fn prepaint_terminal(
                 let x = content_origin_x + px(start as f32 * cell_w);
                 let w = (ucol - start) as f32 * cell_w;
                 let baseline_y = y + px(cell_h - metrics.descent.abs().max(2.0));
-                push_underline(ul, ul_color, x, baseline_y, w, &mut underline_rects);
+                push_underline(ul, ul_color, x, baseline_y, w, cell_w, &mut underline_rects);
             }
         }
     }
@@ -998,7 +998,7 @@ fn prepaint_terminal(
     }
 
     // ── Phase 4: Scrollbar (only visible when scrolled away from bottom) ──
-    let mut scrollbar_rects = Vec::new();
+    let mut scrollbar_rects = Vec::with_capacity(2);
     {
         let (offset, history, visible) = data.scroll_info;
         if history > 0 && offset > 0 {
@@ -1226,7 +1226,7 @@ fn indexed_to_rgba(idx: u8, theme: &TerminalTheme) -> Rgba {
 // ─── Special Character Rendering ────────────────────────────────
 
 /// Push underline rectangles for a span of underlined text.
-/// Renders Single, Double, Dotted, and Dashed as quads. Curly uses GPUI wavy fallback.
+/// Renders Single, Double, Curly (double-line approximation), Dotted, and Dashed as quads.
 #[cfg(feature = "gpui")]
 fn push_underline(
     kind: UnderlineKind,
@@ -1234,14 +1234,27 @@ fn push_underline(
     x: Pixels,
     y: Pixels,
     w: f32,
+    cell_w: f32,
     rects: &mut Vec<PaintRect>,
 ) {
     match kind {
         UnderlineKind::None => {}
-        UnderlineKind::Single | UnderlineKind::Curly => {
-            // Single line (curly would need wavy path — approximate as single for now)
+        UnderlineKind::Single => {
             rects.push(PaintRect {
                 origin: point(x, y),
+                size: size(px(w), px(1.0)),
+                color,
+            });
+        }
+        UnderlineKind::Curly => {
+            // Approximate curly with double line (visually distinct from single)
+            rects.push(PaintRect {
+                origin: point(x, y),
+                size: size(px(w), px(1.0)),
+                color,
+            });
+            rects.push(PaintRect {
+                origin: point(x, y + px(2.0)),
                 size: size(px(w), px(1.0)),
                 color,
             });
@@ -1260,7 +1273,8 @@ fn push_underline(
             });
         }
         UnderlineKind::Dotted => {
-            // Dots: 1px on, 2px off
+            // Dots: spacing proportional to cell width
+            let dot_spacing = (cell_w * 0.4).max(3.0);
             let mut dx = 0.0_f32;
             while dx < w {
                 let dot_w = 1.0_f32.min(w - dx);
@@ -1269,20 +1283,22 @@ fn push_underline(
                     size: size(px(dot_w), px(1.0)),
                     color,
                 });
-                dx += 3.0;
+                dx += dot_spacing;
             }
         }
         UnderlineKind::Dashed => {
-            // Dashes: 4px on, 2px off
+            // Dashes: proportional to cell width
+            let dash_on = (cell_w * 0.6).max(4.0);
+            let dash_off = (cell_w * 0.3).max(2.0);
             let mut dx = 0.0_f32;
             while dx < w {
-                let dash_w = 4.0_f32.min(w - dx);
+                let dash_w = dash_on.min(w - dx);
                 rects.push(PaintRect {
                     origin: point(x + px(dx), y),
                     size: size(px(dash_w), px(1.0)),
                     color,
                 });
-                dx += 6.0;
+                dx += dash_on + dash_off;
             }
         }
     }

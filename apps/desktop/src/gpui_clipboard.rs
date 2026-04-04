@@ -50,8 +50,9 @@ impl GpuiShellView {
                         // Detect which AI tool is running and format accordingly
                         let formatted = self.format_image_path_for_tool(&path);
                         self.send_paste_text(&formatted);
+                        return;
                     }
-                    return;
+                    // Image save failed — fall through to text paste
                 }
             }
         }
