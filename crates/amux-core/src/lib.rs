@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod command;
 pub mod event;
 pub mod ids;

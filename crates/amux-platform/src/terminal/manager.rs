@@ -83,6 +83,16 @@ pub enum AgentKind {
     Copilot,
 }
 
+/// Information about a pane for the Bridge API
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaneInfo {
+    pub pane_id: PaneId,
+    pub tab_title: String,
+    pub agent_kind: Option<String>,
+    pub agent_status: Option<String>,
+    pub tab_kind: String, // "terminal", "browser", "preview"
+}
+
 /// The kind of content a tab holds.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TabKind {
@@ -1367,5 +1377,54 @@ impl TerminalManager {
             next_pane_num: state.next_pane_num,
             scrollback_lines: 10000, // overridden by caller with config value
         })
+    }
+
+    // ── Bridge API (Phase 1.1) ──────────────────────────────────────────
+
+    /// List all panes with metadata for the Bridge API.
+    pub fn pane_list(&self) -> Vec<PaneInfo> {
+        self.panes.iter().map(|(id, pane)| {
+            let tab = pane.tabs.get(pane.active_tab);
+            let tab_title = tab.map(|t| {
+                if t.custom_title {
+                    t.title.clone()
+                } else if let Some(ref term) = t.terminal {
+                    term.title().unwrap_or_else(|| t.title.clone())
+                } else {
+                    t.title.clone()
+                }
+            }).unwrap_or_default();
+            let agent_kind = tab.and_then(|t| t.agent_kind.as_ref().map(|k| format!("{:?}", k)));
+            let agent_status = tab.and_then(|t| t.agent_status.as_ref().map(|s| s.label().to_string()));
+            let tab_kind = tab.map(|t| match &t.kind {
+                TabKind::Terminal => "terminal",
+                TabKind::Browser { .. } => "browser",
+                TabKind::Preview { .. } => "preview",
+            }).unwrap_or("terminal").to_string();
+            PaneInfo {
+                pane_id: id.clone(),
+                tab_title,
+                agent_kind,
+                agent_status,
+                tab_kind,
+            }
+        }).collect()
+    }
+
+    /// Read the last N lines (capped at 200) from a pane's active terminal.
+    pub fn pane_read(&self, pane_id: &PaneId, lines: usize) -> Option<Vec<String>> {
+        let pane = self.panes.get(pane_id)?;
+        let tab = pane.tabs.get(pane.active_tab)?;
+        let term = tab.terminal.as_ref()?;
+        Some(term.last_lines(lines.min(200)))
+    }
+
+    /// Send text followed by a newline to a pane's active terminal.
+    pub fn pane_send_text(&mut self, target: &PaneId, text: &str) -> Result<(), String> {
+        let pane = self.panes.get_mut(target).ok_or_else(|| format!("pane not found: {}", target.0))?;
+        let term = pane.active_terminal().ok_or_else(|| "pane has no active terminal".to_string())?;
+        term.send_input(text.as_bytes());
+        term.send_input(b"\n");
+        Ok(())
     }
 }
