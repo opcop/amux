@@ -223,6 +223,20 @@ pub(crate) struct CapturedEnv {
 
 #[cfg(feature = "gpui")]
 impl GpuiShellView {
+    /// Returns the display name for the active workspace, falling back to the workspace ID.
+    fn workspace_name(&self) -> String {
+        self.model.active_workspace_name.clone()
+            .unwrap_or_else(|| self.active_workspace_id.clone())
+    }
+
+    /// Look up the agent kind for a given pane, defaulting to the provided fallback.
+    fn agent_kind_for_pane(&self, pane_id: &amux_platform::terminal::manager::PaneId, default: &str) -> String {
+        self.terminal_manager().pane_list().iter()
+            .find(|p| p.pane_id == *pane_id)
+            .and_then(|p| p.agent_kind.clone())
+            .unwrap_or_else(|| default.to_string())
+    }
+
     /// Create a new shell view with terminal manager
     pub fn new(app: DesktopApp, model: GpuiWindowModel, config: crate::gpui_config::AmuxConfig, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
@@ -666,8 +680,7 @@ impl GpuiShellView {
     pub(crate) fn apply_template(&mut self, template: &amux_platform::terminal::manager::LayoutTemplate) {
         let mut tm = TerminalManager::from_template(template);
         tm.set_scrollback(self.config.scrollback);
-        let ws_name = self.model.active_workspace_name
-            .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+        let ws_name = self.workspace_name();
         tm.set_workspace_name(&ws_name);
         self.workspace_terminals.insert(self.active_workspace_id.clone(), tm);
         // Spawn terminals in all panes
@@ -926,8 +939,7 @@ impl GpuiShellView {
 
         // Workspace startup commands
         {
-            let ws_name = self.model.active_workspace_name
-                .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+            let ws_name = self.workspace_name();
             let has_startup = Self::startup_file_path(&ws_name).exists();
             if has_startup {
                 items.push(ContextMenuItem::action("Run Startup", None, true));
@@ -1021,8 +1033,7 @@ impl GpuiShellView {
                 self.open_template_picker();
             }
             "Save Layout as Template" => {
-                let ws_name = self.model.active_workspace_name
-                    .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+                let ws_name = self.workspace_name();
                 self.save_current_as_template(&ws_name);
             }
             l if l.starts_with("Launch Claude")   => self.launch_vibe_tool_env("claude", l.contains("WSL")),
@@ -1573,14 +1584,10 @@ impl GpuiShellView {
                     let target = amux_platform::terminal::manager::PaneId(target_id_str.to_string());
 
                     // Build bridge message from current pane identity
-                    let ws_name = self.model.active_workspace_name
-                        .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+                    let ws_name = self.workspace_name();
                     let source_pane_id = self.terminal_manager().active_pane_id()
                         .cloned().unwrap_or_else(|| amux_platform::terminal::manager::PaneId("unknown".to_string()));
-                    let agent_kind = self.terminal_manager().pane_list().iter()
-                        .find(|p| p.pane_id == source_pane_id)
-                        .and_then(|p| p.agent_kind.clone())
-                        .unwrap_or_else(|| "user".to_string());
+                    let agent_kind = self.agent_kind_for_pane(&source_pane_id, "user");
 
                     let msg = amux_core::bridge::BridgeMessage {
                         workspace: ws_name,
@@ -1598,14 +1605,10 @@ impl GpuiShellView {
                 }
             }
             "id" => {
-                let ws_name = self.model.active_workspace_name
-                    .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+                let ws_name = self.workspace_name();
                 let pane_id = self.terminal_manager().active_pane_id()
                     .cloned().unwrap_or_else(|| amux_platform::terminal::manager::PaneId("unknown".to_string()));
-                let agent_kind = self.terminal_manager().pane_list().iter()
-                    .find(|p| p.pane_id == pane_id)
-                    .and_then(|p| p.agent_kind.clone())
-                    .unwrap_or_else(|| "none".to_string());
+                let agent_kind = self.agent_kind_for_pane(&pane_id, "none");
                 let output = format!("pane_id: {}\nworkspace: {}\nagent: {}", pane_id.0, ws_name, agent_kind);
                 self.echo_to_terminal(&output);
             }
@@ -2376,9 +2379,8 @@ impl Render for GpuiShellView {
                                                         .hover(|d| d.bg(rgb(0x252530)))
                                                         .child(div().text_xs().text_color(rgb(icon_color)).child(icon_c))
                                                         .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_sm().text_color(rgb(0xc5c8c6)).child(title_c))
-                                                        .when(!kind_c.is_empty(), |d| {
-                                                            let k = kind_c.clone();
-                                                            d.child(div().text_xs().text_color(rgb(0x585b70)).child(k))
+                                                        .when(!kind_c.is_empty(), move |d| {
+                                                            d.child(div().text_xs().text_color(rgb(0x585b70)).child(kind_c))
                                                         })
                                                         .child(div().text_xs().text_color(rgb(0x45475a)).child(pane_short))
                                                         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -2979,12 +2981,8 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                     for n in notifs {
                                         // Auto-expand sidebar when agent needs attention
                                         if matches!(n.new_status, amux_platform::terminal::manager::AgentStatus::Waiting | amux_platform::terminal::manager::AgentStatus::Error) {
-                                            if this.sidebar_state.collapsed {
-                                                this.sidebar_state.collapsed = false;
-                                            }
-                                            if this.sidebar_state.mode != crate::gpui_workspace_sidebar::SidebarMode::Agents {
-                                                this.sidebar_state.mode = crate::gpui_workspace_sidebar::SidebarMode::Agents;
-                                            }
+                                            this.sidebar_state.collapsed = false;
+                                            this.sidebar_state.mode = crate::gpui_workspace_sidebar::SidebarMode::Agents;
                                         }
                                         let msg = format!("{} {} — {}",
                                             n.new_status.icon(),

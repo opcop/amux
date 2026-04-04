@@ -9,6 +9,8 @@ pub struct BridgeMessage {
     pub text: String,
 }
 
+const ENVELOPE_PREFIX: &str = "[amux-bridge ";
+
 impl BridgeMessage {
     /// Format as the envelope string for terminal delivery.
     pub fn format(&self) -> String {
@@ -19,9 +21,9 @@ impl BridgeMessage {
     /// Parse an envelope string back into a BridgeMessage.
     pub fn parse(line: &str) -> Option<Self> {
         let line = line.trim();
-        if !line.starts_with("[amux-bridge ") { return None; }
+        if !line.starts_with(ENVELOPE_PREFIX) { return None; }
         let bracket_end = line.find(']')?;
-        let header = &line[13..bracket_end]; // after "[amux-bridge "
+        let header = &line[ENVELOPE_PREFIX.len()..bracket_end];
         let text = line[bracket_end + 1..].trim().to_string();
 
         let mut workspace = String::new();
