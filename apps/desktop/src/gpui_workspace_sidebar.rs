@@ -16,6 +16,27 @@ use amux_ui::GpuiWorkspaceItem;
 #[cfg(feature = "gpui")]
 use crate::gpui_components::action_button;
 
+/// Sidebar display mode
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug, PartialEq)]
+pub enum SidebarMode {
+    Workspaces,
+    Agents,
+}
+
+/// Item representing an agent in the sidebar
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub struct AgentSidebarItem {
+    pub pane_id: String,
+    pub tab_title: String,
+    pub agent_kind: Option<String>,
+    pub agent_status: Option<String>,
+    pub status_icon: String,
+    pub status_color: u32,
+    pub workspace_name: String,
+}
+
 /// State for the workspace sidebar
 #[cfg(feature = "gpui")]
 #[derive(Clone, Debug)]
@@ -24,6 +45,8 @@ pub struct WorkspaceSidebarState {
     pub show_recent: bool,
     /// User-resizable sidebar width (pixels). Clamped to [120, 480].
     pub width: f32,
+    /// Current sidebar display mode.
+    pub mode: SidebarMode,
 }
 
 #[cfg(feature = "gpui")]
@@ -33,6 +56,7 @@ impl Default for WorkspaceSidebarState {
             collapsed: false,
             show_recent: true,
             width: 220.0,
+            mode: SidebarMode::Workspaces,
         }
     }
 }
@@ -490,4 +514,184 @@ pub fn render_workspace_targets() -> impl IntoElement {
                         .child("WSL"),
                 ),
         )
+}
+
+/// Agent status group for ordering in the sidebar.
+#[cfg(feature = "gpui")]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AgentGroup {
+    Attention, // waiting / error
+    Running,   // thinking
+    Completed, // done
+    Idle,      // no agent detected
+}
+
+#[cfg(feature = "gpui")]
+impl AgentGroup {
+    fn from_status(status: Option<&str>) -> Self {
+        match status {
+            Some("waiting") | Some("error") => AgentGroup::Attention,
+            Some("thinking...") => AgentGroup::Running,
+            Some("done") => AgentGroup::Completed,
+            _ => AgentGroup::Idle,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AgentGroup::Attention => "ATTENTION",
+            AgentGroup::Running   => "RUNNING",
+            AgentGroup::Completed => "COMPLETED",
+            AgentGroup::Idle      => "IDLE",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            AgentGroup::Attention => "!",
+            AgentGroup::Running   => "*",
+            AgentGroup::Completed => "+",
+            AgentGroup::Idle      => "-",
+        }
+    }
+
+    fn color(self) -> u32 {
+        match self {
+            AgentGroup::Attention => 0xf9e2af, // yellow
+            AgentGroup::Running   => 0x81a2be, // blue
+            AgentGroup::Completed => 0xb5bd68, // green
+            AgentGroup::Idle      => 0x969896, // gray
+        }
+    }
+}
+
+/// Render the agents sidebar content (grouped by status).
+/// Returns a list of `AnyElement` children to be placed inside the sidebar column.
+#[cfg(feature = "gpui")]
+pub fn render_agents_sidebar_content(agents: &[AgentSidebarItem]) -> Vec<AnyElement> {
+    // Group agents by status
+    let mut grouped: std::collections::BTreeMap<AgentGroup, Vec<&AgentSidebarItem>> =
+        std::collections::BTreeMap::new();
+    for agent in agents {
+        let group = AgentGroup::from_status(agent.agent_status.as_deref());
+        grouped.entry(group).or_default().push(agent);
+    }
+
+    let mut elements: Vec<AnyElement> = Vec::new();
+
+    if agents.is_empty() {
+        elements.push(
+            div()
+                .px_3()
+                .py_2()
+                .text_xs()
+                .text_color(rgb(0x969896))
+                .child("No panes in workspace")
+                .into_any_element(),
+        );
+        return elements;
+    }
+
+    for (group, items) in &grouped {
+        // Group header
+        elements.push(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px_3()
+                .pt(px(8.0))
+                .pb(px(4.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(group.color()))
+                        .font_weight(FontWeight::BOLD)
+                        .child(group.icon()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(group.color()))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(group.label()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x585b70))
+                        .child(format!("({})", items.len())),
+                )
+                .into_any_element(),
+        );
+
+        // Agent rows
+        for agent in items {
+            elements.push(render_agent_row(agent));
+        }
+    }
+
+    elements
+}
+
+/// Render a single agent row in the sidebar.
+/// The click handler must be wired externally via `on_click` on the parent
+/// because this function does not have access to `cx.listener()`.
+/// Instead, we return a plain div with an `id` based on pane_id.
+#[cfg(feature = "gpui")]
+fn render_agent_row(agent: &AgentSidebarItem) -> AnyElement {
+    let icon_color = agent.status_color;
+    let icon = agent.status_icon.clone();
+    let title = agent.tab_title.clone();
+    let pane_short = if agent.pane_id.len() > 8 {
+        agent.pane_id[agent.pane_id.len() - 6..].to_string()
+    } else {
+        agent.pane_id.clone()
+    };
+    let kind_label = agent.agent_kind.clone().unwrap_or_default();
+
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px_3()
+        .py(px(5.0))
+        .mx_1()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(0x252530)))
+        // Status icon
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(icon_color))
+                .child(icon),
+        )
+        // Title
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_sm()
+                .text_color(rgb(0xc5c8c6))
+                .child(title),
+        )
+        // Agent kind badge
+        .when(!kind_label.is_empty(), |d| {
+            d.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x585b70))
+                    .child(kind_label),
+            )
+        })
+        // Pane ID
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(0x45475a))
+                .child(pane_short),
+        )
+        .into_any_element()
 }

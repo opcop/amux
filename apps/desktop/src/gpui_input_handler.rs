@@ -552,6 +552,20 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
+                "ctrl+shift+a" => {
+                    // Toggle sidebar mode between Workspaces and Agents
+                    use crate::gpui_workspace_sidebar::SidebarMode;
+                    self.sidebar_state.mode = match self.sidebar_state.mode {
+                        SidebarMode::Workspaces => SidebarMode::Agents,
+                        SidebarMode::Agents => SidebarMode::Workspaces,
+                    };
+                    // Ensure sidebar is visible when toggling mode
+                    if self.sidebar_state.collapsed {
+                        self.sidebar_state.collapsed = false;
+                    }
+                    cx.notify();
+                    return;
+                }
                 "ctrl+shift+b" => {
                     // Open a new browser tab in the active pane
                     self.open_browser("", window, cx);

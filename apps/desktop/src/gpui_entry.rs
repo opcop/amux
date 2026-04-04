@@ -12,7 +12,7 @@ use amux_platform::terminal::manager::{TerminalManager, SplitDirection};
 #[cfg(feature = "gpui")]
 use crate::gpui_status_bar::{render_status_bar, StatusBarData, AgentSummary};
 #[cfg(feature = "gpui")]
-use crate::gpui_workspace_sidebar::WorkspaceSidebarState;
+use crate::gpui_workspace_sidebar::{WorkspaceSidebarState, SidebarMode, AgentSidebarItem};
 #[cfg(feature = "gpui")]
 use crate::gpui_layout_renderer::{render_context_menu, render_layout, render_pane_picker, render_template_picker, render_agent_picker};
 
@@ -2171,8 +2171,11 @@ impl Render for GpuiShellView {
                                         .flex()
                                         .flex_col()
                                         .overflow_hidden()
-                                // Header: title + collapse button
-                                .child(
+                                // Header: mode tabs + collapse button
+                                .child({
+                                    let is_ws_mode = self.sidebar_state.mode == SidebarMode::Workspaces;
+                                    let ws_text_color = if is_ws_mode { rgb(0xc5c8c6) } else { rgb(0x585b70) };
+                                    let ag_text_color = if !is_ws_mode { rgb(0xc5c8c6) } else { rgb(0x585b70) };
                                     div()
                                         .flex()
                                         .justify_between()
@@ -2181,10 +2184,47 @@ impl Render for GpuiShellView {
                                         .py_2()
                                         .child(
                                             div()
-                                                .text_xs()
-                                                .text_color(rgb(0x969896))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child("WORKSPACES"),
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(2.0))
+                                                // Workspaces tab
+                                                .child(
+                                                    div()
+                                                        .id("sidebar-tab-ws")
+                                                        .px(px(6.0))
+                                                        .py(px(3.0))
+                                                        .rounded(px(3.0))
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(ws_text_color)
+                                                        .when(is_ws_mode, |d| d.border_b_2().border_color(rgb(0x81a2be)))
+                                                        .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                                                        .cursor_pointer()
+                                                        .child("WS")
+                                                        .on_click(cx.listener(|this, _e, _w, cx| {
+                                                            this.sidebar_state.mode = SidebarMode::Workspaces;
+                                                            cx.notify();
+                                                        })),
+                                                )
+                                                // Agents tab
+                                                .child(
+                                                    div()
+                                                        .id("sidebar-tab-agents")
+                                                        .px(px(6.0))
+                                                        .py(px(3.0))
+                                                        .rounded(px(3.0))
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(ag_text_color)
+                                                        .when(!is_ws_mode, |d| d.border_b_2().border_color(rgb(0x81a2be)))
+                                                        .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                                                        .cursor_pointer()
+                                                        .child("Agents")
+                                                        .on_click(cx.listener(|this, _e, _w, cx| {
+                                                            this.sidebar_state.mode = SidebarMode::Agents;
+                                                            cx.notify();
+                                                        })),
+                                                ),
                                         )
                                         .child(
                                             div()
@@ -2200,15 +2240,121 @@ impl Render for GpuiShellView {
                                                     this.sidebar_state.collapsed = true;
                                                     cx.notify();
                                                 })),
-                                        ),
-                                )
-                                // Workspace list
-                                .child(
-                                    div()
+                                        )
+                                })
+                                // Sidebar body: workspace list or agents view
+                                .child(if self.sidebar_state.mode == SidebarMode::Agents {
+                                    // Agents view: collect agent items from terminal manager
+                                    let ws_name = workspaces.iter().find(|w| w.is_active)
+                                        .map(|w| w.name.clone())
+                                        .unwrap_or_default();
+                                    let agent_items: Vec<AgentSidebarItem> = self.terminal_manager()
+                                        .pane_list()
+                                        .into_iter()
+                                        .map(|info| {
+                                            let (icon, color) = match info.agent_status.as_deref() {
+                                                Some("thinking...") => ("*".to_string(), 0x81a2beu32),
+                                                Some("waiting")     => ("!".to_string(), 0xf9e2af),
+                                                Some("done")        => ("+".to_string(), 0xb5bd68),
+                                                Some("error")       => ("!".to_string(), 0xf38ba8),
+                                                _                   => ("-".to_string(), 0x969896),
+                                            };
+                                            AgentSidebarItem {
+                                                pane_id: info.pane_id.0.clone(),
+                                                tab_title: info.tab_title,
+                                                agent_kind: info.agent_kind,
+                                                agent_status: info.agent_status,
+                                                status_icon: icon,
+                                                status_color: color,
+                                                workspace_name: ws_name.clone(),
+                                            }
+                                        })
+                                        .collect();
+                                    // Group agents by status and render with click handlers
+                                    let mut grouped: std::collections::BTreeMap<u8, Vec<&AgentSidebarItem>> =
+                                        std::collections::BTreeMap::new();
+                                    for agent in &agent_items {
+                                        let key = match agent.agent_status.as_deref() {
+                                            Some("waiting") | Some("error") => 0u8,
+                                            Some("thinking...") => 1,
+                                            Some("done") => 2,
+                                            _ => 3,
+                                        };
+                                        grouped.entry(key).or_default().push(agent);
+                                    }
+                                    let group_meta: [(u8, &str, &str, u32); 4] = [
+                                        (0, "!", "ATTENTION", 0xf9e2af),
+                                        (1, "*", "RUNNING",   0x81a2be),
+                                        (2, "+", "COMPLETED", 0xb5bd68),
+                                        (3, "-", "IDLE",      0x969896),
+                                    ];
+                                    let mut col = div()
                                         .flex_col()
                                         .flex_1()
-                                        .overflow_hidden()
-                                        .children(workspaces.iter().enumerate().map(|(ws_idx, item)| {
+                                        .overflow_hidden();
+                                    if agent_items.is_empty() {
+                                        col = col.child(
+                                            div()
+                                                .px_3().py_2()
+                                                .text_xs()
+                                                .text_color(rgb(0x969896))
+                                                .child("No panes in workspace"),
+                                        );
+                                    }
+                                    for (key, icon, label, color) in &group_meta {
+                                        if let Some(items) = grouped.get(key) {
+                                            // Group header
+                                            col = col.child(
+                                                div()
+                                                    .flex().items_center().gap(px(6.0))
+                                                    .px_3().pt(px(8.0)).pb(px(4.0))
+                                                    .child(div().text_xs().text_color(rgb(*color)).font_weight(FontWeight::BOLD).child(*icon))
+                                                    .child(div().text_xs().text_color(rgb(*color)).font_weight(FontWeight::SEMIBOLD).child(*label))
+                                                    .child(div().text_xs().text_color(rgb(0x585b70)).child(format!("({})", items.len()))),
+                                            );
+                                            for agent in items {
+                                                let pane_id_click = agent.pane_id.clone();
+                                                let icon_c = agent.status_icon.clone();
+                                                let icon_color = agent.status_color;
+                                                let title_c = agent.tab_title.clone();
+                                                let kind_c = agent.agent_kind.clone().unwrap_or_default();
+                                                let pane_short = if agent.pane_id.len() > 8 {
+                                                    agent.pane_id[agent.pane_id.len() - 6..].to_string()
+                                                } else {
+                                                    agent.pane_id.clone()
+                                                };
+                                                col = col.child(
+                                                    div()
+                                                        .id(gpui::ElementId::Name(format!("agent-{}", agent.pane_id).into()))
+                                                        .flex().items_center().gap(px(6.0))
+                                                        .px_3().py(px(5.0)).mx_1()
+                                                        .rounded(px(4.0))
+                                                        .cursor_pointer()
+                                                        .hover(|d| d.bg(rgb(0x252530)))
+                                                        .child(div().text_xs().text_color(rgb(icon_color)).child(icon_c))
+                                                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_sm().text_color(rgb(0xc5c8c6)).child(title_c))
+                                                        .when(!kind_c.is_empty(), |d| {
+                                                            let k = kind_c.clone();
+                                                            d.child(div().text_xs().text_color(rgb(0x585b70)).child(k))
+                                                        })
+                                                        .child(div().text_xs().text_color(rgb(0x45475a)).child(pane_short))
+                                                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                                                            let pid = amux_platform::terminal::manager::PaneId(pane_id_click.clone());
+                                                            this.terminal_manager_mut().set_active_pane(&pid);
+                                                            cx.notify();
+                                                        })),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    col.into_any_element()
+                                } else {
+                                    // Workspaces mode (original)
+                                    let mut ws_col = div()
+                                        .flex_col()
+                                        .flex_1()
+                                        .overflow_hidden();
+                                    for (ws_idx, item) in workspaces.iter().enumerate() {
                                             let is_active = item.is_active;
                                             let has_ws_activity = !is_active && self.workspace_terminals
                                                 .get(&item.id)
@@ -2228,6 +2374,7 @@ impl Render for GpuiShellView {
                                                 .map(|(id, _)| id == &item.id)
                                                 .unwrap_or(false);
 
+                                            ws_col = ws_col.child(
                                             div()
                                                 .id(gpui::ElementId::Name(format!("ws-{}", item.id).into()))
                                                 .group(format!("ws-group-{}", item.id))
@@ -2257,9 +2404,6 @@ impl Render for GpuiShellView {
                                                     this.reorder_workspace(drag.index, &ws_id_drop);
                                                     cx.notify();
                                                 }))
-                                                // Double-click: rename; single-click: switch workspace.
-                                                // Use on_mouse_down so double-click is detected BEFORE
-                                                // re-render invalidates the element's click tracking.
                                                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(
                                                     move |this, event: &gpui::MouseDownEvent, _window, cx| {
                                                         if event.click_count >= 2 {
@@ -2274,7 +2418,6 @@ impl Render for GpuiShellView {
                                                     }
                                                 ))
                                                 .child(if is_renaming {
-                                                    // Inline rename input
                                                     let rename_text = self.renaming_workspace.as_ref()
                                                         .map(|(_, t)| t.clone())
                                                         .unwrap_or_default();
@@ -2296,7 +2439,6 @@ impl Render for GpuiShellView {
                                                         .items_center()
                                                         .gap(px(6.0))
                                                         .flex_1()
-                                                        // Activity dot for inactive workspaces
                                                         .when(has_ws_activity, |d| {
                                                             d.child(
                                                                 div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
@@ -2313,7 +2455,6 @@ impl Render for GpuiShellView {
                                                                 .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
                                                                 .child(item.name.clone())
                                                         )
-                                                        // Delete button: only visible on hover, hidden if last workspace
                                                         .when(can_delete, |d| {
                                                             d.child(
                                                                 div()
@@ -2321,7 +2462,7 @@ impl Render for GpuiShellView {
                                                                     .px(px(3.0))
                                                                     .rounded(px(3.0))
                                                                     .text_xs()
-                                                                    .text_color(rgb(0x181818)) // invisible by default
+                                                                    .text_color(rgb(0x181818))
                                                                     .group_hover(&group_name, |d| {
                                                                         d.text_color(rgb(0x969896))
                                                                     })
@@ -2329,11 +2470,9 @@ impl Render for GpuiShellView {
                                                                     .child("✕")
                                                                     .on_click(cx.listener(move |this, _event, _window, cx| {
                                                                         let _ = this.app.run_command(&format!("workspace close {}", ws_id_del));
-                                                                        // Remove terminal manager for deleted workspace
                                                                         this.workspace_terminals.remove(&ws_id_del);
                                                                         this.workspace_order.retain(|id| id != &ws_id_del);
                                                                         this.refresh_model();
-                                                                        // Switch to another workspace if we deleted the active one
                                                                         if this.active_workspace_id == ws_id_del {
                                                                             if let Some(first) = this.model.workspace_items.first() {
                                                                                 let new_id = first.id.clone();
@@ -2346,38 +2485,39 @@ impl Render for GpuiShellView {
                                                         })
                                                         .into_any_element()
                                                 })
-                                        })),
-                                )
-                                // Bottom: + New Workspace
-                                .child(
-                                    div()
-                                        .id("sidebar-new-ws")
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .px_3()
-                                        .py_2()
-                                        .mx_1()
-                                        .mb_1()
-                                        .rounded(px(4.0))
-                                        .text_xs()
-                                        .text_color(rgb(0x969896))
-                                        .cursor_pointer()
-                                        .hover(|d| d.bg(rgb(0x252530)).text_color(rgb(0xc5c8c6)))
-                                        .child("+  New Workspace")
-                                        .on_click(cx.listener(|this, _event, _window, cx| {
-                                            let cwd = std::env::current_dir().unwrap_or_default();
-                                            let _ = this.app.dispatch(
-                                                amux_ui::UiAction::OpenWindowsWorkspace(cwd)
                                             );
-                                            this.refresh_model();
-                                            // Create terminal for the new workspace and switch to it
-                                            if let Some(new_ws) = this.model.workspace_items.iter().find(|w| w.is_active) {
-                                                this.switch_workspace_terminal(&new_ws.id.clone());
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
+                                    }
+                                    // Bottom: + New Workspace
+                                    ws_col = ws_col.child(
+                                        div()
+                                            .id("sidebar-new-ws")
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_3()
+                                            .py_2()
+                                            .mx_1()
+                                            .mb_1()
+                                            .rounded(px(4.0))
+                                            .text_xs()
+                                            .text_color(rgb(0x969896))
+                                            .cursor_pointer()
+                                            .hover(|d| d.bg(rgb(0x252530)).text_color(rgb(0xc5c8c6)))
+                                            .child("+  New Workspace")
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                let cwd = std::env::current_dir().unwrap_or_default();
+                                                let _ = this.app.dispatch(
+                                                    amux_ui::UiAction::OpenWindowsWorkspace(cwd)
+                                                );
+                                                this.refresh_model();
+                                                if let Some(new_ws) = this.model.workspace_items.iter().find(|w| w.is_active) {
+                                                    this.switch_workspace_terminal(&new_ws.id.clone());
+                                                }
+                                                cx.notify();
+                                            })),
+                                    );
+                                    ws_col.into_any_element()
+                                })
                                 ) // end sidebar content column
                                 // Resize handle (right edge)
                                 .child(
