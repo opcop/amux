@@ -1105,7 +1105,8 @@ impl GpuiShellView {
                     && (path.len() == 6 || path.as_bytes()[6] == b'/')
                 {
                     let rest = if path.len() > 6 { &path[6..] } else { "" };
-                    let win_path = format!("{}:{}", (drive_letter as char).to_uppercase().next().unwrap(), rest.replace('/', "\\"));
+                    let drive = (drive_letter as char).to_uppercase().next().unwrap_or('C');
+                    let win_path = format!("{}:{}", drive, rest.replace('/', "\\"));
                     return win_path;
                 }
             }
@@ -2337,26 +2338,26 @@ impl Render for GpuiShellView {
                                 let content_h = vp.height.as_f32() - status_bar_h;
                                 // Cursor blinks: visible for 30 frames, hidden for 30 frames (~500ms each at 60fps)
                                 let cursor_blink_on = (self.cursor_blink_frame % 60) < 30;
-                                // Compute pane bounds for mouse hit-testing
-                                self.pane_bounds.clear();
+                                // Compute pane bounds for mouse hit-testing.
+                                // Take ownership of pane_bounds to avoid the need for
+                                // unsafe pointer tricks — render_layout fills it, we put it back.
+                                let mut pane_bounds = std::mem::take(&mut self.pane_bounds);
+                                pane_bounds.clear();
                                 let origin_x = sidebar_w;
                                 let origin_y = 0.0_f32;
-                                // Clone layout + refs before passing pane_bounds mutably
                                 let zoomed = self.zoomed_pane.clone();
                                 let layout_cloned = self.terminal_manager_mut().active_layout().cloned();
                                 let renaming_tab = self.renaming_tab.clone();
-                                // Get the manager pointer before the mutable borrow of pane_bounds.
-                                // SAFETY: pane_bounds and workspace_terminals are disjoint fields.
-                                let pb = &mut self.pane_bounds as *mut std::collections::HashMap<String, (f32, f32, f32, f32)>;
-                                // Zoom mode: render only the zoomed pane at full size
-                                if let Some(zpid) = zoomed {
+                                let result = if let Some(zpid) = zoomed {
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, cx)
                                 } else if let Some(layout) = layout_cloned {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, unsafe { &mut *pb }, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, cx)
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, cx)
                                 } else {
                                     div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
-                                }
+                                };
+                                self.pane_bounds = pane_bounds;
+                                result
                             })
                             ) // end terminal column
                             // (Preview is now rendered inside pane tabs, not as a separate column)
@@ -2548,8 +2549,9 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
     use smol::Timer;
 
     // Required for WebView2 to render correctly inside GPUI's DirectComposition window.
+    // SAFETY: called once at startup before any threads are spawned.
     #[cfg(target_os = "windows")]
-    unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true"); }
+    unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true") };
 
     let mut app = app.clone();
     let model = app.render_with(&GpuiRenderer);
