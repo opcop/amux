@@ -201,7 +201,10 @@ impl BrowserPaneState {
 
 #[cfg(feature = "gpui")]
 impl Drop for BrowserPaneState {
-    fn drop(&mut self) { self.hide(); }
+    fn drop(&mut self) {
+        self.hide();
+        self.webview = None; // explicitly release our Rc reference
+    }
 }
 
 // ─── Browser Tab Entry (desktop-layer state per browser tab) ──

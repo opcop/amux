@@ -170,6 +170,8 @@ impl GpuiShellView {
             "ctrl+shift"
         } else if ctrl {
             "ctrl"
+        } else if shift && alt {
+            "shift+alt"
         } else {
             ""
         };

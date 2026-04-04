@@ -550,7 +550,7 @@ fn collect_render_data(
             cursor.shape,
             alacritty_terminal::vte::ansi::CursorShape::Hidden
         );
-        let cursor_visible = !cursor_hidden && cursor_blink_on && display_offset == 0;
+        let cursor_visible = !cursor_hidden && cursor_blink_on;
         let cursor_shape = match cursor.shape {
             alacritty_terminal::vte::ansi::CursorShape::Block => 0u8,
             alacritty_terminal::vte::ansi::CursorShape::Beam => 1,

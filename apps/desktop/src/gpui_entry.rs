@@ -2721,7 +2721,9 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
             Ok(_) => {
                 cx.activate(true);
             }
-            Err(_) => {}
+            Err(e) => {
+                eprintln!("[amux] failed to open window: {:?}", e);
+            }
         }
     });
 }
