@@ -506,6 +506,8 @@ pub struct TerminalManager {
     next_pane_num: usize,
     /// Scrollback buffer size for new terminals
     scrollback_lines: usize,
+    /// Workspace name for env var injection into spawned terminals
+    workspace_name: Option<String>,
 }
 
 impl TerminalManager {
@@ -525,6 +527,7 @@ impl TerminalManager {
             active_pane: pane_id,
             next_pane_num: 2,
             scrollback_lines,
+            workspace_name: None,
         }
     }
 
@@ -557,7 +560,13 @@ impl TerminalManager {
             active_pane,
             next_pane_num: max_num + 1,
             scrollback_lines: 10000,
+            workspace_name: None,
         }
+    }
+
+    /// Set the workspace name for env var injection into spawned terminals.
+    pub fn set_workspace_name(&mut self, name: &str) {
+        self.workspace_name = Some(name.to_string());
     }
 
     /// Capture the current layout as a reusable template.
@@ -750,12 +759,13 @@ impl TerminalManager {
     /// Returns (terminal, actual_cwd_used) so callers can record what worked.
     fn create_terminal_with_fallback(
         shell: &str, args: &[String], cwd: Option<&str>, scrollback: usize,
+        extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<(AlacrittyTerminal, Option<String>), String> {
-        match AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, cwd, scrollback) {
+        match AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, cwd, scrollback, extra_env) {
             Ok(t) => Ok((t, cwd.map(|s| s.to_string()))),
             Err(e) if cwd.is_some() => {
                 eprintln!("[amux] spawn failed with cwd {:?}: {}, retrying with default", cwd, e);
-                let t = AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, None, scrollback)?;
+                let t = AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, None, scrollback, extra_env)?;
                 Ok((t, None))
             }
             Err(e) => Err(e),
@@ -775,7 +785,12 @@ impl TerminalManager {
         if tab.terminal.is_some() {
             return Ok(()); // already has a terminal
         }
-        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd, self.scrollback_lines)?;
+        let mut extra_env = std::collections::HashMap::new();
+        extra_env.insert("AMUX_PANE_ID".to_string(), pane_id.0.clone());
+        if let Some(ref ws) = self.workspace_name {
+            extra_env.insert("AMUX_WORKSPACE".to_string(), ws.clone());
+        }
+        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd, self.scrollback_lines, &extra_env)?;
         tab.terminal = Some(term);
         tab.cwd = actual_cwd;
         tab.shell_cmd = Some((shell.to_string(), args.to_vec()));
@@ -801,7 +816,12 @@ impl TerminalManager {
             } else {
                 (shell, args)
             };
-            let result = Self::create_terminal_with_fallback(tab_shell, tab_args, cwd, self.scrollback_lines);
+            let mut extra_env = std::collections::HashMap::new();
+            extra_env.insert("AMUX_PANE_ID".to_string(), pane_id.0.clone());
+            if let Some(ref ws) = self.workspace_name {
+                extra_env.insert("AMUX_WORKSPACE".to_string(), ws.clone());
+            }
+            let result = Self::create_terminal_with_fallback(tab_shell, tab_args, cwd, self.scrollback_lines, &extra_env);
             let (term, used_cwd) = match result {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -820,13 +840,19 @@ impl TerminalManager {
     /// Restart the terminal in the active pane's active tab (replace dead terminal with new one).
     /// If cwd is invalid, automatically retries with no cwd (OS default).
     pub fn restart_active_terminal(&mut self, shell: &str, args: &[String], cwd: Option<&str>) -> Result<(), String> {
-        let pane = self.panes.get_mut(&self.active_pane).ok_or("pane not found")?;
+        let active_pane_id = self.active_pane.clone();
+        let pane = self.panes.get_mut(&active_pane_id).ok_or("pane not found")?;
         let tab = pane.tabs.get_mut(pane.active_tab).ok_or("no active tab")?;
         // Drop old terminal
         tab.terminal = None;
         tab.exited = false;
         // Spawn new one with fallback
-        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd, self.scrollback_lines)?;
+        let mut extra_env = std::collections::HashMap::new();
+        extra_env.insert("AMUX_PANE_ID".to_string(), active_pane_id.0.clone());
+        if let Some(ref ws) = self.workspace_name {
+            extra_env.insert("AMUX_WORKSPACE".to_string(), ws.clone());
+        }
+        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd, self.scrollback_lines, &extra_env)?;
         tab.terminal = Some(term);
         tab.cwd = actual_cwd;
         tab.shell_cmd = Some((shell.to_string(), args.to_vec()));
@@ -1376,6 +1402,7 @@ impl TerminalManager {
             active_pane,
             next_pane_num: state.next_pane_num,
             scrollback_lines: 10000, // overridden by caller with config value
+            workspace_name: None,
         })
     }
 

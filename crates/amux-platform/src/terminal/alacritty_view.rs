@@ -116,7 +116,7 @@ impl AlacrittyTerminal {
         args: &[String],
         cwd: Option<&str>,
     ) -> Result<Self, String> {
-        Self::with_scrollback(cols, rows, cell_width, cell_height, shell, args, cwd, 10000)
+        Self::with_scrollback(cols, rows, cell_width, cell_height, shell, args, cwd, 10000, &HashMap::new())
     }
 
     /// Create with custom scrollback size
@@ -129,6 +129,7 @@ impl AlacrittyTerminal {
         args: &[String],
         cwd: Option<&str>,
         scrollback_lines: usize,
+        extra_env: &HashMap<String, String>,
     ) -> Result<Self, String> {
         let event_proxy = AmuEventProxy {
             title: Arc::new(Mutex::new(None)),
@@ -165,12 +166,18 @@ impl AlacrittyTerminal {
         );
         // Pass terminal env vars through to WSL sessions via WSLENV.
         // Append to existing WSLENV if set, so user values aren't lost.
-        let wslenv_extra = "LS_COLORS:TERM:COLORTERM:TERM_PROGRAM";
+        let wslenv_extra = "LS_COLORS:TERM:COLORTERM:TERM_PROGRAM:AMUX_PANE_ID:AMUX_WORKSPACE:AMUX_VERSION";
         let wslenv = match std::env::var("WSLENV") {
             Ok(existing) if !existing.is_empty() => format!("{}:{}", existing, wslenv_extra),
             _ => wslenv_extra.to_string(),
         };
         env.insert("WSLENV".to_string(), wslenv);
+
+        // Inject AMUX_* environment variables for agent bridge
+        env.insert("AMUX_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string());
+        for (k, v) in extra_env {
+            env.insert(k.clone(), v.clone());
+        }
 
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(shell.to_string(), args.to_vec())),

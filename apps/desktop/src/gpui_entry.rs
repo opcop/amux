@@ -240,11 +240,14 @@ impl GpuiShellView {
             } else {
                 TerminalManager::with_scrollback(config.scrollback)
             };
+            tm.set_workspace_name(&ws.name);
             tm.heal_layout();
             workspace_terminals.insert(ws.id.clone(), tm);
         }
         if !workspace_terminals.contains_key(&active_ws_id) {
-            workspace_terminals.insert(active_ws_id.clone(), TerminalManager::with_scrollback(config.scrollback));
+            let mut tm = TerminalManager::with_scrollback(config.scrollback);
+            tm.set_workspace_name(&active_ws_id);
+            workspace_terminals.insert(active_ws_id.clone(), tm);
         }
         // PTY processes will be spawned on the first render frame (deferred for fast startup)
 
@@ -459,6 +462,9 @@ impl GpuiShellView {
     fn ensure_workspace_terminal(&mut self, workspace_id: &str) {
         if !self.workspace_terminals.contains_key(workspace_id) {
             let mut tm = TerminalManager::with_scrollback(self.config.scrollback);
+            let ws_name = self.model.active_workspace_name
+                .clone().unwrap_or_else(|| workspace_id.to_string());
+            tm.set_workspace_name(&ws_name);
             let (shell, args) = Self::default_shell();
             let cwd = Self::default_cwd();
             let _ = tm.spawn_in_active(&shell, &args, cwd.as_deref());
@@ -657,6 +663,9 @@ impl GpuiShellView {
     pub(crate) fn apply_template(&mut self, template: &amux_platform::terminal::manager::LayoutTemplate) {
         let mut tm = TerminalManager::from_template(template);
         tm.set_scrollback(self.config.scrollback);
+        let ws_name = self.model.active_workspace_name
+            .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+        tm.set_workspace_name(&ws_name);
         self.workspace_terminals.insert(self.active_workspace_id.clone(), tm);
         // Spawn terminals in all panes
         let (shell, args) = Self::default_shell();
@@ -1502,7 +1511,112 @@ impl GpuiShellView {
                 self.open_browser(url, window, cx);
                 Some(true)
             }
+            Some("pane") => {
+                let pane_rest = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                self.handle_pane_command(pane_rest);
+                Some(true)
+            }
             _ => Some(false),
+        }
+    }
+
+    /// Handle `amux pane <subcommand>` commands.
+    fn handle_pane_command(&mut self, rest: &str) {
+        let sub_parts: Vec<&str> = rest.splitn(2, ' ').collect();
+        let sub = sub_parts.first().map(|s| s.trim()).unwrap_or("");
+        let sub_args = sub_parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+        match sub {
+            "list" => {
+                let pane_list = self.terminal_manager().pane_list();
+                let json = serde_json::to_string_pretty(&pane_list).unwrap_or_default();
+                self.echo_to_terminal(&json);
+            }
+            "read" => {
+                // Parse: <pane-id> [--lines N]
+                let args: Vec<&str> = sub_args.split_whitespace().collect();
+                if let Some(pane_id_str) = args.first() {
+                    let lines = args.iter().position(|a| *a == "--lines")
+                        .and_then(|i| args.get(i + 1))
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .unwrap_or(50);
+                    let pane_id = amux_platform::terminal::manager::PaneId(pane_id_str.to_string());
+                    match self.terminal_manager().pane_read(&pane_id, lines) {
+                        Some(content) => {
+                            let output = content.join("\n");
+                            self.echo_to_terminal(&output);
+                        }
+                        None => {
+                            self.echo_to_terminal(&format!("error: pane '{}' not found or has no terminal", pane_id_str));
+                        }
+                    }
+                } else {
+                    self.echo_to_terminal("usage: amux pane read <pane-id> [--lines N]");
+                }
+            }
+            "message" => {
+                // Parse: <pane-id> "<text>"
+                let args: Vec<&str> = sub_args.splitn(2, ' ').collect();
+                if args.len() >= 2 {
+                    let target_id_str = args[0];
+                    let text = args[1].trim_matches('"');
+                    let target = amux_platform::terminal::manager::PaneId(target_id_str.to_string());
+
+                    // Build bridge message from current pane identity
+                    let ws_name = self.model.active_workspace_name
+                        .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+                    let source_pane_id = self.terminal_manager().active_pane_id()
+                        .cloned().unwrap_or_else(|| amux_platform::terminal::manager::PaneId("unknown".to_string()));
+                    let agent_kind = self.terminal_manager().pane_list().iter()
+                        .find(|p| p.pane_id == source_pane_id)
+                        .and_then(|p| p.agent_kind.clone())
+                        .unwrap_or_else(|| "user".to_string());
+
+                    let msg = amux_core::bridge::BridgeMessage {
+                        workspace: ws_name,
+                        pane_id: source_pane_id.0,
+                        agent: agent_kind,
+                        text: text.to_string(),
+                    };
+                    let formatted = msg.format();
+                    match self.terminal_manager_mut().pane_send_text(&target, &formatted) {
+                        Ok(()) => self.echo_to_terminal(&format!("sent to {}", target_id_str)),
+                        Err(e) => self.echo_to_terminal(&format!("error: {}", e)),
+                    }
+                } else {
+                    self.echo_to_terminal("usage: amux pane message <pane-id> \"<text>\"");
+                }
+            }
+            "id" => {
+                let ws_name = self.model.active_workspace_name
+                    .clone().unwrap_or_else(|| self.active_workspace_id.clone());
+                let pane_id = self.terminal_manager().active_pane_id()
+                    .cloned().unwrap_or_else(|| amux_platform::terminal::manager::PaneId("unknown".to_string()));
+                let agent_kind = self.terminal_manager().pane_list().iter()
+                    .find(|p| p.pane_id == pane_id)
+                    .and_then(|p| p.agent_kind.clone())
+                    .unwrap_or_else(|| "none".to_string());
+                let output = format!("pane_id: {}\nworkspace: {}\nagent: {}", pane_id.0, ws_name, agent_kind);
+                self.echo_to_terminal(&output);
+            }
+            _ => {
+                self.echo_to_terminal(&format!("unknown pane command: '{}'\navailable: list, read, message, id", sub));
+            }
+        }
+    }
+
+    /// Write text to the active terminal as visible output.
+    /// Sends Ctrl+U to clear the typed command, then uses `echo` to display the text.
+    fn echo_to_terminal(&mut self, text: &str) {
+        if let Some(terminal) = self.terminal_manager_mut().active_terminal() {
+            // Clear the "amux pane ..." command the user typed
+            terminal.send_input(b"\x15"); // Ctrl+U: kill line
+            // Write output via a temp file to avoid shell escaping issues
+            let tmp = std::env::temp_dir().join("amux_bridge_output.txt");
+            if std::fs::write(&tmp, text).is_ok() {
+                let cmd = format!("cat {}\n", tmp.display());
+                terminal.send_input(cmd.as_bytes());
+            }
         }
     }
 
