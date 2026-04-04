@@ -81,6 +81,9 @@ pub(crate) struct GpuiShellView {
 #[derive(Clone, Debug)]
 pub(crate) struct ContextMenuState {
     position: gpui::Point<gpui::Pixels>,
+    /// The pane that was active when the menu was opened.
+    /// Actions should target this pane, not whatever pane is active at click time.
+    source_pane: Option<amux_platform::terminal::manager::PaneId>,
 }
 
 /// Drag state for resizing split panes
@@ -951,6 +954,13 @@ impl GpuiShellView {
 
     /// Execute a context menu action by label
     pub(crate) fn execute_context_menu_action(&mut self, label: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Restore the pane that was active when the context menu was opened,
+        // so actions target the correct pane (not the one under the menu click).
+        let source_pane = self.context_menu.as_ref().and_then(|m| m.source_pane.clone());
+        self.context_menu = None;
+        if let Some(pid) = source_pane {
+            self.terminal_manager_mut().set_active_pane(&pid);
+        }
         match label {
             "Copy" => {
                 self.copy_selection(cx);
@@ -2174,6 +2184,7 @@ impl Render for GpuiShellView {
                 } else {
                     this.context_menu = Some(ContextMenuState {
                         position: event.position,
+                        source_pane: this.terminal_manager().active_pane_id().cloned(),
                     });
                 }
                 cx.notify();
