@@ -559,6 +559,9 @@ impl GpuiShellView {
                     return;
                 }
                 "ctrl+shift+p" => {
+                    // Cancel any active rename before opening palette
+                    self.renaming_workspace = None;
+                    self.renaming_tab = None;
                     let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
                     self.refresh_model();
                     cx.notify();

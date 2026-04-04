@@ -20,8 +20,6 @@ pub struct PreviewState {
     pub file_name: String,
     /// Parsed content elements
     pub elements: Vec<PreviewElement>,
-    /// Scroll offset in pixels
-    pub scroll_offset: f32,
     /// Panel width in pixels (user-resizable)
     pub width: f32,
 }
@@ -113,7 +111,6 @@ impl PreviewState {
             file_path: file_path.to_string(),
             file_name,
             elements,
-            scroll_offset: 0.0,
             width: 680.0,
         })
     }
