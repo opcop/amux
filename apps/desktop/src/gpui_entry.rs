@@ -1599,8 +1599,12 @@ impl GpuiShellView {
                 let output = format!("pane_id: {}\nworkspace: {}\nagent: {}", pane_id.0, ws_name, agent_kind);
                 self.echo_to_terminal(&output);
             }
+            "teach" => {
+                let template = Self::agent_teach_template();
+                self.echo_to_terminal(&template);
+            }
             _ => {
-                self.echo_to_terminal(&format!("unknown pane command: '{}'\navailable: list, read, message, id", sub));
+                self.echo_to_terminal(&format!("unknown pane command: '{}'\navailable: list, read, message, id, teach", sub));
             }
         }
     }
@@ -1617,6 +1621,34 @@ impl GpuiShellView {
                 let cmd = format!("cat {}\n", tmp.display());
                 terminal.send_input(cmd.as_bytes());
             }
+        }
+    }
+
+    /// Return the agent teach template text.
+    fn agent_teach_template() -> String {
+        r#"## Amux Inter-Agent Communication
+
+You are running inside Amux terminal multiplexer. You can collaborate with other agents using `amux` commands:
+
+- **Discover**: `amux pane list` — JSON list of all panes with agent state
+- **Observe**: `amux pane read <pane-id> --lines 20` — read another pane's output
+- **Communicate**: `amux pane message <pane-id> "message text"` — send message to another agent
+- **Identity**: `amux pane id` — show your pane identity
+
+Messages you receive will be in this format:
+`[amux-bridge workspace:<w> pane:<id> agent:<kind>] <text>`
+
+When you see input in this format, it is a message from another agent. Read the sender info and message text, then respond appropriately.
+
+Environment variables available: $AMUX_PANE_ID, $AMUX_WORKSPACE, $AMUX_VERSION"#.to_string()
+    }
+
+    /// Generate ~/.amux/agent-prompt.md if it does not already exist.
+    pub(crate) fn ensure_agent_prompt_file() {
+        let prompt_path = Self::amux_dir().join("agent-prompt.md");
+        if !prompt_path.exists() {
+            let _ = std::fs::create_dir_all(Self::amux_dir());
+            let _ = std::fs::write(&prompt_path, Self::agent_teach_template());
         }
     }
 
@@ -2907,6 +2939,8 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                         tm.spawn_all_tabs_in_pane(&pid, &shell, &args, default_cwd.as_deref());
                                     }
                                 }
+                                // Generate agent-prompt.md if it doesn't exist
+                                GpuiShellView::ensure_agent_prompt_file();
                                 cx.notify();
                             }
                             // Deferred tool detection: launch in background thread on third frame
@@ -2932,6 +2966,15 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                 for tm in this.workspace_terminals.values_mut() {
                                     let notifs = tm.poll_activity();
                                     for n in notifs {
+                                        // Auto-expand sidebar when agent needs attention
+                                        if matches!(n.new_status, amux_platform::terminal::manager::AgentStatus::Waiting | amux_platform::terminal::manager::AgentStatus::Error) {
+                                            if this.sidebar_state.collapsed {
+                                                this.sidebar_state.collapsed = false;
+                                            }
+                                            if this.sidebar_state.mode != crate::gpui_workspace_sidebar::SidebarMode::Agents {
+                                                this.sidebar_state.mode = crate::gpui_workspace_sidebar::SidebarMode::Agents;
+                                            }
+                                        }
                                         let msg = format!("{} {} — {}",
                                             n.new_status.icon(),
                                             n.tab_title,
