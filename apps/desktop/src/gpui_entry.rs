@@ -1297,9 +1297,9 @@ impl GpuiShellView {
             let ch = grid[line][Column(col)].c;
             if ch == ' ' || ch == '\0' { return None; }
 
-            // Path characters: alphanumeric, /, \, ., -, _, :, ~
+            // Path characters: alphanumeric, /, \, ., -, _, :, ~, backtick
             let is_path_char = |c: char| -> bool {
-                c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '-' | '_' | ':' | '~' | '(' | ')')
+                c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '-' | '_' | ':' | '~' | '(' | ')' | '`')
             };
 
             // Scan left
@@ -1329,6 +1329,33 @@ impl GpuiShellView {
 
             let path = path.trim().to_string();
             if path.len() < 3 { return None; } // too short to be a useful path
+
+            // Strip trailing `:line` or `:line:col` (e.g., "src/auth.rs:42:5")
+            let path = if let Some(idx) = path.rfind(':') {
+                let after = &path[idx + 1..];
+                if after.chars().all(|c| c.is_ascii_digit()) {
+                    let base = &path[..idx];
+                    // Handle :line:col pattern
+                    if let Some(idx2) = base.rfind(':') {
+                        let after2 = &base[idx2 + 1..];
+                        if after2.chars().all(|c| c.is_ascii_digit()) {
+                            base[..idx2].to_string()
+                        } else {
+                            base.to_string()
+                        }
+                    } else {
+                        base.to_string()
+                    }
+                } else {
+                    path
+                }
+            } else {
+                path
+            };
+
+            // Strip surrounding backticks (Claude often wraps paths in ``)
+            let path = path.trim_matches('`').to_string();
+            if path.len() < 3 { return None; }
 
             Some(path)
         })
