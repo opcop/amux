@@ -1243,36 +1243,84 @@ impl GpuiShellView {
     /// Returns true if a preview was opened.
     pub(crate) fn try_preview_path_at(&mut self, col: usize, row: usize) -> bool {
         let path = match self.extract_path_at_cursor(col, row) {
-            Some(p) => p,
-            None => return false,
-        };
-
-        // Check if file exists (try relative to pane CWD, then absolute)
-        let pane_cwd = self.resolve_active_cwd();
-        let converted = self.maybe_convert_wsl_path(&path);
-        let resolved = if std::path::Path::new(&converted).is_absolute() && std::path::Path::new(&converted).exists() {
-            converted
-        } else if let Some(ref cwd) = pane_cwd {
-            let full = std::path::PathBuf::from(cwd).join(&path);
-            if full.exists() {
-                full.to_string_lossy().to_string()
-            } else {
+            Some(p) => {
+                eprintln!("[amux-preview] extracted path: '{}'", p);
+                p
+            }
+            None => {
+                eprintln!("[amux-preview] no path found at col={} row={}", col, row);
                 return false;
             }
-        } else {
-            return false;
+        };
+
+        // Check if file exists. Try multiple base directories:
+        // 1. Absolute path (already resolved)
+        // 2. Pane CWD (from prompt parsing or process info)
+        // 3. Git repo root (Claude outputs paths relative to repo root)
+        // 4. AMUX_WORKSPACE env or saved workspace path
+        let converted = self.maybe_convert_wsl_path(&path);
+
+        let mut candidates: Vec<String> = Vec::new();
+
+        // Absolute path
+        if std::path::Path::new(&converted).is_absolute() {
+            candidates.push(converted.clone());
+        }
+
+        // Pane CWD
+        if let Some(cwd) = self.resolve_active_cwd() {
+            candidates.push(std::path::PathBuf::from(&cwd).join(&path).to_string_lossy().to_string());
+        }
+
+        // Git repo root detection: walk up from known paths to find .git
+        if let Some(cwd) = self.resolve_active_cwd() {
+            let mut dir = std::path::PathBuf::from(&cwd);
+            for _ in 0..10 {
+                if dir.join(".git").exists() {
+                    candidates.push(dir.join(&path).to_string_lossy().to_string());
+                    break;
+                }
+                if !dir.pop() { break; }
+            }
+        }
+
+        // Try GUI process CWD as fallback
+        if let Ok(gui_cwd) = std::env::current_dir() {
+            candidates.push(gui_cwd.join(&path).to_string_lossy().to_string());
+            // Also try git root from GUI CWD
+            let mut dir = gui_cwd;
+            for _ in 0..10 {
+                if dir.join(".git").exists() {
+                    candidates.push(dir.join(&path).to_string_lossy().to_string());
+                    break;
+                }
+                if !dir.pop() { break; }
+            }
+        }
+
+        let resolved = match candidates.iter().find(|p| std::path::Path::new(p).exists()) {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("[amux-preview] file not found, tried: {:?}", candidates);
+                return false;
+            }
         };
 
         // Check if it's a previewable file type
+        let ext = std::path::Path::new(&resolved).extension().and_then(|e| e.to_str());
+        eprintln!("[amux-preview] resolved='{}' ext={:?}", resolved, ext);
         let is_previewable = matches!(
-            std::path::Path::new(&resolved).extension().and_then(|e| e.to_str()),
+            ext,
             Some("md" | "markdown" | "txt" | "rs" | "js" | "ts" | "py" | "toml"
                 | "json" | "yaml" | "yml" | "sh" | "bash" | "css" | "html"
                 | "tsx" | "jsx" | "go" | "c" | "cpp" | "h" | "hpp" | "java"
                 | "rb" | "php" | "swift" | "kt" | "lua" | "sql" | "xml"
                 | "ini" | "cfg" | "conf" | "log" | "vim")
         );
-        if !is_previewable { return false; }
+        if !is_previewable {
+            eprintln!("[amux-preview] FAIL: extension not previewable");
+            return false;
+        }
 
         self.open_preview_file(&resolved);
         true
