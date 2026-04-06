@@ -1332,9 +1332,11 @@ impl GpuiShellView {
             let ch = grid[line][Column(col)].c;
             if ch == ' ' || ch == '\0' { return None; }
 
-            // Path characters: alphanumeric, /, \, ., -, _, :, ~, backtick
+            // Path characters: ASCII alphanumeric + path separators.
+            // Use is_ascii_alphanumeric (not is_alphanumeric) so CJK characters
+            // don't get included — "输出到docs/file.rs" should extract "docs/file.rs".
             let is_path_char = |c: char| -> bool {
-                c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '-' | '_' | ':' | '~' | '(' | ')' | '`')
+                c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '.' | '-' | '_' | ':' | '~' | '(' | ')' | '`')
             };
 
             // Scan left
