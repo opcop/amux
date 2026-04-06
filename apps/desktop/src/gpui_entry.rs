@@ -1052,21 +1052,55 @@ impl GpuiShellView {
 
     /// Open the file picker (Ctrl+P / right-click / amux preview)
     pub(crate) fn open_file_picker(&mut self) {
-        // Try prompt extraction first (most reliable for WSL), then resolve chain
-        let prompt_cwd = self.terminal_manager().active_terminal_ref()
-            .map(|t| t.cursor_line_text())
-            .and_then(|line| extract_cwd_from_prompt_line(&line));
-        let cwd = prompt_cwd.map(|p| self.maybe_convert_wsl_path(&p))
-            .filter(|p| std::path::Path::new(p).is_dir())
-            .or_else(|| self.resolve_active_cwd());
+        let cwd = self.resolve_best_cwd();
         self.file_picker = Some(crate::gpui_preview::FilePickerState::new(cwd));
     }
 
     fn open_file_picker_with_cwd(&mut self, cwd: Option<String>) {
         let cwd = cwd.map(|p| self.maybe_convert_wsl_path(&p))
             .filter(|p| std::path::Path::new(p).is_dir())
-            .or_else(|| self.resolve_active_cwd());
+            .or_else(|| self.resolve_best_cwd());
         self.file_picker = Some(crate::gpui_preview::FilePickerState::new(cwd));
+    }
+
+    /// Resolve the best CWD using multiple strategies.
+    /// Tries: prompt parsing → process CWD → git root → GUI process CWD + git root.
+    /// This handles the WSL case where resolve_active_cwd returns the Windows
+    /// spawn directory instead of the actual WSL working directory.
+    fn resolve_best_cwd(&self) -> Option<String> {
+        // 1. Standard resolve chain (prompt → process → saved)
+        if let Some(cwd) = self.resolve_active_cwd() {
+            // Verify it looks reasonable — if it has a .git, it's likely correct
+            if std::path::Path::new(&cwd).join(".git").exists() {
+                return Some(cwd);
+            }
+            // Walk up to find git root (cwd might be a subdirectory)
+            let mut dir = std::path::PathBuf::from(&cwd);
+            for _ in 0..10 {
+                if dir.join(".git").exists() {
+                    return Some(dir.to_string_lossy().to_string());
+                }
+                if !dir.pop() { break; }
+            }
+        }
+
+        // 2. GUI process CWD — often set by the user's launch context
+        if let Ok(gui_cwd) = std::env::current_dir() {
+            if gui_cwd.join(".git").exists() {
+                return Some(gui_cwd.to_string_lossy().to_string());
+            }
+            let mut dir = gui_cwd.clone();
+            for _ in 0..10 {
+                if dir.join(".git").exists() {
+                    return Some(dir.to_string_lossy().to_string());
+                }
+                if !dir.pop() { break; }
+            }
+            // Fallback: return GUI CWD even without .git
+            return Some(gui_cwd.to_string_lossy().to_string());
+        }
+
+        self.resolve_active_cwd()
     }
 
     fn open_preview_file_with_cwd(&mut self, path: &str, cwd: Option<&str>) {
