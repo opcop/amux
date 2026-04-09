@@ -2,7 +2,7 @@ use amux_core::{
     Event, LayoutNode, SaveStatus as CoreSaveStatus, SessionOpError, SessionState, SplitAxis,
     SurfaceState, TabState, WorkspaceState,
 };
-use amux_platform::{format_bytes, format_cpu_usage, get_load_status, SystemMetrics};
+use amux_platform::{format_bytes, format_cpu_usage, get_load_status, PlatformCapabilities, SystemMetrics};
 
 use crate::commands::UiAction;
 
@@ -113,6 +113,7 @@ pub struct AppSnapshot {
     pub activity_log: Vec<String>,
     pub save_status: String, // "saved 2m ago", "unsaved", "saving"
     pub dirty: bool,
+    pub platform_capabilities: PlatformCapabilities,
     // Status bar fields
     pub status_wsl_distro: Option<String>, // Current WSL distro if using WSL workspace
     pub status_split_count: usize,         // Number of splits in current layout
@@ -268,9 +269,6 @@ impl UiState {
     }
 
     pub fn snapshot(&mut self) -> AppSnapshot {
-        // Refresh system metrics before taking snapshot
-        self.refresh_system_metrics();
-
         // Format save status
         let save_status = match self.get_save_status() {
             SaveStatus::Saved(desc) => format!("saved {}", desc),
@@ -283,12 +281,15 @@ impl UiState {
             .session
             .recent_workspaces
             .iter()
-            .take(5)
-            .map(|r| {
-                let path = match &r.target {
-                    amux_core::WorkspaceTarget::WindowsPath { path } => {
-                        path.to_string_lossy().to_string()
-                    }
+                .take(5)
+                .map(|r| {
+                    let path = match &r.target {
+                        amux_core::WorkspaceTarget::LocalPath { path } => {
+                            path.to_string_lossy().to_string()
+                        }
+                        amux_core::WorkspaceTarget::WindowsPath { path } => {
+                            path.to_string_lossy().to_string()
+                        }
                     amux_core::WorkspaceTarget::WslPath { path, distro } => {
                         format!("{}:{}", distro, path)
                     }
@@ -328,6 +329,7 @@ impl UiState {
             activity_log: self.activity_log.clone(),
             save_status,
             dirty: self.dirty,
+            platform_capabilities: PlatformCapabilities::default(),
             // Status bar fields
             status_wsl_distro: self
                 .session
@@ -366,8 +368,12 @@ impl UiState {
         }
     }
 
-    /// Update system metrics snapshot (call periodically)
-    pub fn refresh_system_metrics(&mut self) {
+    pub fn set_system_metrics(&mut self, metrics: Option<SystemMetrics>) {
+        self.system_metrics = metrics;
+    }
+
+    /// Legacy metrics path used before HostPlatform injection is available.
+    pub fn refresh_system_metrics_legacy(&mut self) {
         use amux_platform::SystemMetricsCollector;
 
         self.system_metrics = Some(SystemMetricsCollector::new().get_metrics());

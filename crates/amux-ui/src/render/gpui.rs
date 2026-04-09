@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::{
     commands::{
-        filtered_palette_commands, palette_filter_help, palette_query_suggestions, PaletteCommand,
+        filtered_palette_commands_for, palette_filter_help, palette_query_suggestions, PaletteCommand,
     },
     ActiveSurfaceItem, AppSnapshot, LayoutSnapshot,
 };
@@ -125,6 +125,10 @@ pub struct GpuiWindowModel {
     pub status_cpu_usage: Option<String>,
     pub status_memory_usage: Option<String>,
     pub status_load_color: Option<String>,
+    pub local_workspace_supported: bool,
+    pub wsl_supported: bool,
+    pub browser_supported: bool,
+    pub folder_picker_supported: bool,
 }
 
 impl fmt::Display for GpuiWindowModel {
@@ -156,7 +160,10 @@ impl AppRenderer for GpuiRenderer {
             .as_ref()
             .map(|workspace| count_layout_nodes(&workspace.layout))
             .unwrap_or(0);
-        let palette_commands = filtered_palette_commands(&snapshot.command_palette_query);
+        let palette_commands = filtered_palette_commands_for(
+            &snapshot.command_palette_query,
+            &snapshot.platform_capabilities,
+        );
         let selected_index = clamped_selected_index(
             snapshot.command_palette_selected_index,
             palette_commands.len(),
@@ -295,6 +302,10 @@ impl AppRenderer for GpuiRenderer {
             status_cpu_usage: snapshot.status_cpu_usage.clone(),
             status_memory_usage: snapshot.status_memory_usage.clone(),
             status_load_color: snapshot.status_load_color.clone(),
+            local_workspace_supported: snapshot.platform_capabilities.local_workspace,
+            wsl_supported: snapshot.platform_capabilities.wsl_workspace,
+            browser_supported: snapshot.platform_capabilities.browser_tabs,
+            folder_picker_supported: snapshot.platform_capabilities.folder_picker,
         }
     }
 }

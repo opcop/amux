@@ -3,11 +3,25 @@
 //! This module provides terminal backend (PTY) management and ANSI emulation.
 
 pub mod backend;
-pub mod emulator;
-pub mod session;
-pub mod view;
+pub mod keys;
 pub mod manager;
 pub mod alacritty_view;
+
+// The following modules are dead code retained on disk for historical reference.
+// They are excluded from the compile graph so they neither generate warnings nor
+// rot alongside the live terminal stack. See developer-handoff.md §6.1.
+//
+// - `emulator`: original in-house ANSI parser / cell grid (TerminalEmulator).
+//   Superseded by `alacritty_view::AlacrittyTerminal`, which wraps
+//   `alacritty_terminal::Term` and is the only emulator the desktop now drives.
+// - `view`: thin TerminalView wrapper around the in-house emulator. Already
+//   marked "no longer used by desktop" in docs/HANDOFF-CANVAS-RENDERING.md.
+// - `session`: parallel TerminalSessionManager + keyboard_to_pty implementation
+//   whose only consumer was the (also unused) `gpui_terminal_component.rs`.
+//
+// pub mod emulator;
+// pub mod view;
+// pub mod session;
 
 /// Query the current working directory of a process by PID.
 /// On Windows, uses sysinfo (which reads the PEB via NtQueryInformationProcess).
@@ -30,21 +44,12 @@ pub fn win_process_cwd(pid: u32) -> Option<String> {
     Some(cwd.to_string_lossy().to_string())
 }
 
-// Re-export emulator types
-pub use emulator::{TerminalEmulator, Cell, Color, Cursor, DEFAULT_COLS, SCROLLBACK_LINES};
-
 // Re-export terminal backend types
 pub use backend::{
-    TerminalBackend, TerminalLaunchSpec, 
-    TerminalSessionMetadata, TerminalSessionKind, RealTerminalBackend, 
+    TerminalBackend, TerminalLaunchSpec,
+    TerminalSessionMetadata, TerminalSessionKind, RealTerminalBackend,
     InMemoryTerminalBackend, MockTerminalRecord,
 };
-
-// Re-export session types
-pub use session::{TerminalSession, TerminalSessionManager, keyboard_to_pty};
-
-// Re-export view types
-pub use view::{TerminalView, keys};
 
 // Re-export manager types
 pub use manager::{TerminalManager, TabId, PaneId, PaneLayout, SplitDirection, TerminalPane};

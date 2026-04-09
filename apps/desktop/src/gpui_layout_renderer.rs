@@ -135,7 +135,7 @@ pub(crate) fn render_layout(
     preview_tabs: &std::collections::HashMap<String, crate::gpui_preview::PreviewState>,
     cx: &mut Context<GpuiShellView>,
 ) -> gpui::AnyElement {
-    use amux_platform::terminal::manager::{PaneId, TabLayout};
+    use amux_platform::terminal::manager::TabLayout;
 
     match layout {
         TabLayout::Single(pane_id) => {
@@ -144,7 +144,6 @@ pub(crate) fn render_layout(
             let tab_strip_h = 28.0_f32;
             pane_bounds.insert(pane_id.0.clone(), (origin_x, origin_y + tab_strip_h, avail_w, (avail_h - tab_strip_h).max(0.0)));
             let is_active = active_pane_id == Some(pane_id);
-            let has_multiple_panes = manager.total_panes() > 1;
 
             // Build per-pane tab strip + terminal content
             // get_pane may return None if layout references a pane that doesn't
@@ -204,7 +203,6 @@ pub(crate) fn render_layout(
                             )
                             .on_click({
                                 let pid_rename = pid_click.clone();
-                                let rename_title = title.clone();
                                 cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
                                     if event.click_count() >= 2 {
                                         // Double-click: start inline rename
@@ -958,7 +956,6 @@ pub(crate) fn render_pane_picker(
 
     for (i, (_pid, title)) in picker.targets.iter().enumerate() {
         let is_selected = i == picker.selected_index;
-        let pid = _pid.clone();
         let idx = i;
         list = list.child(
             div()

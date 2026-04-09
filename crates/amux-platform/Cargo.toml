@@ -26,3 +26,11 @@ serde_json = "1"
 # System information (CPU, memory, processes)
 sysinfo = "0.32"
 
+# Cross-platform clipboard (text + image). Used by ArboardClipboardService.
+arboard = "3.6"
+
+# Native file dialogs (folder picker). rfd 0.17's default features are
+# `xdg-portal + wayland` on Linux (no GTK3 C deps), and AppKit/Win32 on
+# macOS/Windows where the Linux backend choice has no effect.
+rfd = "0.17"
+

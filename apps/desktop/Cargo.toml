@@ -22,11 +22,16 @@ toml = "0.8"
 gpui = { git = "https://github.com/zed-industries/zed", optional = true }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", optional = true }
 pulldown-cmark = { version = "0.12", optional = true }
-gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true }
+gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true, features = ["font-kit"] }
 smol = { version = "2", optional = true }
 wry = { version = "0.53", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 image = { version = "0.25", default-features = false, features = ["bmp", "png"] }
+# Native folder picker. Used via AsyncFileDialog from cx.spawn so the dialog
+# runs on the main NSApp loop *outside* a GPUI listener stack frame, which
+# avoids the RefCell re-entrancy panic that the synchronous variant triggers
+# (see prompt_open_local_workspace).
+rfd = "0.17"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 git2 = { version = "0.20", features = ["https", "ssh", "vendored-libgit2", "vendored-openssl"] }

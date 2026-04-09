@@ -26,6 +26,7 @@ pub struct DefaultPathMapper;
 impl PathMapper for DefaultPathMapper {
     fn to_display_path(&self, target: &WorkspaceTarget) -> String {
         match target {
+            WorkspaceTarget::LocalPath { path } => path.display().to_string(),
             WorkspaceTarget::WindowsPath { path } => path.display().to_string(),
             WorkspaceTarget::WslPath { distro, path } => format!("{distro}:{path}"),
         }
@@ -33,6 +34,7 @@ impl PathMapper for DefaultPathMapper {
 
     fn to_runtime_cwd(&self, target: &WorkspaceTarget) -> Result<String, String> {
         match target {
+            WorkspaceTarget::LocalPath { path } => Ok(path.display().to_string()),
             WorkspaceTarget::WindowsPath { path } => Ok(path.display().to_string()),
             WorkspaceTarget::WslPath { path, .. } => Ok(path.clone()),
         }
@@ -44,6 +46,10 @@ impl PathMapper for DefaultPathMapper {
         relative_path: &str,
     ) -> Result<MappedFile, String> {
         match workspace {
+            WorkspaceTarget::LocalPath { path } => Ok(MappedFile {
+                display_path: path.join(relative_path).display().to_string(),
+                native_path: path.join(relative_path),
+            }),
             WorkspaceTarget::WindowsPath { path } => Ok(MappedFile {
                 display_path: path.join(relative_path).display().to_string(),
                 native_path: path.join(relative_path),

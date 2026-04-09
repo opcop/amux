@@ -92,6 +92,12 @@ impl<P: PathMapper, F: FsBackend> WorkspaceService<P, F> {
 
 pub fn derive_workspace_name(target: &WorkspaceTarget) -> String {
     match target {
+        WorkspaceTarget::LocalPath { path } => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| path.display().to_string()),
         WorkspaceTarget::WindowsPath { path } => path
             .file_name()
             .and_then(|name| name.to_str())
@@ -187,6 +193,12 @@ mod tests {
                 path: "/home/user/demo".into()
             }),
             "demo"
+        );
+        assert_eq!(
+            derive_workspace_name(&WorkspaceTarget::LocalPath {
+                path: PathBuf::from("/Users/arden/amux")
+            }),
+            "amux"
         );
     }
 }

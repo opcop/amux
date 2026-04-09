@@ -62,6 +62,8 @@ impl AppRenderer for TextRenderer {
 
 #[cfg(test)]
 mod tests {
+    use amux_platform::PlatformCapabilities;
+
     use crate::{
         ActiveSurfaceItem, AgentListItem, AppSnapshot, FileListItem, LayoutSnapshot, OpenFileItem,
         PaneSnapshot, SplitSnapshot, TabSnapshot, WorkspaceListItem, WorkspaceSnapshot,
@@ -136,6 +138,7 @@ mod tests {
             recent_workspaces: vec![],
             save_status: "saved just now".into(),
             dirty: false,
+            platform_capabilities: PlatformCapabilities::default(),
             status_wsl_distro: None,
             status_split_count: 0,
             status_terminal_shell: None,

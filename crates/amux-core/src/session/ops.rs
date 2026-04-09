@@ -35,6 +35,22 @@ impl SessionState {
     pub fn apply(&mut self, command: Command) -> Result<Vec<Event>, SessionOpError> {
         match command {
             Command::OpenWorkspace(target) => {
+                // Dedupe: if a workspace with the same target is already in
+                // the session, just activate it instead of pushing a fresh
+                // copy. Without this, every `--workspace <path>` launch (or
+                // sidebar "Open Workspace" / Ctrl+Shift+N click on the same
+                // folder) accumulates a duplicate entry — so a smoke loop
+                // that opens `/tmp/foo` six times ends up with a session
+                // containing six identical `/tmp/foo` workspaces. The
+                // sidebar then renders six rows for the same project, and
+                // the session.json grows monotonically across launches.
+                if let Some(existing) =
+                    self.workspaces.iter().find(|ws| ws.target == target)
+                {
+                    let workspace_id = existing.id.clone();
+                    self.active_workspace_id = Some(workspace_id.clone());
+                    return Ok(vec![Event::WorkspaceOpened(workspace_id)]);
+                }
                 let workspace = build_workspace(
                     WorkspaceId::new(next_workspace_id(self.workspaces.len())),
                     derive_workspace_name(&target),
@@ -147,6 +163,12 @@ fn build_surface_tab(id: TabId, surface: SurfaceState) -> TabState {
 
 fn derive_workspace_name(target: &WorkspaceTarget) -> String {
     match target {
+        WorkspaceTarget::LocalPath { path } => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| path.display().to_string()),
         WorkspaceTarget::WindowsPath { path } => path
             .file_name()
             .and_then(|name| name.to_str())
@@ -235,6 +257,65 @@ mod tests {
         assert_eq!(session.workspaces.len(), 1);
         assert_eq!(events.len(), 1);
         assert_eq!(session.active_workspace().unwrap().name, "amux");
+    }
+
+    #[test]
+    fn open_local_workspace_derives_name() {
+        let mut session = SessionState::default();
+
+        session
+            .apply(Command::OpenWorkspace(WorkspaceTarget::LocalPath {
+                path: PathBuf::from("/Users/arden/amux"),
+            }))
+            .expect("workspace should open");
+
+        assert_eq!(session.active_workspace().unwrap().name, "amux");
+    }
+
+    #[test]
+    fn open_workspace_dedupes_existing_target() {
+        // Regression: every `--workspace <path>` (or sidebar "Open
+        // Workspace" / Ctrl+Shift+N click on a folder already in the
+        // session) used to push a fresh duplicate. The session would
+        // grow monotonically across launches and the sidebar would
+        // render N copies of the same project. Now, opening the same
+        // target twice should reuse the existing workspace and just
+        // re-activate it.
+        let mut session = SessionState::default();
+        let target = WorkspaceTarget::LocalPath {
+            path: PathBuf::from("/tmp/foo"),
+        };
+
+        session
+            .apply(Command::OpenWorkspace(target.clone()))
+            .expect("first open should succeed");
+        let first_id = session.active_workspace_id.clone();
+        assert_eq!(session.workspaces.len(), 1);
+
+        // Open another workspace in between to make sure dedup
+        // doesn't depend on "most recently opened".
+        session
+            .apply(Command::OpenWorkspace(WorkspaceTarget::LocalPath {
+                path: PathBuf::from("/tmp/bar"),
+            }))
+            .expect("second open should succeed");
+        assert_eq!(session.workspaces.len(), 2);
+
+        // Re-open `/tmp/foo` — must NOT add a third entry, must
+        // re-activate the existing one.
+        let events = session
+            .apply(Command::OpenWorkspace(target.clone()))
+            .expect("re-open should succeed");
+        assert_eq!(
+            session.workspaces.len(),
+            2,
+            "duplicate target must not push a new workspace"
+        );
+        assert_eq!(
+            session.active_workspace_id, first_id,
+            "re-opening must re-activate the original workspace id"
+        );
+        assert_eq!(events.len(), 1);
     }
 
     #[test]

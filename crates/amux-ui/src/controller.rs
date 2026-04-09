@@ -1,17 +1,18 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use amux_agent::{
     AgentLaunchRequest, AgentLauncher, AgentRegistry, AgentStatus, StaticAgentRegistry,
 };
 use amux_core::{
-    AgentLaunchMode, AgentSurfaceState, EditorSurfaceState, PaneId, PreviewKind,
-    PreviewSurfaceState, SplitAxis, SurfaceId, SurfaceState, TabId, TerminalLaunchProfile,
-    TerminalSessionId,
+    AgentLaunchMode, AgentSurfaceState, EditorSurfaceState, PaneId, SplitAxis, SurfaceId,
+    SurfaceState, TabId, TerminalLaunchProfile, TerminalSessionId,
 };
 use amux_platform::{
-    DefaultPathMapper, FsBackend, FsEntry, InMemoryFsBackend, InMemoryTerminalBackend, PathMapper,
-    RealFsBackend, RealTerminalBackend, TerminalBackend, TerminalOutputManager,
+    DefaultPathMapper, FsBackend, FsEntry, FsService, HostPlatform, InMemoryFsBackend,
+    InMemoryTerminalBackend, PathMapper, PathService, RealFsBackend, RealTerminalBackend,
+    TerminalBackend, TerminalService, PlatformCapabilities,
 };
 use amux_session::{FileSessionStore, SessionStore};
 use amux_workspace::{FileFilter, WorkspaceService};
@@ -76,10 +77,21 @@ impl Default for AutoSaveState {
 }
 
 /// Wrapper for FsBackend that can be either in-memory or real
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum FsBackendWrapper {
     InMemory(InMemoryFsBackend),
     Real(RealFsBackend),
+    Service(Arc<dyn FsService>),
+}
+
+impl std::fmt::Debug for FsBackendWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InMemory(_) => write!(f, "FsBackendWrapper::InMemory"),
+            Self::Real(_) => write!(f, "FsBackendWrapper::Real"),
+            Self::Service(_) => write!(f, "FsBackendWrapper::Service"),
+        }
+    }
 }
 
 impl FsBackend for FsBackendWrapper {
@@ -87,6 +99,7 @@ impl FsBackend for FsBackendWrapper {
         match self {
             Self::InMemory(backend) => backend.read_to_string(file),
             Self::Real(backend) => backend.read_to_string(file),
+            Self::Service(backend) => backend.read_to_string(file),
         }
     }
 
@@ -94,6 +107,7 @@ impl FsBackend for FsBackendWrapper {
         match self {
             Self::InMemory(backend) => backend.write_string(file, content),
             Self::Real(backend) => backend.write_string(file, content),
+            Self::Service(backend) => backend.write_string(file, content),
         }
     }
 
@@ -105,6 +119,7 @@ impl FsBackend for FsBackendWrapper {
         match self {
             Self::InMemory(backend) => backend.read_dir(target, relative_path),
             Self::Real(backend) => backend.read_dir(target, relative_path),
+            Self::Service(backend) => backend.read_dir(target, relative_path),
         }
     }
 }
@@ -116,6 +131,8 @@ pub enum TerminalBackendWrapper {
     InMemory(InMemoryTerminalBackend),
     /// Real PTY backend
     Real(RealTerminalBackend),
+    /// Injected platform service backend
+    Service(Arc<dyn TerminalService>),
 }
 
 impl std::fmt::Debug for TerminalBackendWrapper {
@@ -123,6 +140,7 @@ impl std::fmt::Debug for TerminalBackendWrapper {
         match self {
             Self::InMemory(_) => write!(f, "TerminalBackendWrapper::InMemory"),
             Self::Real(_) => write!(f, "TerminalBackendWrapper::Real"),
+            Self::Service(_) => write!(f, "TerminalBackendWrapper::Service"),
         }
     }
 }
@@ -132,6 +150,7 @@ impl TerminalBackend for TerminalBackendWrapper {
         match self {
             Self::InMemory(backend) => backend.create_session(spec),
             Self::Real(backend) => backend.create_session(spec),
+            Self::Service(backend) => backend.create_session(spec),
         }
     }
 
@@ -139,6 +158,7 @@ impl TerminalBackend for TerminalBackendWrapper {
         match self {
             Self::InMemory(backend) => backend.write_input(id, data),
             Self::Real(backend) => backend.write_input(id, data),
+            Self::Service(backend) => backend.write_input(id, data),
         }
     }
 
@@ -146,6 +166,7 @@ impl TerminalBackend for TerminalBackendWrapper {
         match self {
             Self::InMemory(backend) => backend.resize(id, cols, rows),
             Self::Real(backend) => backend.resize(id, cols, rows),
+            Self::Service(backend) => backend.resize(id, cols, rows),
         }
     }
 
@@ -153,6 +174,7 @@ impl TerminalBackend for TerminalBackendWrapper {
         match self {
             Self::InMemory(backend) => backend.kill(id),
             Self::Real(backend) => backend.kill(id),
+            Self::Service(backend) => backend.kill(id),
         }
     }
 
@@ -163,6 +185,7 @@ impl TerminalBackend for TerminalBackendWrapper {
         match self {
             Self::InMemory(backend) => backend.metadata(id),
             Self::Real(backend) => backend.metadata(id),
+            Self::Service(backend) => backend.metadata(id),
         }
     }
 }
@@ -178,16 +201,11 @@ impl TerminalBackendWrapper {
         Self::Real(RealTerminalBackend::new())
     }
 
-    /// Check if using real PTY backend
     pub fn is_real(&self) -> bool {
-        matches!(self, Self::Real(_))
-    }
-
-    /// Get the output manager if using real backend
-    pub fn output_manager(&self) -> Option<&TerminalOutputManager> {
         match self {
-            Self::Real(backend) => Some(backend.output_manager()),
-            _ => None,
+            Self::Real(_) => true,
+            Self::Service(backend) => backend.is_real_terminal(),
+            Self::InMemory(_) => false,
         }
     }
 
@@ -208,27 +226,89 @@ impl TerminalBackendWrapper {
                     Vec::new()
                 }
             }
-            Self::Real(backend) => backend
-                .get_recent_output(session_id, count)
-                .iter()
-                .map(|line| line.text.clone())
-                .collect(),
+            Self::Real(backend) => backend.recent_output_lines(session_id, count),
+            Self::Service(backend) => backend.recent_output_lines(session_id, count),
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
+pub enum PathMapperWrapper {
+    Default(DefaultPathMapper),
+    Service(Arc<dyn PathService>),
+}
+
+impl std::fmt::Debug for PathMapperWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Default(_) => write!(f, "PathMapperWrapper::Default"),
+            Self::Service(_) => write!(f, "PathMapperWrapper::Service"),
+        }
+    }
+}
+
+impl PathMapper for PathMapperWrapper {
+    fn to_display_path(&self, target: &amux_core::WorkspaceTarget) -> String {
+        match self {
+            Self::Default(mapper) => mapper.to_display_path(target),
+            Self::Service(mapper) => mapper.to_display_path(target),
+        }
+    }
+
+    fn to_runtime_cwd(&self, target: &amux_core::WorkspaceTarget) -> Result<String, String> {
+        match self {
+            Self::Default(mapper) => mapper.to_runtime_cwd(target),
+            Self::Service(mapper) => mapper.to_runtime_cwd(target),
+        }
+    }
+
+    fn map_file_for_editor(
+        &self,
+        workspace: &amux_core::WorkspaceTarget,
+        relative_path: &str,
+    ) -> Result<amux_platform::MappedFile, String> {
+        match self {
+            Self::Default(mapper) => mapper.map_file_for_editor(workspace, relative_path),
+            Self::Service(mapper) => mapper.map_file_for_editor(workspace, relative_path),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct AppController {
     registry: StaticAgentRegistry,
+    platform: Option<Arc<dyn HostPlatform>>,
     terminal_backend: TerminalBackendWrapper,
     fs_backend: FsBackendWrapper,
-    path_mapper: DefaultPathMapper,
+    path_mapper: PathMapperWrapper,
     session_store: FileSessionStore,
     auto_save: AutoSaveConfig,
     auto_save_state: AutoSaveState,
 }
 
+impl std::fmt::Debug for AppController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppController")
+            .field("registry", &self.registry)
+            .field("platform", &self.platform.as_ref().map(|p| p.id()))
+            .field("terminal_backend", &self.terminal_backend)
+            .field("fs_backend", &self.fs_backend)
+            .field("path_mapper", &self.path_mapper)
+            .field("session_store", &self.session_store)
+            .field("auto_save", &self.auto_save)
+            .field("auto_save_state", &self.auto_save_state)
+            .finish()
+    }
+}
+
 impl AppController {
+    pub fn platform_capabilities(&self) -> PlatformCapabilities {
+        self.platform
+            .as_ref()
+            .map(|platform| platform.capabilities())
+            .unwrap_or_default()
+    }
+
     pub fn new(app_name: &str) -> Self {
         let mut registry = StaticAgentRegistry::with_defaults();
         registry
@@ -236,9 +316,10 @@ impl AppController {
             .set_detection("claude", AgentStatus::Installed);
         Self {
             registry,
+            platform: None,
             terminal_backend: TerminalBackendWrapper::new_in_memory(),
             fs_backend: FsBackendWrapper::InMemory(InMemoryFsBackend::default()),
-            path_mapper: DefaultPathMapper,
+            path_mapper: PathMapperWrapper::Default(DefaultPathMapper),
             session_store: FileSessionStore::new(default_session_dir(app_name)),
             auto_save: AutoSaveConfig::default(),
             auto_save_state: AutoSaveState::default(),
@@ -253,9 +334,27 @@ impl AppController {
             .set_detection("claude", AgentStatus::Installed);
         Self {
             registry,
+            platform: None,
             terminal_backend: TerminalBackendWrapper::new_real(),
             fs_backend: FsBackendWrapper::Real(RealFsBackend::new()),
-            path_mapper: DefaultPathMapper,
+            path_mapper: PathMapperWrapper::Default(DefaultPathMapper),
+            session_store: FileSessionStore::new(default_session_dir(app_name)),
+            auto_save: AutoSaveConfig::default(),
+            auto_save_state: AutoSaveState::default(),
+        }
+    }
+
+    pub fn with_platform(app_name: &str, platform: Arc<dyn HostPlatform>) -> Self {
+        let mut registry = StaticAgentRegistry::with_defaults();
+        registry
+            .set_detection("codex", AgentStatus::Installed)
+            .set_detection("claude", AgentStatus::Installed);
+        Self {
+            registry,
+            platform: Some(Arc::clone(&platform)),
+            terminal_backend: TerminalBackendWrapper::Service(platform.terminal()),
+            fs_backend: FsBackendWrapper::Service(platform.filesystem()),
+            path_mapper: PathMapperWrapper::Service(platform.paths()),
             session_store: FileSessionStore::new(default_session_dir(app_name)),
             auto_save: AutoSaveConfig::default(),
             auto_save_state: AutoSaveState::default(),
@@ -274,7 +373,11 @@ impl AppController {
 
     /// Check if using real filesystem
     pub fn is_using_real_fs(&self) -> bool {
-        matches!(self.fs_backend, FsBackendWrapper::Real(_))
+        match &self.fs_backend {
+            FsBackendWrapper::Real(_) => true,
+            FsBackendWrapper::Service(backend) => backend.is_real_fs(),
+            FsBackendWrapper::InMemory(_) => false,
+        }
     }
 
     /// Check if using real terminal backend
@@ -284,6 +387,17 @@ impl AppController {
 
     pub fn session_path(&self) -> PathBuf {
         self.session_store.path()
+    }
+
+    pub fn pick_workspace_folder(&self) -> Result<Option<PathBuf>, String> {
+        let platform = self
+            .platform
+            .as_ref()
+            .ok_or_else(|| "workspace folder picker is not configured".to_string())?;
+        if !platform.capabilities().folder_picker {
+            return Ok(None);
+        }
+        platform.workspace_dialogs().pick_folder()
     }
 
     // === Auto-save methods ===
@@ -384,16 +498,52 @@ impl AppController {
 
     // === End auto-save methods ===
 
-    pub fn bootstrap_demo(&self, state: &mut UiState) {
+    /// Restore an existing session if one is on disk.
+    ///
+    /// Returns `true` if at least one workspace was restored. This is the
+    /// product startup primitive — it is opinion-free: no demo files, no
+    /// auto-launched agent, no auto-opened README.
+    pub fn restore_session_if_present(&self, state: &mut UiState) -> bool {
         let _ = self.restore_session(state);
-        if !state.session.workspaces.is_empty() {
-            let _ = self.seed_demo_workspace_files(state);
-            state.push_activity("session: restored existing workspace state");
+        if state.session.workspaces.is_empty() {
+            return false;
+        }
+        // In real-fs mode this is a no-op; in in-memory mode it re-seeds
+        // mock files for the restored workspace target so previews work.
+        let _ = self.seed_demo_workspace_files(state);
+        state.push_activity("session: restored existing workspace state");
+        true
+    }
+
+    /// Open a workspace at `path` and persist the resulting session.
+    ///
+    /// Used by the product startup flow when the user passes an explicit
+    /// workspace path on the command line, or by code paths that already
+    /// know which folder to open.
+    pub fn open_local_workspace(&self, state: &mut UiState, path: PathBuf) {
+        state.dispatch(UiAction::OpenLocalWorkspace(path));
+        let _ = self.seed_demo_workspace_files(state);
+        let _ = self.persist_session(state);
+    }
+
+    /// Test/dev helper that seeds an opinionated demo workspace.
+    ///
+    /// Replaces the historical `bootstrap_demo` flow. Kept around because
+    /// the unit tests in `root.rs` rely on a populated workspace, an
+    /// in-memory README/notes pair, a vertical split, and a pre-launched
+    /// codex agent. Production startup MUST NOT call this — it is gated
+    /// to `#[cfg(any(test, feature = "demo-bootstrap"))]` so accidental
+    /// production use becomes a compile error.
+    #[cfg(test)]
+    pub fn seed_demo_state(&self, state: &mut UiState) {
+        use amux_core::{PreviewKind, PreviewSurfaceState};
+
+        if self.restore_session_if_present(state) {
             return;
         }
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        state.dispatch(UiAction::OpenWindowsWorkspace(cwd));
+        state.dispatch(UiAction::OpenLocalWorkspace(cwd));
 
         let _ = self.seed_demo_workspace_files(state);
 
@@ -456,7 +606,7 @@ impl AppController {
             }
             AppCommand::ShowHelp => {
                 state.push_activity("command ok: help");
-                Ok(crate::commands::command_help().join("\n"))
+                Ok(crate::commands::command_help_for(&self.platform_capabilities()).join("\n"))
             }
             AppCommand::SaveSession => match self.persist_session(state) {
                 Ok(()) => {
@@ -489,6 +639,10 @@ impl AppController {
                 }
             },
             AppCommand::ListWslDistros => {
+                if !self.platform_capabilities().wsl_workspace {
+                    state.push_activity("command error: wsl not available on this platform");
+                    return Err("WSL is not available on this platform".to_string());
+                }
                 #[cfg(target_os = "windows")]
                 {
                     use amux_platform::detect_wsl_distributions;
@@ -580,6 +734,10 @@ impl AppController {
                 Ok(status)
             }
             AppCommand::BrowseWslRoot => {
+                if !self.platform_capabilities().wsl_workspace {
+                    state.push_activity("command error: wsl not available on this platform");
+                    return Err("WSL is not available on this platform".to_string());
+                }
                 #[cfg(target_os = "windows")]
                 {
                     use amux_platform::detect_wsl_distributions;
@@ -604,6 +762,10 @@ impl AppController {
                 }
             }
             AppCommand::BrowseWslPath(_path) => {
+                if !self.platform_capabilities().wsl_workspace {
+                    state.push_activity("command error: wsl not available on this platform");
+                    return Err("WSL is not available on this platform".to_string());
+                }
                 #[cfg(target_os = "windows")]
                 {
                     // Try to get distro from current workspace
@@ -653,6 +815,10 @@ impl AppController {
     }
 
     fn open_browser(&self, state: &mut UiState, url: Option<&str>) -> Result<String, String> {
+        if !self.platform_capabilities().browser_tabs {
+            return Err("browser tabs are not available on this platform".to_string());
+        }
+
         let workspace = state
             .session
             .active_workspace()
@@ -1238,7 +1404,19 @@ impl AppController {
     }
 
     pub fn snapshot(&self, state: &mut UiState) -> AppSnapshot {
+        let capabilities = self.platform_capabilities();
+        if let Some(platform) = &self.platform {
+            if capabilities.system_metrics {
+                state.set_system_metrics(platform.metrics().current_metrics().ok());
+            } else {
+                state.set_system_metrics(None);
+            }
+        } else {
+            state.refresh_system_metrics_legacy();
+        }
+
         let mut snapshot = state.snapshot();
+        snapshot.platform_capabilities = capabilities;
         let active_target = state
             .session
             .active_workspace()
@@ -1572,23 +1750,21 @@ impl AppController {
 }
 
 fn default_session_dir(app_name: &str) -> PathBuf {
+    // For the canonical app_name="AMUX" we want the same `~/.amux`
+    // directory the rest of the desktop layer uses, so the controller
+    // and the GPUI shell agree on a single config root and both honor
+    // the `AMUX_HOME` override. For any other app_name (test fixtures
+    // that pick a unique slug to keep their session files isolated),
+    // fall back to `~/.{slug}` so each test gets its own dir without
+    // touching `~/.amux/`.
     let slug = app_name.to_ascii_lowercase().replace(' ', "-");
-    // Use home directory for persistent storage, fallback to temp
-    if let Some(home) = dirs_home() {
+    if slug == "amux" {
+        return amux_platform::amux_home_dir();
+    }
+    if let Some(home) = amux_platform::real_user_home() {
         home.join(format!(".{slug}"))
     } else {
         std::env::temp_dir().join(format!("{slug}-session"))
-    }
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("USERPROFILE").ok().map(PathBuf::from)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var("HOME").ok().map(PathBuf::from)
     }
 }
 

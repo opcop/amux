@@ -2,12 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(feature = "gpui")]
-mod gpui_command_bar;
-#[cfg(feature = "gpui")]
-mod gpui_command_palette;
-#[cfg(feature = "gpui")]
-mod gpui_components;
-#[cfg(feature = "gpui")]
 mod gpui_clipboard;
 mod gpui_config;
 #[cfg(feature = "gpui")]
@@ -22,11 +16,7 @@ mod gpui_preview;
 mod gpui_vibe_tools;
 mod gpui_workspace_persistence;
 #[cfg(feature = "gpui")]
-mod gpui_keyboard_shortcuts;
-#[cfg(feature = "gpui")]
 mod gpui_status_bar;
-#[cfg(feature = "gpui")]
-mod gpui_surface_views;
 #[cfg(feature = "gpui")]
 mod gpui_terminal;
 #[cfg(feature = "gpui")]
@@ -37,26 +27,21 @@ mod gpui_browser;
 mod text_entry;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let parsed = parse_cli(&raw_args);
 
-    // Check for --real flag to use real filesystem/terminal backends
-    let use_real = args.iter().any(|a| a == "--real");
-    let commands: Vec<&str> = args
-        .iter()
-        .filter(|a| *a != "--real")
-        .map(|s| s.as_str())
-        .collect();
-
-    let mut app = if use_real {
+    let mut app = if parsed.use_real {
         eprintln!("mode: real filesystem + terminal backends");
-        amux_ui::DesktopApp::with_real_backends("AMUX")
+        amux_ui::DesktopApp::with_platform("AMUX", amux_platform::current_host_platform())
     } else {
         amux_ui::DesktopApp::new("AMUX")
     };
 
-    app.bootstrap_demo();
+    let startup = app.startup(amux_ui::StartupOptions {
+        workspace: parsed.workspace.clone(),
+    });
 
-    for command in commands {
+    for command in &parsed.commands {
         match app.run_command(command) {
             Ok(message) => println!("command: {message}"),
             Err(err) => eprintln!("command error: {err}"),
@@ -65,6 +50,27 @@ fn main() {
 
     println!("{}", app.banner());
     println!("session: {}", app.session_path().display());
+    match &startup.mode {
+        amux_ui::StartupMode::OpenedWorkspace { path } => {
+            println!(
+                "startup: opened workspace {} ({} total)",
+                path.display(),
+                startup.workspace_count
+            );
+        }
+        amux_ui::StartupMode::Restored => {
+            println!(
+                "startup: restored {} workspace(s) from session",
+                startup.workspace_count
+            );
+        }
+        amux_ui::StartupMode::Empty => {
+            println!(
+                "startup: empty session — use Ctrl+Shift+N or the command palette \
+                 (`workspace open <path>`) to open a folder"
+            );
+        }
+    }
     println!();
 
     #[cfg(feature = "gpui")]
@@ -76,5 +82,58 @@ fn main() {
     #[cfg(not(feature = "gpui"))]
     {
         text_entry::run(&mut app);
+    }
+}
+
+/// Result of parsing the desktop CLI argument list.
+struct ParsedCli {
+    /// `--real` toggles the production filesystem + terminal backends.
+    use_real: bool,
+    /// Optional explicit workspace path. Accepts both `--workspace <path>`
+    /// and a single positional argument that resolves to an existing
+    /// directory. Anything else is treated as an inline command (legacy
+    /// behavior — used for the `command: ...` lines printed at startup).
+    workspace: Option<std::path::PathBuf>,
+    /// Inline commands to run after startup. Preserves the historical
+    /// "throw the rest at the command router" behavior so existing
+    /// scripts keep working.
+    commands: Vec<String>,
+}
+
+fn parse_cli(args: &[String]) -> ParsedCli {
+    let mut use_real = false;
+    let mut workspace: Option<std::path::PathBuf> = None;
+    let mut commands: Vec<String> = Vec::new();
+
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--real" => use_real = true,
+            "--workspace" | "-w" => {
+                if let Some(path) = iter.next() {
+                    workspace = Some(std::path::PathBuf::from(path));
+                } else {
+                    eprintln!("error: --workspace requires a path argument");
+                }
+            }
+            other => {
+                // Positional arg: if it resolves to an existing directory and
+                // we haven't already locked in a workspace, treat it as the
+                // workspace folder. Otherwise fall through to the legacy
+                // "inline command" bucket.
+                let candidate = std::path::PathBuf::from(other);
+                if workspace.is_none() && candidate.is_dir() {
+                    workspace = Some(candidate);
+                } else {
+                    commands.push(other.to_string());
+                }
+            }
+        }
+    }
+
+    ParsedCli {
+        use_real,
+        workspace,
+        commands,
     }
 }

@@ -4,8 +4,13 @@ use crate::{SurfaceId, TerminalSessionId, WorkspaceTarget};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ShellKind {
+    SystemDefault,
     PowerShell,
     Cmd,
+    Bash,
+    Zsh,
+    Fish,
+    Custom(String),
     WslDefault,
     WslDistro(String),
 }

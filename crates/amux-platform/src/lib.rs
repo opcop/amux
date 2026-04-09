@@ -1,6 +1,12 @@
+pub mod capabilities;
+pub mod common;
+pub mod dirs;
 pub mod fs;
+pub mod linux;
+pub mod macos;
 pub mod path_mapper;
 pub mod process;
+pub mod services;
 pub mod shell;
 pub mod sys_metrics;
 pub mod terminal;
@@ -8,13 +14,18 @@ pub mod terminal_output;
 pub mod unix;
 pub mod windows;
 
+pub use capabilities::*;
+pub use dirs::*;
 pub use fs::*;
 pub use path_mapper::*;
 pub use process::*;
+pub use services::*;
 pub use shell::*;
 pub use sys_metrics::*;
 pub use terminal::*;
 pub use terminal_output::*;
+pub use linux::LinuxPlatform;
+pub use macos::MacosPlatform;
 
 // Re-export WSL detection types on Windows
 #[cfg(target_os = "windows")]
@@ -30,3 +41,16 @@ pub use windows::wsl_fs::{
     wsl_list_root, wsl_join_path, wsl_parent_path,
     WslFsError, WslMetadata,
 };
+
+pub use windows::WindowsPlatform;
+
+use std::sync::Arc;
+
+pub fn current_host_platform() -> Arc<dyn HostPlatform> {
+    match PlatformId::current() {
+        PlatformId::Windows => Arc::new(WindowsPlatform::new()),
+        PlatformId::Macos => Arc::new(MacosPlatform::new()),
+        PlatformId::Linux => Arc::new(LinuxPlatform::new()),
+        PlatformId::Unknown => Arc::new(LinuxPlatform::new()),
+    }
+}

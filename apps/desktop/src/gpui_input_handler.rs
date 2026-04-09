@@ -70,8 +70,6 @@ impl gpui::EntityInputHandler for GpuiShellView {
         // If searching, append to search query and auto-navigate
         if let Some((ref mut query, _)) = self.search_state {
             query.push_str(text);
-            let q = query.clone();
-            drop(query);
             self.search_navigate(true);
             cx.notify();
             return;
@@ -294,8 +292,6 @@ impl GpuiShellView {
                     query.pop();
                     if !query.is_empty() {
                         // Auto-search on each keystroke
-                        let q = query.clone();
-                        drop(query);
                         self.search_navigate(true);
                     } else {
                         // Clear selection when query is empty
@@ -568,6 +564,10 @@ impl GpuiShellView {
                 }
                 "ctrl+shift+b" => {
                     // Open a new browser tab in the active pane
+                    if !self.model.browser_supported {
+                        cx.notify();
+                        return;
+                    }
                     self.open_browser("", window, cx);
                     cx.notify();
                     return;
@@ -588,8 +588,7 @@ impl GpuiShellView {
                     return;
                 }
                 "ctrl+shift+n" => {
-                    let _ = self.app.run_command("new workspace");
-                    self.refresh_model();
+                    self.prompt_open_local_workspace(cx);
                     cx.notify();
                     return;
                 }

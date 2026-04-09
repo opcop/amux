@@ -92,14 +92,6 @@ mod glyph_cache {
         });
     }
 
-    /// Clear the cache (call when font changes).
-    pub fn clear() {
-        CACHE.with(|c| {
-            let mut cache = c.borrow_mut();
-            cache.entries.clear();
-            cache.generation += 1;
-        });
-    }
 }
 
 // ─── Terminal Theme ─────────────────────────────────────────────
@@ -119,8 +111,6 @@ pub struct TerminalTheme {
     pub bg: u32,
     /// Cursor color
     pub cursor: u32,
-    /// Cursor text (under block cursor)
-    pub cursor_text: u32,
     /// Selection highlight
     pub selection: u32,
 }
@@ -138,7 +128,6 @@ impl TerminalTheme {
             fg: 0xc5c8c6,
             bg: 0x1d1f21,
             cursor: 0xf5f5f5,
-            cursor_text: 0x1d1f21,
             selection: 0x3a5a8f,
         }
     }
@@ -154,7 +143,6 @@ impl TerminalTheme {
             fg: 0xcdd6f4,
             bg: 0x1e1e2e,
             cursor: 0xf5e0dc,
-            cursor_text: 0x1e1e2e,
             selection: 0x45475a,
         }
     }
@@ -170,7 +158,6 @@ impl TerminalTheme {
             fg: 0xf8f8f2,
             bg: 0x282a36,
             cursor: 0xf8f8f2,
-            cursor_text: 0x282a36,
             selection: 0x44475a,
         }
     }
@@ -186,7 +173,6 @@ impl TerminalTheme {
             fg: 0x839496,
             bg: 0x002b36,
             cursor: 0x839496,
-            cursor_text: 0x002b36,
             selection: 0x073642,
         }
     }
@@ -202,7 +188,6 @@ impl TerminalTheme {
             fg: 0xabb2bf,
             bg: 0x282c34,
             cursor: 0x528bff,
-            cursor_text: 0x282c34,
             selection: 0x3e4452,
         }
     }
@@ -244,7 +229,6 @@ pub fn measure_cell_metrics(window: &mut Window, font_family: &str, font_size_f3
 
     // Resolve font and get metrics
     let font_id = text_system.resolve_font(&font);
-    let ascent = text_system.ascent(font_id, font_size);
     let descent = text_system.descent(font_id, font_size);
 
     // Measure cell width by shaping a long string and averaging.
@@ -270,13 +254,39 @@ pub fn measure_cell_metrics(window: &mut Window, font_family: &str, font_size_f3
 }
 
 /// Construct a terminal Font with optional bold/italic.
+///
+/// We always attach a platform-appropriate fallback chain so that if the
+/// configured `font_family` (e.g. "Cascadia Code") is not installed, GPUI's
+/// macOS / Windows / Linux text systems still find a monospace face to
+/// shape glyphs against. Without fallbacks the terminal renders as empty
+/// cells (selection rectangles still draw, but no text glyphs).
 #[cfg(feature = "gpui")]
 fn make_font_styled(font_family: &str, bold: bool, italic: bool) -> Font {
     Font {
         family: SharedString::from(font_family.to_string()),
+        features: gpui::FontFeatures::default(),
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+            #[cfg(target_os = "macos")]
+            "Menlo".to_string(),
+            #[cfg(target_os = "macos")]
+            "Monaco".to_string(),
+            #[cfg(target_os = "macos")]
+            "Courier New".to_string(),
+            #[cfg(target_os = "windows")]
+            "Cascadia Mono".to_string(),
+            #[cfg(target_os = "windows")]
+            "Consolas".to_string(),
+            #[cfg(target_os = "windows")]
+            "Courier New".to_string(),
+            #[cfg(target_os = "linux")]
+            "DejaVu Sans Mono".to_string(),
+            #[cfg(target_os = "linux")]
+            "Liberation Mono".to_string(),
+            #[cfg(target_os = "linux")]
+            "Noto Sans Mono".to_string(),
+        ])),
         weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },
-        ..Default::default()
     }
 }
 
@@ -339,8 +349,6 @@ struct RenderData {
     cursor_color: Rgba,
     /// Selection: vec of (row, start_col, end_col) for highlighted cells
     selection_ranges: Vec<(usize, usize, usize)>,
-    cursor_text_color: Rgba,
-    default_bg: Rgba,
     selection_bg: Rgba,
     /// Scroll state: (display_offset, total_history, visible_rows)
     scroll_info: (usize, usize, usize),
@@ -369,8 +377,6 @@ struct RenderCell {
     strikethrough: bool,
     hidden: bool,
     wide_continuation: bool,
-    /// OSC 8 hyperlink URL (if any)
-    hyperlink_url: Option<String>,
 }
 
 #[cfg(feature = "gpui")]
@@ -400,7 +406,6 @@ impl Default for RenderCell {
             strikethrough: false,
             hidden: false,
             wide_continuation: false,
-            hyperlink_url: None,
         }
     }
 }
@@ -461,7 +466,6 @@ fn collect_render_data(
         let default_fg = rgb(theme.fg);
         let default_bg = rgb(theme.bg);
         let cursor_color = rgb(theme.cursor);
-        let cursor_text_color = rgb(theme.cursor_text);
 
         let mut grid: Vec<Vec<RenderCell>> = vec![vec![RenderCell::default(); cols]; rows];
 
@@ -539,7 +543,6 @@ fn collect_render_data(
                     strikethrough: flags.contains(CellFlags::STRIKEOUT),
                     hidden: flags.contains(CellFlags::HIDDEN),
                     wide_continuation: flags.contains(CellFlags::WIDE_CHAR_SPACER),
-                    hyperlink_url,
                 };
             }
         }
@@ -562,7 +565,6 @@ fn collect_render_data(
         let mut selection_ranges = Vec::new();
         if let Some(ref sel) = t.selection {
             if let Some(range) = sel.to_range(t) {
-                use alacritty_terminal::index::Line;
                 let sel_start = range.start;
                 let sel_end = range.end;
                 for line in sel_start.line.0..=sel_end.line.0 {
@@ -585,8 +587,6 @@ fn collect_render_data(
             cursor_visible,
             cursor_shape,
             cursor_color,
-            cursor_text_color,
-            default_bg,
             selection_bg: rgb(theme.selection),
             scroll_info: {
                 let offset = t.grid().display_offset();
@@ -653,7 +653,7 @@ fn shape_cached(
 }
 
 fn prepaint_terminal(
-    mut data: RenderData,
+    data: RenderData,
     bounds: Bounds<Pixels>,
     metrics: &CellMetrics,
     font_family: &str,
@@ -1063,16 +1063,25 @@ fn paint_terminal(data: PrepaintData, window: &mut Window, cx: &mut gpui::App) {
         paint_rect(rect, window);
     }
 
-    // Layer 4: Text glyphs
+    // Layer 4: Text glyphs.
+    //
+    // We log paint errors to stderr instead of silently dropping the
+    // Result. The previous `let _ = line.shaped.paint(...)` masked an
+    // entire class of failures (e.g. glyph atlas upload errors); now
+    // any future regression in `paint_glyph` will at least surface a
+    // log line on the first frame it fires, instead of presenting as
+    // "everything compiles, nothing renders".
     for line in &data.text_lines {
-        let _ = line.shaped.paint(
+        if let Err(err) = line.shaped.paint(
             line.origin,
             data.line_height,
             gpui::TextAlign::Left,
             None,
             window,
             cx,
-        );
+        ) {
+            eprintln!("[amux-terminal] paint glyph line failed: {err}");
+        }
     }
 
     // Layer 4.5: Custom underlines (over text, under cursor)
@@ -1157,7 +1166,6 @@ fn convert_color(
             NamedColor::DimMagenta => rgb(theme.dim[5]),
             NamedColor::DimCyan => rgb(theme.dim[6]),
             NamedColor::DimWhite => rgb(theme.dim[7]),
-            _ => *default,
         },
         AnsiColor::Spec(rgb_color) => Rgba {
             r: rgb_color.r as f32 / 255.0,

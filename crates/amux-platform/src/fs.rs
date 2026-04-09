@@ -32,6 +32,7 @@ impl RealFsBackend {
     /// Get the absolute path for a directory within a workspace target
     fn target_dir(target: &WorkspaceTarget, relative_path: &str) -> Result<PathBuf, String> {
         let base = match target {
+            WorkspaceTarget::LocalPath { path } => path.clone(),
             WorkspaceTarget::WindowsPath { path } => path.clone(),
             WorkspaceTarget::WslPath { distro, path } => {
                 // WSL paths are converted to UNC by PathMapper, use them directly
@@ -167,6 +168,7 @@ impl FsBackend for InMemoryFsBackend {
 
 fn dir_key(target: &WorkspaceTarget, relative_path: &str) -> String {
     let root = match target {
+        WorkspaceTarget::LocalPath { path } => path.display().to_string(),
         WorkspaceTarget::WindowsPath { path } => path.display().to_string(),
         WorkspaceTarget::WslPath { distro, path } => format!("{distro}:{path}"),
     };

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use amux_platform::PlatformCapabilities;
 use amux_core::{PaneId, SplitAxis, SurfaceState, TabId, WorkspaceTarget};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13,7 +14,7 @@ pub enum UiAction {
     SelectNextCommandPaletteItem,
     SelectPreviousCommandPaletteItem,
     OpenWorkspacePicker,
-    OpenWindowsWorkspace(PathBuf),
+    OpenLocalWorkspace(PathBuf),
     OpenWslWorkspace {
         distro: String,
         path: String,
@@ -57,8 +58,8 @@ impl UiAction {
             | UiAction::FocusPreviousPane
             | UiAction::FocusNextTab
             | UiAction::FocusPreviousTab => None,
-            UiAction::OpenWindowsWorkspace(path) => Some(amux_core::Command::OpenWorkspace(
-                WorkspaceTarget::WindowsPath { path },
+            UiAction::OpenLocalWorkspace(path) => Some(amux_core::Command::OpenWorkspace(
+                WorkspaceTarget::LocalPath { path },
             )),
             UiAction::OpenWslWorkspace { distro, path } => Some(amux_core::Command::OpenWorkspace(
                 WorkspaceTarget::WslPath { distro, path },
@@ -135,7 +136,7 @@ pub fn parse_command(input: &str, active_pane_id: Option<PaneId>) -> Result<AppC
         ["help"] => Ok(AppCommand::ShowHelp),
         ["save"] => Ok(AppCommand::SaveSession),
         ["palette"] => Ok(AppCommand::Ui(UiAction::ToggleCommandPalette)),
-        ["workspace", "open", path] => Ok(AppCommand::Ui(UiAction::OpenWindowsWorkspace(
+        ["workspace", "open", path] => Ok(AppCommand::Ui(UiAction::OpenLocalWorkspace(
             PathBuf::from(path),
         ))),
         ["workspace", "open-wsl", distro, path] => Ok(AppCommand::Ui(UiAction::OpenWslWorkspace {
@@ -209,12 +210,12 @@ pub fn parse_command(input: &str, active_pane_id: Option<PaneId>) -> Result<AppC
 }
 
 pub fn command_help() -> &'static [&'static str] {
-    &[
+    const HELP: &[&str] = &[
         "help",
         "save",
         "palette",
         "settings",
-        "workspace open <windows_path>",
+        "workspace open <path>",
         "workspace open-wsl <distro> <path>",
         "wsl list",
         "wsl ls",
@@ -234,7 +235,29 @@ pub fn command_help() -> &'static [&'static str] {
         "autosave status",
         "agent <provider_id>",
         "file open <relative_path>",
-    ]
+        "browser",
+    ];
+    HELP
+}
+
+pub fn command_help_for(capabilities: &PlatformCapabilities) -> Vec<&'static str> {
+    command_help()
+        .iter()
+        .copied()
+        .filter(|entry| {
+            if entry.starts_with("workspace open-wsl")
+                || entry.starts_with("wsl list")
+                || entry.starts_with("wsl ls")
+                || entry.starts_with("wsl browse")
+            {
+                return capabilities.wsl_workspace;
+            }
+            if entry == &"browser" {
+                return capabilities.browser_tabs;
+            }
+            true
+        })
+        .collect()
 }
 
 /// Category for palette commands
@@ -306,6 +329,19 @@ impl PaletteCommand {
     }
 }
 
+fn command_supported(command: &PaletteCommand, capabilities: &PlatformCapabilities) -> bool {
+    if command.command.starts_with("workspace open-wsl")
+        || command.command.starts_with("wsl list")
+        || command.command.starts_with("wsl browse")
+    {
+        return capabilities.wsl_workspace;
+    }
+    if command.command == "browser" || command.command.starts_with("open browser") {
+        return capabilities.browser_tabs;
+    }
+    true
+}
+
 pub fn palette_filter_help() -> &'static [&'static str] {
     &[
         "all",
@@ -350,11 +386,18 @@ pub fn palette_command_catalog() -> Vec<PaletteCommand> {
             PaletteCategory::General,
             Some("Ctrl+,"),
         ),
+        PaletteCommand::new(
+            "browser",
+            "Open Browser",
+            "Open an embedded browser tab",
+            PaletteCategory::General,
+            Some("Ctrl+Shift+B"),
+        ),
         // Workspace
         PaletteCommand::new(
             "workspace open D:/repo/amux",
-            "Open Windows Workspace",
-            "Open a local Windows directory as workspace",
+            "Open Workspace",
+            "Open a directory as workspace",
             PaletteCategory::Workspace,
             None,
         ),
@@ -582,10 +625,24 @@ pub fn palette_query_suggestions() -> &'static [&'static str] {
     ]
 }
 
+pub fn palette_command_catalog_for(capabilities: &PlatformCapabilities) -> Vec<PaletteCommand> {
+    palette_command_catalog()
+        .into_iter()
+        .filter(|command| command_supported(command, capabilities))
+        .collect()
+}
+
 /// Filter palette commands by query string and optional category
 pub fn filtered_palette_commands(query: &str) -> Vec<PaletteCommand> {
+    filtered_palette_commands_for(query, &PlatformCapabilities::default())
+}
+
+pub fn filtered_palette_commands_for(
+    query: &str,
+    capabilities: &PlatformCapabilities,
+) -> Vec<PaletteCommand> {
     let normalized = query.trim().to_ascii_lowercase();
-    let catalog = palette_command_catalog();
+    let catalog = palette_command_catalog_for(capabilities);
 
     if normalized.is_empty() {
         return catalog;

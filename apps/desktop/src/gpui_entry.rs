@@ -3,7 +3,7 @@ use amux_ui::{DesktopApp, GpuiWindowModel};
 #[cfg(feature = "gpui")]
 use gpui::{
     rgb, App, AppContext, Context, FontWeight, IntoElement, Render, Window,
-    WindowOptions, px, div, prelude::*, Bounds, Pixels, UTF16Selection,
+    WindowOptions, px, div, prelude::*,
 };
 #[cfg(feature = "gpui")]
 use gpui_platform::application;
@@ -164,7 +164,6 @@ impl Render for DragTab {
 #[cfg(feature = "gpui")]
 #[derive(Clone)]
 struct DragWorkspace {
-    workspace_id: String,
     name: String,
     index: usize,
 }
@@ -205,10 +204,6 @@ impl ContextMenuItem {
         self.separator_after = true;
         self
     }
-    /// Create a section header (non-clickable label)
-    fn header(label: &'static str) -> Self {
-        Self { label, shortcut: None, enabled: false, separator_after: false }
-    }
 }
 
 /// Captured terminal environment for spawning a new pane/tab.
@@ -223,6 +218,77 @@ pub(crate) struct CapturedEnv {
 
 #[cfg(feature = "gpui")]
 impl GpuiShellView {
+    fn browser_supported(&self) -> bool {
+        self.model.browser_supported
+    }
+
+    fn wsl_supported(&self) -> bool {
+        self.model.wsl_supported
+    }
+
+    fn activate_new_active_workspace(&mut self) {
+        if let Some(new_ws) = self.model.workspace_items.iter().find(|w| w.is_active) {
+            self.switch_workspace_terminal(&new_ws.id.clone());
+        }
+    }
+
+    /// Open a folder picker so the user can pick a workspace folder.
+    ///
+    /// **Important**: this MUST be called from a context where `cx.spawn`
+    /// is available, because the native folder dialog has to be deferred
+    /// out of the current GPUI listener stack frame. Calling
+    /// `rfd::FileDialog::pick_folder()` synchronously from inside a render
+    /// listener pumps a nested NSApp run loop on macOS, which re-enters
+    /// GPUI's RefCell and panics with `"RefCell already borrowed"`. This
+    /// follows the same deferral pattern documented at the WebView2 init
+    /// site (`open_browser` ~line 1483).
+    ///
+    /// On platforms where `folder_picker_supported` is false (e.g. Linux
+    /// without xdg-desktop-portal), or if the user cancels the dialog,
+    /// the function falls back to opening the command palette pre-filled
+    /// with `workspace open `.
+    pub(crate) fn prompt_open_local_workspace(&mut self, cx: &mut Context<Self>) {
+        if !self.model.local_workspace_supported {
+            return;
+        }
+        if self.model.folder_picker_supported {
+            // Build the dialog future on the main thread but await it
+            // from a spawned task. AsyncFileDialog routes the actual
+            // NSOpenPanel onto the main run loop internally; we just
+            // need to be off the listener's borrow stack when it fires.
+            let dialog = rfd::AsyncFileDialog::new()
+                .set_title("Select AMUX workspace folder")
+                .pick_folder();
+            cx.spawn(async move |this, cx| {
+                let folder = dialog.await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(handle) = folder {
+                        let path = handle.path().to_path_buf();
+                        this.app.open_local_workspace(path);
+                        this.refresh_model();
+                        this.activate_new_active_workspace();
+                    }
+                    // Dialog cancelled → no fallback, the user simply closed it.
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
+        // Picker capability not advertised — fall back to the command
+        // palette path so the user still has a way to type a workspace
+        // path manually.
+        self.renaming_workspace = None;
+        self.renaming_tab = None;
+        if !self.model.command_palette_open {
+            let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
+        }
+        let _ = self
+            .app
+            .dispatch(amux_ui::UiAction::SetCommandPaletteQuery("workspace open ".into()));
+        self.refresh_model();
+    }
+
     /// Returns the display name for the active workspace, falling back to the workspace ID.
     fn workspace_name(&self) -> String {
         self.model.active_workspace_name.clone()
@@ -694,14 +760,6 @@ impl GpuiShellView {
         self.save_all_layouts();
     }
 
-    /// Apply a template by name (searches built-in + custom).
-    pub(crate) fn apply_template_by_name(&mut self, name: &str) {
-        let templates = Self::all_templates();
-        if let Some(t) = templates.iter().find(|t| t.name == name) {
-            self.apply_template(t);
-        }
-    }
-
     /// Save current layout as a custom template with auto-generated name.
     pub(crate) fn save_current_as_template(&mut self, name: &str) {
         let desc = format!("{} panes", self.terminal_manager().total_panes());
@@ -748,7 +806,7 @@ impl GpuiShellView {
     /// Open the agent launcher picker.
     pub(crate) fn open_agent_picker(&mut self) {
         let mut agents: Vec<(String, String, bool)> = Vec::new();
-        if self.wsl_detected {
+        if self.wsl_supported() && self.wsl_detected {
             agents.push(("wsl".into(), "WSL Terminal".into(), true));
         }
         for &(tool_id, label, _env) in &self.detected_vibe_tools {
@@ -839,7 +897,7 @@ impl GpuiShellView {
 
     /// Jump to the next/previous search match in the active terminal.
     pub(crate) fn search_navigate(&mut self, forward: bool) {
-        use alacritty_terminal::index::{Direction, Side, Point as APoint, Line, Column};
+        use alacritty_terminal::index::{Direction, Side};
         use alacritty_terminal::term::search::RegexSearch;
 
         let query = match &self.search_state {
@@ -903,18 +961,6 @@ impl GpuiShellView {
     }
 
 
-    /// Convert pixel position to terminal cell coordinates.
-    /// Accounts for sidebar width.
-    fn pixel_to_cell(pos: gpui::Point<gpui::Pixels>, sidebar_width: f32, cell_w: f32, cell_h: f32) -> (usize, usize) {
-        let sidebar_px = px(sidebar_width);
-        let cw = px(cell_w);
-        let ch = px(cell_h);
-        let adj_x = if pos.x > sidebar_px { pos.x - sidebar_px } else { px(0.0) };
-        let col = (adj_x / cw) as usize;
-        let row = (pos.y / ch) as usize;
-        (col, row)
-    }
-
     /// Build context menu items based on current state
     fn build_context_menu_items(&self) -> Vec<ContextMenuItem> {
         let has_selection = self.terminal_manager().active_terminal_ref()
@@ -923,6 +969,7 @@ impl GpuiShellView {
             .unwrap_or(false);
 
         let mut items = vec![
+            ContextMenuItem::action("Open Workspace", None, self.model.local_workspace_supported).separator(),
             ContextMenuItem::action("Copy", Some("Ctrl+Shift+C"), has_selection),
             ContextMenuItem::action("Send to Pane", Some("Ctrl+Shift+Enter"), self.terminal_manager().total_panes() > 1),
             ContextMenuItem::action("Paste", Some("Ctrl+V"), true).separator(),
@@ -954,10 +1001,10 @@ impl GpuiShellView {
         // File preview & browser
         items.push(ContextMenuItem::action("Preview File...", None, true));
         let browser_label = if self.has_visible_browser() { "Close Browser" } else { "Open Browser" };
-        items.push(ContextMenuItem::action(browser_label, None, true).separator());
+        items.push(ContextMenuItem::action(browser_label, None, self.browser_supported()).separator());
 
         // Terminal launchers
-        let has_launchers = self.wsl_detected || !self.detected_vibe_tools.is_empty();
+        let has_launchers = (self.wsl_supported() && self.wsl_detected) || !self.detected_vibe_tools.is_empty();
         if has_launchers {
             items.push(ContextMenuItem::action("Launch Agent...", None, true));
         }
@@ -974,6 +1021,9 @@ impl GpuiShellView {
             self.terminal_manager_mut().set_active_pane(&pid);
         }
         match label {
+            "Open Workspace" => {
+                self.prompt_open_local_workspace(cx);
+            }
             "Copy" => {
                 self.copy_selection(cx);
             }
@@ -2102,7 +2152,6 @@ impl Render for GpuiShellView {
                 } else {
                     use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Direction};
                     use alacritty_terminal::selection::{Selection, SelectionType};
-                    let point = AlacPoint::new(Line(row as i32), Column(col));
                     let clicks = event.click_count;
                     let sel_type = if clicks >= 3 {
                         SelectionType::Lines
@@ -2114,6 +2163,14 @@ impl Render for GpuiShellView {
                     let side = Direction::Left;
                     if let Some(term) = this.terminal_manager_mut().active_terminal() {
                         term.with_term_mut(|t| {
+                            // Translate viewport row → grid line, accounting for scrollback.
+                            // alacritty uses negative Line values for scrollback history;
+                            // a click at viewport row 5 with display_offset=10 corresponds
+                            // to grid Line(5 - 10) = Line(-5). This is the inverse of the
+                            // grid_line → viewport_line conversion done in gpui_terminal.rs.
+                            let display_offset = t.grid().display_offset() as i32;
+                            let grid_line = row as i32 - display_offset;
+                            let point = AlacPoint::new(Line(grid_line), Column(col));
                             t.selection = Some(Selection::new(sel_type, point, side));
                         });
                     }
@@ -2165,9 +2222,15 @@ impl Render for GpuiShellView {
                     let (col, row) = this.pixel_to_term_cell(event.position);
                     let cell_offset = raw_x - col as f32 * cw;
                     let side = if cell_offset < cw * 0.5 { Direction::Left } else { Direction::Right };
-                    let point = AlacPoint::new(Line(row as i32), Column(col));
                     if let Some(term) = this.terminal_manager_mut().active_terminal() {
                         term.with_term_mut(|t| {
+                            // Same viewport→grid translation as the mouse-down handler:
+                            // when the user has scrolled into history, drag-extending the
+                            // selection must update against negative grid Lines, not the
+                            // visible viewport row.
+                            let display_offset = t.grid().display_offset() as i32;
+                            let grid_line = row as i32 - display_offset;
+                            let point = AlacPoint::new(Line(grid_line), Column(col));
                             if let Some(ref mut sel) = t.selection {
                                 sel.update(point, side);
                             }
@@ -2389,9 +2452,6 @@ impl Render for GpuiShellView {
                                 // Sidebar body: workspace list or agents view
                                 .child(if self.sidebar_state.mode == SidebarMode::Agents {
                                     // Agents view: collect agent items from terminal manager
-                                    let ws_name = workspaces.iter().find(|w| w.is_active)
-                                        .map(|w| w.name.clone())
-                                        .unwrap_or_default();
                                     let agent_items: Vec<AgentSidebarItem> = self.terminal_manager()
                                         .pane_list()
                                         .into_iter()
@@ -2410,7 +2470,6 @@ impl Render for GpuiShellView {
                                                 agent_status: info.agent_status,
                                                 status_icon: icon,
                                                 status_color: color,
-                                                workspace_name: ws_name.clone(),
                                             }
                                         })
                                         .collect();
@@ -2510,7 +2569,6 @@ impl Render for GpuiShellView {
                                             let ws_id_drop = item.id.clone();
                                             let ws_name = item.name.clone();
                                             let drag_name = item.name.clone();
-                                            let drag_id = item.id.clone();
                                             let ws_id_del = item.id.clone();
                                             let can_delete = workspaces.len() > 1;
                                             let is_renaming = self.renaming_workspace.as_ref()
@@ -2534,7 +2592,7 @@ impl Render for GpuiShellView {
                                                 .when(is_active, |d| d.border_l_2().border_color(rgb(0x81a2be)))
                                                 // Drag to reorder
                                                 .on_drag(
-                                                    DragWorkspace { workspace_id: drag_id, name: drag_name, index: ws_idx },
+                                                    DragWorkspace { name: drag_name, index: ws_idx },
                                                     |drag, _, _, cx| {
                                                         cx.stop_propagation();
                                                         cx.new(|_| drag.clone())
@@ -2630,7 +2688,7 @@ impl Render for GpuiShellView {
                                                 })
                                             );
                                     }
-                                    // Bottom: + New Workspace
+                                    // Bottom: + Open Workspace
                                     ws_col = ws_col.child(
                                         div()
                                             .id("sidebar-new-ws")
@@ -2646,16 +2704,9 @@ impl Render for GpuiShellView {
                                             .text_color(rgb(0x969896))
                                             .cursor_pointer()
                                             .hover(|d| d.bg(rgb(0x252530)).text_color(rgb(0xc5c8c6)))
-                                            .child("+  New Workspace")
+                                            .child("+  Open Workspace")
                                             .on_click(cx.listener(|this, _event, _window, cx| {
-                                                let cwd = std::env::current_dir().unwrap_or_default();
-                                                let _ = this.app.dispatch(
-                                                    amux_ui::UiAction::OpenWindowsWorkspace(cwd)
-                                                );
-                                                this.refresh_model();
-                                                if let Some(new_ws) = this.model.workspace_items.iter().find(|w| w.is_active) {
-                                                    this.switch_workspace_terminal(&new_ws.id.clone());
-                                                }
+                                                this.prompt_open_local_workspace(cx);
                                                 cx.notify();
                                             })),
                                     );

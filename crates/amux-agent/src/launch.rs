@@ -87,6 +87,7 @@ impl<B: TerminalBackend> AgentLauncher<B> {
 
 fn default_shell_for_target(target: &WorkspaceTarget) -> ShellKind {
     match target {
+        WorkspaceTarget::LocalPath { .. } => ShellKind::SystemDefault,
         WorkspaceTarget::WindowsPath { .. } => ShellKind::PowerShell,
         WorkspaceTarget::WslPath { distro, .. } => ShellKind::WslDistro(distro.clone()),
     }
@@ -103,6 +104,7 @@ fn bootstrap_command(provider: &AgentProvider) -> String {
 
 pub fn execution_target_for_workspace(target: &WorkspaceTarget) -> ExecutionTarget {
     match target {
+        WorkspaceTarget::LocalPath { .. } => ExecutionTarget::Local,
         WorkspaceTarget::WindowsPath { .. } => ExecutionTarget::WindowsLocal,
         WorkspaceTarget::WslPath { .. } => ExecutionTarget::Wsl,
     }
@@ -112,7 +114,7 @@ pub fn execution_target_for_workspace(target: &WorkspaceTarget) -> ExecutionTarg
 mod tests {
     use std::path::PathBuf;
 
-    use amux_core::{AgentLaunchMode, WorkspaceTarget};
+    use amux_core::{AgentLaunchMode, ShellKind, WorkspaceTarget};
     use amux_platform::InMemoryTerminalBackend;
 
     use crate::{AgentProvider, DetectionRule, ExecutionTarget};
@@ -130,7 +132,11 @@ mod tests {
                 program: "codex".into(),
                 version_args: vec!["--version".into()],
             },
-            supported_targets: vec![ExecutionTarget::WindowsLocal, ExecutionTarget::Wsl],
+            supported_targets: vec![
+                ExecutionTarget::Local,
+                ExecutionTarget::WindowsLocal,
+                ExecutionTarget::Wsl,
+            ],
         };
         let backend = InMemoryTerminalBackend::default();
         let launcher = AgentLauncher::new(backend.clone());
@@ -158,5 +164,38 @@ mod tests {
 
         assert_eq!(record.metadata.title.as_deref(), Some("Agent: Codex"));
         assert_eq!(record.writes[0], b"codex --approval-mode never\n");
+    }
+
+    #[test]
+    fn launcher_uses_system_shell_for_local_workspace() {
+        let provider = AgentProvider {
+            id: "codex".into(),
+            display_name: "Codex".into(),
+            command: "codex".into(),
+            args_template: vec!["--approval-mode".into(), "never".into()],
+            detection: DetectionRule {
+                program: "codex".into(),
+                version_args: vec!["--version".into()],
+            },
+            supported_targets: vec![ExecutionTarget::Local, ExecutionTarget::Wsl],
+        };
+        let backend = InMemoryTerminalBackend::default();
+        let launcher = AgentLauncher::new(backend);
+
+        let plan = launcher
+            .plan(
+                &provider,
+                AgentLaunchRequest {
+                    provider_id: "codex".into(),
+                    mode: AgentLaunchMode::AttachedTerminal,
+                    target: WorkspaceTarget::LocalPath {
+                        path: PathBuf::from("/Users/arden/amux"),
+                    },
+                    cwd: Some("/Users/arden/amux".into()),
+                },
+            )
+            .expect("plan should succeed");
+
+        assert_eq!(plan.shell, ShellKind::SystemDefault);
     }
 }

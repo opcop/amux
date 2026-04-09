@@ -443,18 +443,10 @@ impl TerminalEmulator {
 
     /// Get selected text including scrollback
     pub fn get_selection_text_with_scrollback(&self) -> String {
-        let mut text = String::new();
-
-        // Add scrollback if selected lines are in scrollback
-        if let (Some((_, start_y)), Some((_, end_y))) = (&self.selection.start, &self.selection.end)
-        {
-            let visible_start = self.rows.saturating_sub(self.scrollback.len());
-            if *start_y < visible_start || *end_y < visible_start {
-                // Selection includes scrollback - would need more complex handling
-            }
-        }
-
-        text + &self.selection.get_selected_text(&self.grid)
+        // TODO(scrollback-selection): selection that spans into scrollback is not
+        // yet implemented; this currently behaves identically to get_selection_text.
+        // Tracked as architecture debt during cross-platform Phase A cleanup.
+        self.selection.get_selected_text(&self.grid)
     }
 
     /// Resize the terminal

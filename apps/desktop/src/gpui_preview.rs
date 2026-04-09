@@ -20,8 +20,6 @@ pub struct PreviewState {
     pub file_name: String,
     /// Parsed content elements
     pub elements: Vec<PreviewElement>,
-    /// Panel width in pixels (user-resizable)
-    pub width: f32,
 }
 
 /// A renderable element in the preview
@@ -40,7 +38,6 @@ pub enum PreviewElement {
     HorizontalRule,
     Blockquote { spans: Vec<TextSpan> },
     Table { headers: Vec<Vec<TextSpan>>, rows: Vec<Vec<Vec<TextSpan>>> },
-    BlankLine,
 }
 
 /// Inline text with styling
@@ -93,7 +90,6 @@ impl PreviewState {
                         link_url: None,
                     }],
                 }],
-                width: 680.0,
             });
         }
 
@@ -127,7 +123,6 @@ impl PreviewState {
             file_path: file_path.to_string(),
             file_name,
             elements,
-            width: 680.0,
         })
     }
 }
@@ -173,7 +168,6 @@ fn parse_markdown(content: &str) -> Vec<PreviewElement> {
     let mut current_spans: Vec<TextSpan> = Vec::new();
     let mut bold = false;
     let mut italic = false;
-    let mut in_code_span = false;
     let mut link_url: Option<String> = None;
     let mut in_heading: Option<u8> = None;
     let mut in_code_block = false;
@@ -183,7 +177,6 @@ fn parse_markdown(content: &str) -> Vec<PreviewElement> {
     let mut list_stack: Vec<(bool, usize)> = Vec::new(); // (ordered, next_index)
 
     // Table state
-    let mut in_table = false;
     let mut in_table_head = false;
     let mut table_headers: Vec<Vec<TextSpan>> = Vec::new();
     let mut table_rows: Vec<Vec<Vec<TextSpan>>> = Vec::new();
@@ -229,7 +222,6 @@ fn parse_markdown(content: &str) -> Vec<PreviewElement> {
                     current_spans.clear();
                 }
                 Tag::Table(_alignments) => {
-                    in_table = true;
                     table_headers.clear();
                     table_rows.clear();
                 }
@@ -273,7 +265,6 @@ fn parse_markdown(content: &str) -> Vec<PreviewElement> {
                 TagEnd::BlockQuote(_) => { in_blockquote = false; }
                 TagEnd::List(_) => { list_stack.pop(); }
                 TagEnd::Table => {
-                    in_table = false;
                     elements.push(PreviewElement::Table {
                         headers: table_headers.clone(),
                         rows: table_rows.clone(),
@@ -323,7 +314,7 @@ fn parse_markdown(content: &str) -> Vec<PreviewElement> {
                         text: text.to_string(),
                         bold,
                         italic,
-                        code: in_code_span,
+                        code: false,
                         link_url: link_url.clone(),
                     });
                 }
@@ -909,17 +900,12 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                 }))
                 .into_any_element()
         }
-
-        PreviewElement::BlankLine => {
-            div().h(px(8.0)).into_any_element()
-        }
     }
 }
 
 #[cfg(feature = "gpui")]
 fn render_spans(spans: &[TextSpan]) -> AnyElement {
     // Merge adjacent plain-text spans (same style) to reduce div count
-    let mut merged: Vec<&TextSpan> = Vec::new();
     // For simplicity, just render each unique-styled span as one div
     // but concatenate adjacent spans with identical styling
     div()

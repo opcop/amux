@@ -6,14 +6,17 @@
 #[cfg(feature = "gpui")]
 use amux_platform::terminal::manager::SplitDirection;
 
-/// Get the ~/.amux base directory (available without gpui feature for config loading)
+/// Get the AMUX config directory.
+///
+/// Defaults to `~/.amux` (`%USERPROFILE%\.amux` on Windows) but is
+/// overridable via the `AMUX_HOME` environment variable. Resolution is
+/// centralized in `amux_platform::amux_home_dir()` so every layer
+/// (session storage, layouts, screenshots, startup files, templates)
+/// goes through the same rules and PTY children keep inheriting the
+/// user's real `HOME`. See the doc comment on
+/// `amux_platform::dirs::amux_home_dir` for the full rationale.
 pub(crate) fn amux_base_dir() -> std::path::PathBuf {
-    let home = if cfg!(target_os = "windows") {
-        std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())
-    } else {
-        std::env::var("HOME").unwrap_or_else(|_| ".".into())
-    };
-    std::path::PathBuf::from(home).join(".amux")
+    amux_platform::amux_home_dir()
 }
 
 /// Get the config.toml path

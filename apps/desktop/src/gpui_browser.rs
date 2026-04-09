@@ -6,7 +6,7 @@
 #[cfg(feature = "gpui")]
 use std::rc::Rc;
 #[cfg(feature = "gpui")]
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 #[cfg(feature = "gpui")]
 use std::sync::{Arc, Mutex};
 
@@ -18,8 +18,6 @@ use gpui::*;
 #[cfg(feature = "gpui")]
 pub struct BrowserPaneState {
     pub url: String,
-    pub title: String,
-    pub width: f32,
     webview: Option<Rc<wry::WebView>>,
     visible: bool,
     bounds: Bounds<Pixels>,
@@ -34,8 +32,6 @@ impl BrowserPaneState {
     pub fn new(url: &str) -> Self {
         Self {
             url: url.to_string(),
-            title: String::new(),
-            width: 680.0,
             webview: None,
             visible: true,
             bounds: Bounds::default(),
@@ -166,10 +162,6 @@ impl BrowserPaneState {
 
     pub fn is_visible(&self) -> bool { self.visible }
 
-    pub fn toggle_visible(&mut self) {
-        if self.visible { self.hide(); } else { self.show(); }
-    }
-
     pub fn sync_bounds(&mut self, bounds: Bounds<Pixels>) {
         if self.bounds == bounds { return; }
         self.bounds = bounds;
@@ -187,7 +179,6 @@ impl BrowserPaneState {
     }
 
     pub fn is_initialized(&self) -> bool { self.webview.is_some() }
-    pub fn force_bounds_update(&mut self) { self.bounds = Bounds::default(); }
 
     pub fn focus_parent(&self) {
         if let Some(ref wv) = self.webview { let _ = wv.focus_parent(); }
@@ -331,4 +322,3 @@ fn nav_btn_styled(
         .child(label)
         .on_click(handler)
 }
-

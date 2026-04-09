@@ -1087,7 +1087,6 @@ impl TerminalManager {
     /// Returns notifications for agent status transitions on non-active tabs.
     /// Called from the polling loop.
     pub fn poll_activity(&mut self) -> Vec<AgentNotification> {
-        use alacritty_terminal::grid::Dimensions;
         let mut notifications = Vec::new();
         let active_pane_id = self.active_pane.clone();
         for (pane_id, pane) in &mut self.panes {

@@ -232,15 +232,39 @@ impl RealTerminalBackend {
         id
     }
 
+    fn build_unix_command(spec: &TerminalLaunchSpec) -> (String, Vec<String>, Option<String>) {
+        let shell = match &spec.shell {
+            ShellKind::SystemDefault => {
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+            }
+            ShellKind::Bash => "bash".to_string(),
+            ShellKind::Zsh => "zsh".to_string(),
+            ShellKind::Fish => "fish".to_string(),
+            ShellKind::Custom(program) => program.clone(),
+            ShellKind::PowerShell => "pwsh".to_string(),
+            ShellKind::Cmd | ShellKind::WslDefault | ShellKind::WslDistro(_) => {
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+            }
+        };
+
+        let args = match &spec.shell {
+            ShellKind::Fish | ShellKind::Custom(_) => Vec::new(),
+            _ => vec!["-l".to_string()],
+        };
+
+        (shell, args, spec.cwd.clone())
+    }
+
     fn build_pty_command(spec: &TerminalLaunchSpec) -> Result<(String, Vec<String>, Option<String>), String> {
-        // On non-Windows platforms, always use the system shell
         if !cfg!(target_os = "windows") {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            return Ok((shell, vec!["-l".to_string()], spec.cwd.clone()));
+            return Ok(Self::build_unix_command(spec));
         }
 
         match (&spec.target, &spec.shell) {
-            (WorkspaceTarget::WindowsPath { .. }, ShellKind::PowerShell) => {
+            (WorkspaceTarget::LocalPath { .. }, ShellKind::SystemDefault)
+            | (WorkspaceTarget::WindowsPath { .. }, ShellKind::SystemDefault)
+            | (WorkspaceTarget::LocalPath { .. }, ShellKind::PowerShell)
+            | (WorkspaceTarget::WindowsPath { .. }, ShellKind::PowerShell) => {
                 // Prefer pwsh.exe (PowerShell 7+) over powershell.exe (5.1)
                 let program = if which_exists("pwsh.exe") {
                     "pwsh.exe"
@@ -253,14 +277,33 @@ impl RealTerminalBackend {
                     spec.cwd.clone(),
                 ))
             }
-            (WorkspaceTarget::WindowsPath { .. }, ShellKind::Cmd) => {
+            (WorkspaceTarget::LocalPath { .. }, ShellKind::Cmd)
+            | (WorkspaceTarget::WindowsPath { .. }, ShellKind::Cmd) => {
                 Ok((
                     "cmd.exe".to_string(),
                     Vec::new(),
                     spec.cwd.clone(),
                 ))
             }
-            (WorkspaceTarget::WslPath { distro, .. }, _) | (WorkspaceTarget::WindowsPath { .. }, ShellKind::WslDistro(distro)) => {
+            (WorkspaceTarget::LocalPath { .. }, ShellKind::Bash)
+            | (WorkspaceTarget::WindowsPath { .. }, ShellKind::Bash) => {
+                Ok(("bash".to_string(), Vec::new(), spec.cwd.clone()))
+            }
+            (WorkspaceTarget::LocalPath { .. }, ShellKind::Zsh)
+            | (WorkspaceTarget::WindowsPath { .. }, ShellKind::Zsh) => {
+                Ok(("zsh".to_string(), Vec::new(), spec.cwd.clone()))
+            }
+            (WorkspaceTarget::LocalPath { .. }, ShellKind::Fish)
+            | (WorkspaceTarget::WindowsPath { .. }, ShellKind::Fish) => {
+                Ok(("fish".to_string(), Vec::new(), spec.cwd.clone()))
+            }
+            (WorkspaceTarget::LocalPath { .. }, ShellKind::Custom(program))
+            | (WorkspaceTarget::WindowsPath { .. }, ShellKind::Custom(program)) => {
+                Ok((program.clone(), Vec::new(), spec.cwd.clone()))
+            }
+            (WorkspaceTarget::WslPath { distro, .. }, _)
+            | (WorkspaceTarget::LocalPath { .. }, ShellKind::WslDistro(distro))
+            | (WorkspaceTarget::WindowsPath { .. }, ShellKind::WslDistro(distro)) => {
                 let mut args = vec![
                     "-d".to_string(),
                     distro.clone(),
@@ -273,10 +316,16 @@ impl RealTerminalBackend {
                 args.push("bash".to_string());
                 Ok(("wsl.exe".to_string(), args, None))
             }
-            _ => {
-                // Fallback: use system shell
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                Ok((shell, Vec::new(), spec.cwd.clone()))
+            (WorkspaceTarget::LocalPath { .. }, ShellKind::WslDefault)
+            | (WorkspaceTarget::WindowsPath { .. }, ShellKind::WslDefault) => {
+                let mut args = Vec::new();
+                if let Some(cwd) = &spec.cwd {
+                    args.push("--cd".to_string());
+                    args.push(cwd.clone());
+                }
+                args.push("--".to_string());
+                args.push("bash".to_string());
+                Ok(("wsl.exe".to_string(), args, None))
             }
         }
     }
@@ -319,7 +368,9 @@ impl RealTerminalBackend {
 
         let metadata = TerminalSessionMetadata {
             id: session_id,
-            kind: if matches!(spec.target, WorkspaceTarget::WslPath { .. }) {
+            kind: if !cfg!(target_os = "windows") {
+                TerminalSessionKind::UnixPty
+            } else if matches!(spec.target, WorkspaceTarget::WslPath { .. }) {
                 TerminalSessionKind::Wsl
             } else {
                 TerminalSessionKind::WindowsConPty

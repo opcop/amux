@@ -84,7 +84,11 @@ fn default_providers() -> Vec<AgentProvider> {
                 program: "codex".into(),
                 version_args: vec!["--version".into()],
             },
-            supported_targets: vec![ExecutionTarget::WindowsLocal, ExecutionTarget::Wsl],
+            supported_targets: vec![
+                ExecutionTarget::Local,
+                ExecutionTarget::WindowsLocal,
+                ExecutionTarget::Wsl,
+            ],
         },
         AgentProvider {
             id: "claude".into(),
@@ -95,7 +99,11 @@ fn default_providers() -> Vec<AgentProvider> {
                 program: "claude".into(),
                 version_args: vec!["--version".into()],
             },
-            supported_targets: vec![ExecutionTarget::WindowsLocal, ExecutionTarget::Wsl],
+            supported_targets: vec![
+                ExecutionTarget::Local,
+                ExecutionTarget::WindowsLocal,
+                ExecutionTarget::Wsl,
+            ],
         },
         AgentProvider {
             id: "opencode".into(),
@@ -106,7 +114,11 @@ fn default_providers() -> Vec<AgentProvider> {
                 program: "opencode".into(),
                 version_args: vec!["--version".into()],
             },
-            supported_targets: vec![ExecutionTarget::WindowsLocal, ExecutionTarget::Wsl],
+            supported_targets: vec![
+                ExecutionTarget::Local,
+                ExecutionTarget::WindowsLocal,
+                ExecutionTarget::Wsl,
+            ],
         },
         AgentProvider {
             id: "aider".into(),
@@ -117,7 +129,11 @@ fn default_providers() -> Vec<AgentProvider> {
                 program: "aider".into(),
                 version_args: vec!["--version".into()],
             },
-            supported_targets: vec![ExecutionTarget::WindowsLocal, ExecutionTarget::Wsl],
+            supported_targets: vec![
+                ExecutionTarget::Local,
+                ExecutionTarget::WindowsLocal,
+                ExecutionTarget::Wsl,
+            ],
         },
     ]
 }
@@ -135,6 +151,17 @@ mod tests {
         let registry = StaticAgentRegistry::with_defaults();
         let providers = registry.available_for_workspace(&WorkspaceTarget::WindowsPath {
             path: PathBuf::from("D:/repo/amux"),
+        });
+
+        assert!(providers.iter().any(|provider| provider.id == "codex"));
+        assert!(providers.iter().any(|provider| provider.id == "claude"));
+    }
+
+    #[test]
+    fn registry_filters_providers_for_local_workspace() {
+        let registry = StaticAgentRegistry::with_defaults();
+        let providers = registry.available_for_workspace(&WorkspaceTarget::LocalPath {
+            path: PathBuf::from("/Users/arden/amux"),
         });
 
         assert!(providers.iter().any(|provider| provider.id == "codex"));

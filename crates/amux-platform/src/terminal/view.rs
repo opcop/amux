@@ -91,7 +91,7 @@ impl TerminalView {
     pub fn spawn_default(&mut self, target: WorkspaceTarget) -> Result<(), String> {
         let profile = TerminalLaunchProfile {
             target,
-            shell: ShellKind::PowerShell,
+            shell: ShellKind::SystemDefault,
             cwd: None,
             env: std::collections::BTreeMap::new(),
             title: Some("Terminal".to_string()),

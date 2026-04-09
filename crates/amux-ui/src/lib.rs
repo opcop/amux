@@ -18,7 +18,7 @@ pub use render::{
     GpuiActiveSurfaceItem, GpuiAgentItem, GpuiFileItem, GpuiOpenFileItem, GpuiPaletteCommandItem,
     GpuiPaneItem, GpuiTabItem, GpuiWindowModel, GpuiWorkspaceItem,
 };
-pub use root::DesktopApp;
+pub use root::{DesktopApp, StartupMode, StartupOptions, StartupResult};
 pub use state::{
     ActiveSurfaceItem, AgentListItem, AppSnapshot, FileListItem, LayoutSnapshot, OpenFileItem,
     PaneSnapshot, RecentWorkspaceItem, SaveStatus, SplitSnapshot, TabSnapshot, UiState,

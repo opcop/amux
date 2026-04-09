@@ -58,7 +58,7 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
         Shortcut::new(
             "ctrl+shift+n",
             "Ctrl+Shift+N",
-            "New workspace (folder picker)",
+            "Open workspace",
             ShortcutCategory::Workspace,
         ),
         Shortcut::new(
@@ -277,7 +277,7 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
         Shortcut::new(
             "ctrl+shift+b",
             "Ctrl+Shift+B",
-            "Toggle WSL file browser",
+            "Open embedded browser tab",
             ShortcutCategory::Browser,
         ),
         // Quick switcher

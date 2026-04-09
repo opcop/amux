@@ -76,10 +76,12 @@ pub fn build_wsl_command(spec: &TerminalLaunchSpec) -> Result<WslLaunchCommand, 
         (WorkspaceTarget::WslPath { distro: _, path }, ShellKind::WslDistro(selected)) => {
             (Some(selected.as_str()), spec.cwd.as_deref().unwrap_or(path.as_str()))
         }
-        (WorkspaceTarget::WindowsPath { .. }, ShellKind::WslDefault) => {
+        (WorkspaceTarget::LocalPath { .. }, ShellKind::WslDefault)
+        | (WorkspaceTarget::WindowsPath { .. }, ShellKind::WslDefault) => {
             (None, spec.cwd.as_deref().unwrap_or("/"))
         }
-        (WorkspaceTarget::WindowsPath { .. }, ShellKind::WslDistro(selected)) => {
+        (WorkspaceTarget::LocalPath { .. }, ShellKind::WslDistro(selected))
+        | (WorkspaceTarget::WindowsPath { .. }, ShellKind::WslDistro(selected)) => {
             (Some(selected.as_str()), spec.cwd.as_deref().unwrap_or("/"))
         }
         _ => return Err("spec is not a WSL launch target".into()),
