@@ -30,11 +30,11 @@ fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let parsed = parse_cli(&raw_args);
 
-    let mut app = if parsed.use_real {
-        eprintln!("mode: real filesystem + terminal backends");
-        amux_ui::DesktopApp::with_platform("AMUX", amux_platform::current_host_platform())
-    } else {
+    let mut app = if parsed.demo_mode {
+        eprintln!("mode: in-memory demo (pass --real or omit --demo for production)");
         amux_ui::DesktopApp::new("AMUX")
+    } else {
+        amux_ui::DesktopApp::with_platform("AMUX", amux_platform::current_host_platform())
     };
 
     let startup = app.startup(amux_ui::StartupOptions {
@@ -87,8 +87,9 @@ fn main() {
 
 /// Result of parsing the desktop CLI argument list.
 struct ParsedCli {
-    /// `--real` toggles the production filesystem + terminal backends.
-    use_real: bool,
+    /// `--demo` opts into the in-memory demo mode (no real PTY / FS).
+    /// Default is production mode with real platform backends.
+    demo_mode: bool,
     /// Optional explicit workspace path. Accepts both `--workspace <path>`
     /// and a single positional argument that resolves to an existing
     /// directory. Anything else is treated as an inline command (legacy
@@ -101,14 +102,17 @@ struct ParsedCli {
 }
 
 fn parse_cli(args: &[String]) -> ParsedCli {
-    let mut use_real = false;
+    let mut demo_mode = false;
     let mut workspace: Option<std::path::PathBuf> = None;
     let mut commands: Vec<String> = Vec::new();
 
     let mut iter = args.iter().peekable();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--real" => use_real = true,
+            // --demo: opt into in-memory mode (tests / demos).
+            // --real: accepted for backwards compat but is now the default.
+            "--demo" => demo_mode = true,
+            "--real" => {}
             "--workspace" | "-w" => {
                 if let Some(path) = iter.next() {
                     workspace = Some(std::path::PathBuf::from(path));
@@ -132,7 +136,7 @@ fn parse_cli(args: &[String]) -> ParsedCli {
     }
 
     ParsedCli {
-        use_real,
+        demo_mode,
         workspace,
         commands,
     }
