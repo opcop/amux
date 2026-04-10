@@ -158,9 +158,28 @@ impl GpuiShellView {
         }
 
         let keystroke = &event.keystroke;
-        let ctrl = keystroke.modifiers.control;
+        // Cross-platform "app modifier" normalization.
+        //
+        // amux's keyboard shortcuts (Open Workspace, split, copy, paste,
+        // command palette, ...) are written as `ctrl+shift+X` historically
+        // because the project started Windows-first. On macOS the platform
+        // convention is Cmd (modifiers.platform), and Ctrl is reserved for
+        // shell control characters (Ctrl+C interrupts, Ctrl+D EOF, etc).
+        //
+        // Rather than rewriting every match arm with a per-platform
+        // string, we normalize at the source: on macOS, treat the
+        // platform (Cmd) modifier as if it were Control, AND drop the
+        // real Ctrl from the modifier string entirely so that real
+        // Ctrl+letter keystrokes fall through to the PTY as the user
+        // expects (Ctrl+C must reach the shell on macOS too). On
+        // Windows / Linux nothing changes — the platform key is still
+        // treated as a separate modifier.
         let shift = keystroke.modifiers.shift;
         let alt = keystroke.modifiers.alt;
+        #[cfg(target_os = "macos")]
+        let ctrl = keystroke.modifiers.platform;
+        #[cfg(not(target_os = "macos"))]
+        let ctrl = keystroke.modifiers.control;
 
         let key = &keystroke.key;
 
@@ -191,10 +210,17 @@ impl GpuiShellView {
             }
         }
 
-        // F12: toggle inline DevTools panel inside the browser
+        // F12: toggle Web Inspector for the active browser pane.
+        //
+        // Pressing F12 a second time closes the inspector instead of
+        // racing another open call against the existing window — this
+        // matches Chrome / Safari / Firefox behaviour. The inspector
+        // window itself is managed by WebKit (separate NSWindow on
+        // macOS, separate WebView2 dev tools window on Windows); see
+        // BrowserPaneState::toggle_devtools for the size/dock caveats.
         if keystr == "f12" {
             if let Some((_, entry)) = self.active_browser_entry() {
-                entry.browser.open_devtools();
+                entry.browser.toggle_devtools();
                 cx.notify();
                 return;
             }

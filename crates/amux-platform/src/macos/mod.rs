@@ -34,7 +34,13 @@ impl MacosPlatform {
             capabilities: PlatformCapabilities {
                 local_workspace: true,
                 wsl_workspace: false,
-                browser_tabs: false,
+                // wry 0.53 supports WKWebView on macOS via objc2-app-kit;
+                // build_as_child(window_handle) accepts the AppKit
+                // window handle that GPUI exposes via raw_window_handle.
+                // No additional macOS-specific runtime work is needed
+                // beyond the capability flag — the existing
+                // gpui_browser.rs path is cross-platform.
+                browser_tabs: true,
                 image_clipboard: true,
                 system_metrics: true,
                 folder_picker: true,
@@ -129,6 +135,7 @@ mod tests {
         assert!(!caps.wsl_workspace);
         assert!(caps.image_clipboard, "macOS now has a real clipboard backend");
         assert!(caps.folder_picker, "macOS folder picker uses native AppKit via rfd");
+        assert!(caps.browser_tabs, "macOS browser uses wry+WKWebView via build_as_child");
         assert!(caps.system_metrics);
     }
 

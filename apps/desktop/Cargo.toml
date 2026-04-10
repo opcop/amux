@@ -26,12 +26,23 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true
 smol = { version = "2", optional = true }
 wry = { version = "0.53", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
-image = { version = "0.25", default-features = false, features = ["bmp", "png"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "png", "jpeg"] }
 # Native folder picker. Used via AsyncFileDialog from cx.spawn so the dialog
 # runs on the main NSApp loop *outside* a GPUI listener stack frame, which
 # avoids the RefCell re-entrancy panic that the synchronous variant triggers
 # (see prompt_open_local_workspace).
 rfd = "0.17"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Native AppKit access for setting the Dock icon at runtime. Already
+# pulled into the workspace transitively by gpui_macos and arboard, so
+# this dep adds no new compile cost — it just makes the symbols
+# directly reachable from amux-desktop. Used by `set_macos_dock_icon`
+# in main.rs to give the dev-mode `cargo run` binary a real Dock icon
+# even before we ship a packaged .app bundle.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 git2 = { version = "0.20", features = ["https", "ssh", "vendored-libgit2", "vendored-openssl"] }

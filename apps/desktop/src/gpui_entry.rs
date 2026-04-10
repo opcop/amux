@@ -190,15 +190,23 @@ impl Render for DragWorkspace {
 #[derive(Clone)]
 pub(crate) struct ContextMenuItem {
     pub(crate) label: &'static str,
-    pub(crate) shortcut: Option<&'static str>,
+    /// Owned because shortcut labels are now per-platform-rendered at
+    /// build time (e.g. "⌘⇧C" on macOS vs "Ctrl+Shift+C" elsewhere) and
+    /// therefore cannot be `&'static str` literals.
+    pub(crate) shortcut: Option<String>,
     pub(crate) enabled: bool,
     pub(crate) separator_after: bool,
 }
 
 #[cfg(feature = "gpui")]
 impl ContextMenuItem {
-    fn action(label: &'static str, shortcut: Option<&'static str>, enabled: bool) -> Self {
-        Self { label, shortcut, enabled, separator_after: false }
+    fn action(label: &'static str, shortcut: Option<&str>, enabled: bool) -> Self {
+        Self {
+            label,
+            shortcut: shortcut.map(str::to_string),
+            enabled,
+            separator_after: false,
+        }
     }
     fn separator(mut self) -> Self {
         self.separator_after = true;
@@ -968,19 +976,45 @@ impl GpuiShellView {
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
+        // Native modifier label per host platform.
+        //
+        // On macOS users expect ⌘ where Windows / Linux users expect Ctrl,
+        // and "Ctrl" labels in macOS context menus look immediately
+        // foreign. We render the actual symbol via cfg() so the menu
+        // matches each platform's HIG without the input handler having
+        // to know about display strings.
+        #[cfg(target_os = "macos")]
+        let mod_label = |suffix: &str| format!("⌘⇧{suffix}");
+        #[cfg(not(target_os = "macos"))]
+        let mod_label = |suffix: &str| format!("Ctrl+Shift+{suffix}");
+
+        // Cmd+V on macOS, Ctrl+V on Windows/Linux for Paste.
+        #[cfg(target_os = "macos")]
+        let paste_label: String = "⌘V".to_string();
+        #[cfg(not(target_os = "macos"))]
+        let paste_label: String = "Ctrl+V".to_string();
+
+        let copy_label = mod_label("C");
+        let send_label = mod_label("Enter");
+        let split_right_label = mod_label("\\");
+        let split_down_label = mod_label("D");
+        let new_tab_label = mod_label("T");
+        let close_pane_label = mod_label("W");
+        let zoom_label = mod_label("F");
+
         let mut items = vec![
             ContextMenuItem::action("Open Workspace", None, self.model.local_workspace_supported).separator(),
-            ContextMenuItem::action("Copy", Some("Ctrl+Shift+C"), has_selection),
-            ContextMenuItem::action("Send to Pane", Some("Ctrl+Shift+Enter"), self.terminal_manager().total_panes() > 1),
-            ContextMenuItem::action("Paste", Some("Ctrl+V"), true).separator(),
-            ContextMenuItem::action("Split Right", Some("Ctrl+Shift+\\"), true),
-            ContextMenuItem::action("Split Down", Some("Ctrl+Shift+D"), true).separator(),
-            ContextMenuItem::action("New Tab", Some("Ctrl+Shift+T"), true),
-            ContextMenuItem::action("Close Pane", Some("Ctrl+Shift+W"), self.terminal_manager().total_panes() > 1).separator(),
+            ContextMenuItem::action("Copy", Some(&copy_label), has_selection),
+            ContextMenuItem::action("Send to Pane", Some(&send_label), self.terminal_manager().total_panes() > 1),
+            ContextMenuItem::action("Paste", Some(&paste_label), true).separator(),
+            ContextMenuItem::action("Split Right", Some(&split_right_label), true),
+            ContextMenuItem::action("Split Down", Some(&split_down_label), true).separator(),
+            ContextMenuItem::action("New Tab", Some(&new_tab_label), true),
+            ContextMenuItem::action("Close Pane", Some(&close_pane_label), self.terminal_manager().total_panes() > 1).separator(),
             if self.zoomed_pane.is_some() {
-                ContextMenuItem::action("Restore Pane", Some("Ctrl+Shift+F"), true).separator()
+                ContextMenuItem::action("Restore Pane", Some(&zoom_label), true).separator()
             } else {
-                ContextMenuItem::action("Zoom Pane", Some("Ctrl+Shift+F"), self.terminal_manager().total_panes() > 1).separator()
+                ContextMenuItem::action("Zoom Pane", Some(&zoom_label), self.terminal_manager().total_panes() > 1).separator()
             },
         ];
 
@@ -1074,7 +1108,11 @@ impl GpuiShellView {
                 self.open_file_picker();
             }
             "Open Browser" => {
-                self.open_browser("http://localhost:3000", window, cx);
+                // Empty URL → open_browser falls through to the embedded
+                // welcome page. This avoids the 30-second TCP timeout that
+                // happened when the menu hardcoded http://localhost:3000
+                // and no dev server was running.
+                self.open_browser("", window, cx);
             }
             "Close Browser" => {
                 self.close_browser();
@@ -1510,9 +1548,19 @@ impl GpuiShellView {
     /// WebView2 creation is deferred via cx.spawn to avoid RefCell re-borrow.
     pub(crate) fn open_browser(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_component::input::{InputState, InputEvent};
-        use crate::gpui_browser::{BrowserPaneState, BrowserTabEntry};
+        use crate::gpui_browser::{BrowserPaneState, BrowserTabEntry, default_welcome_url};
 
-        let url = if url.is_empty() { "http://localhost:3000" } else { url };
+        // Empty URL → load the embedded welcome page instead of
+        // http://localhost:3000. The old default sat on a 30-second TCP
+        // connect timeout when no dev server was running, which made the
+        // browser feel "slow" on first open. The welcome page renders
+        // instantly and tells the user how to drive the URL bar / F12.
+        let url_owned = if url.is_empty() {
+            default_welcome_url()
+        } else {
+            url.to_string()
+        };
+        let url = url_owned.as_str();
         let raw_handle = match self.cached_window_handle {
             Some(h) => h,
             None => {
@@ -1676,7 +1724,10 @@ impl GpuiShellView {
                 Some(true)
             }
             Some("browser") | Some("web") => {
-                let url = parts.get(2).map(|s| s.trim()).unwrap_or("http://localhost:3000");
+                // Empty url falls through to the welcome page (avoids the
+                // localhost:3000 30-second TCP timeout when no dev server
+                // is running).
+                let url = parts.get(2).map(|s| s.trim()).unwrap_or("");
                 self.open_browser(url, window, cx);
                 Some(true)
             }
@@ -2099,6 +2150,13 @@ impl Render for GpuiShellView {
             .size_full()
             .bg(rgb(0x1d1f21))
             .text_color(rgb(0xffffff))
+            // macOS: with `appears_transparent: true` the content area
+            // extends behind the titlebar, so the top ~28px overlap the
+            // traffic light buttons. Pad the root flex column down on
+            // macOS only so the sidebar / tab strip start *below* the
+            // overlay. Windows / Linux keep the standard layout (the
+            // window manager handles the titlebar above the content).
+            .when(cfg!(target_os = "macos"), |d| d.pt(px(28.0)))
             .on_key_down(cx.listener(|this, event, window, cx| {
                 this.on_global_key_down(event, window, cx);
             }))
@@ -2993,6 +3051,201 @@ impl Render for GpuiShellView {
 
 // NOTE: render_context_menu, first_pane_in_layout, render_layout
 // have been moved to gpui_layout_renderer.rs
+/// Set the macOS Dock icon for the running NSApplication.
+///
+/// Embeds `assets/icons/amux.jpg` into the binary via `include_bytes!`,
+/// applies a macOS-style rounded-square ("squircle") alpha mask, and
+/// hands the resulting PNG to AppKit at startup. This is the unbundled
+/// dev path: `cargo run` gets a real Dock icon without needing a
+/// packaged `.app` bundle.
+///
+/// ## Why the rounded-corner mask
+///
+/// macOS Big Sur+ adopted a unified rounded-square icon shape across
+/// the system, and every native app's icon (Finder, Safari, Terminal,
+/// Xcode, ...) honors it. If we hand AppKit a plain rectangular JPEG,
+/// the Dock renders it as a literal rectangle and AMUX immediately
+/// reads as "not a Mac app" against its squircle neighbours. We mask
+/// the icon at runtime instead of pre-baking the corners into a PNG
+/// asset so updating `assets/icons/amux.jpg` requires only swapping
+/// the JPG — no offline image-processing step.
+///
+/// ## Cross-platform icon strategy
+///
+/// AMUX ships a single source-of-truth bitmap that each platform
+/// consumes through its own native channel:
+///
+/// - **Windows**: `assets/icons/amux.ico` is embedded into the
+///   executable's resource section by `build.rs` via the
+///   `winresource` crate. This is what Explorer / Taskbar / Alt-Tab
+///   read. Windows applies its own rounded corners at the shell layer
+///   so we ship a plain ICO.
+/// - **macOS**: `assets/icons/amux.jpg` is squircle-masked and fed to
+///   `NSApplication::setApplicationIconImage_` at runtime. A future
+///   packaged `.app` bundle can additionally carry an `.icns` +
+///   `Info.plist` for Finder / Spotlight; the runtime call below
+///   takes precedence over any bundle icon.
+/// - **Linux**: `assets/icons/amux.jpg` (or a PNG export) is the
+///   value of the `Icon=` field in the `.desktop` file installed at
+///   package time. Most modern desktops apply their own corner
+///   styling, so the source bitmap stays plain.
+///
+/// Editing the master art is therefore: replace `amux.jpg` and
+/// `amux.ico`. macOS picks it up on the next `cargo build`; Windows
+/// picks it up after the next `build.rs` run.
+///
+/// SAFETY: must be called on the main thread, after `application().run`
+/// has bootstrapped NSApplication. The single call site in `run()` is
+/// inside the gpui application closure, which guarantees both.
+#[cfg(all(feature = "gpui", target_os = "macos"))]
+fn set_macos_dock_icon() {
+    use objc2::rc::Retained;
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    // Embedded JPEG. Source-of-truth for the macOS Dock icon — keep
+    // in sync with the Windows .ico master.
+    const ICON_JPG: &[u8] = include_bytes!("../../../assets/icons/amux.jpg");
+
+    let png_bytes = match build_squircle_icon_png(ICON_JPG) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("[amux-icon] failed to build squircle PNG: {err}");
+            return;
+        }
+    };
+
+    unsafe {
+        let Some(mtm) = MainThreadMarker::new() else {
+            // Not on the main thread — skip rather than panic. The
+            // single intended call site is the gpui application
+            // closure which always runs on the main thread, but a
+            // defensive fallback keeps non-main-thread test harnesses
+            // from blowing up.
+            return;
+        };
+        let data: Retained<NSData> = NSData::dataWithBytes_length(
+            png_bytes.as_ptr().cast(),
+            png_bytes.len(),
+        );
+        let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+            eprintln!("[amux-icon] failed to decode squircle PNG into NSImage");
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        app.setApplicationIconImage(Some(&image));
+    }
+}
+
+/// Apply a macOS Big Sur–style squircle alpha mask + standard icon
+/// margin to a JPEG icon, returning PNG bytes.
+///
+/// macOS app icons are designed against a specific grid (Apple HIG):
+///
+/// - **Canvas**: e.g. 1024×1024
+/// - **Visible square**: 824×824 centered (≈ 80.5% of the canvas side,
+///   ≈ 9.77% transparent margin on every side)
+/// - **Corner radius**: ~22.5% of the visible square's side
+///
+/// Every native Mac app's icon honors this grid, so when AMUX shipped
+/// a bitmap that filled the entire canvas it appeared ~25% larger
+/// than its Dock neighbours and immediately read as "ported app".
+///
+/// The pipeline below:
+///
+///   1. Decode the input JPEG to RGBA8.
+///   2. Resize it to fit the *inner* visible square (≈ 80% of the
+///      canvas side) with high-quality Lanczos filtering.
+///   3. Composite onto a transparent canvas of the original size,
+///      centered.
+///   4. Apply a rounded-rectangle alpha mask matching the visible
+///      square + 22.5% corner radius. The mask is anti-aliased over
+///      a 1.5px band so the corners stay smooth at Dock-pixel sizes.
+///
+/// We use a plain rounded rectangle rather than a true superellipse
+/// ("squircle"). At icon resolutions the visible difference is well
+/// under one pixel, and a rounded rect is trivial to compute without
+/// pulling in a path rasterizer.
+#[cfg(all(feature = "gpui", target_os = "macos"))]
+fn build_squircle_icon_png(jpg_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use image::imageops::FilterType;
+    use image::{ImageEncoder, ImageFormat, RgbaImage};
+
+    let src = image::load_from_memory_with_format(jpg_bytes, ImageFormat::Jpeg)
+        .map_err(|e| format!("decode jpeg: {e}"))?
+        .to_rgba8();
+    let (sw, sh) = src.dimensions();
+
+    // Choose a square canvas equal to the input's longer side. This
+    // preserves the asset's pixel resolution for the Dock without
+    // introducing extra resampling beyond the inner-square downscale
+    // below.
+    let canvas_side = sw.max(sh);
+
+    // Apple grid: visible square is ~80.5% of the canvas, leaving
+    // ~9.77% transparent margin per side. We round to integers so
+    // the inner square stays pixel-aligned.
+    let inner_side = ((canvas_side as f32) * 0.805).round() as u32;
+    let margin = (canvas_side - inner_side) / 2;
+
+    // Resize the source to fill the inner square. Lanczos3 is the
+    // best built-in filter the `image` crate ships and is fine for a
+    // one-shot startup-time conversion.
+    let resized = image::imageops::resize(&src, inner_side, inner_side, FilterType::Lanczos3);
+
+    // Composite onto a fully-transparent canvas at the centered offset.
+    let mut canvas: RgbaImage = RgbaImage::new(canvas_side, canvas_side);
+    image::imageops::overlay(&mut canvas, &resized, margin as i64, margin as i64);
+
+    // Squircle mask, applied to the inner square only. Outside the
+    // inner square the canvas is already fully transparent, so we
+    // don't need to clear it explicitly.
+    let radius = (inner_side as f32) * 0.225;
+    let aa = 1.5_f32; // anti-alias band width in pixels
+    let inner_left = margin as f32;
+    let inner_top = margin as f32;
+    let inner_right = (margin + inner_side) as f32;
+    let inner_bottom = (margin + inner_side) as f32;
+
+    for y in margin..(margin + inner_side) {
+        for x in margin..(margin + inner_side) {
+            // Distance from this pixel center to the nearest edge of
+            // the rounded rectangle that occupies the inner square.
+            // Negative = inside, positive = outside.
+            let cx = x as f32 + 0.5;
+            let cy = y as f32 + 0.5;
+            // Clamp to the inset rectangle of the rounded shape (the
+            // rectangle whose Minkowski sum with a disk of radius
+            // `radius` produces the rounded square).
+            let qx = cx.clamp(inner_left + radius, inner_right - radius);
+            let qy = cy.clamp(inner_top + radius, inner_bottom - radius);
+            let dx = cx - qx;
+            let dy = cy - qy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let signed = dist - radius;
+            let alpha_factor = if signed <= -aa {
+                1.0
+            } else if signed >= 0.0 {
+                0.0
+            } else {
+                // Smoothstep from 1.0 at signed=-aa to 0.0 at signed=0.
+                let t = (-signed) / aa;
+                t * t * (3.0 - 2.0 * t)
+            };
+            let pixel = canvas.get_pixel_mut(x, y);
+            let new_alpha = (pixel.0[3] as f32 * alpha_factor).round() as u8;
+            pixel.0[3] = new_alpha;
+        }
+    }
+
+    let mut png_buf: Vec<u8> = Vec::with_capacity((canvas_side * canvas_side * 4) as usize);
+    image::codecs::png::PngEncoder::new(&mut png_buf)
+        .write_image(&canvas, canvas_side, canvas_side, image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("encode png: {e}"))?;
+    Ok(png_buf)
+}
+
 #[cfg(feature = "gpui")]
 pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
     use amux_ui::GpuiRenderer;
@@ -3012,16 +3265,53 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
         // Set dark theme to match Amux's Tomorrow Night palette
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
 
+        // macOS Dock icon. NSApplication is now alive (gpui's application
+        // bootstrap created it before invoking this closure), so we can
+        // safely call setApplicationIconImage_. Without this, dev `cargo
+        // run` shows the generic Rust binary icon in the Dock, which
+        // immediately marks the app as "not a real product". A packaged
+        // .app bundle with .icns + Info.plist is still TODO; this hook
+        // gives us a real icon for unbundled dev builds and overrides any
+        // bundle icon at runtime.
+        #[cfg(target_os = "macos")]
+        set_macos_dock_icon();
+
         let model = model.clone();
         let app = app.clone();
         let config = config.clone();
         
-        let window_opts = WindowOptions {
-            titlebar: Some(gpui::TitlebarOptions {
-                title: Some("AMUX".into()),
-                appears_transparent: false,
-                ..Default::default()
+        // Titlebar styling.
+        //
+        // On macOS we render the content area edge-to-edge under the
+        // titlebar (`appears_transparent: true`) and let the traffic
+        // lights overlay sit on top, matching modern macOS apps like
+        // Zed / VSCode / Warp. Without this, AMUX shows a chunky opaque
+        // titlebar that visually fights with the dark workspace area
+        // and immediately reads as "ported Windows app" instead of
+        // "native Mac app".
+        //
+        // On Windows / Linux we keep the standard non-transparent
+        // titlebar — those window managers don't have an equivalent
+        // overlay convention and the system titlebar is the right
+        // choice.
+        let titlebar = gpui::TitlebarOptions {
+            title: Some("AMUX".into()),
+            #[cfg(target_os = "macos")]
+            appears_transparent: true,
+            #[cfg(not(target_os = "macos"))]
+            appears_transparent: false,
+            // Nudge the traffic lights down slightly so they sit
+            // visually centered against the wider top inset of our
+            // sidebar / tab strip layout.
+            #[cfg(target_os = "macos")]
+            traffic_light_position: Some(gpui::Point {
+                x: px(12.0),
+                y: px(12.0),
             }),
+            ..Default::default()
+        };
+        let window_opts = WindowOptions {
+            titlebar: Some(titlebar),
             app_id: Some("amux".to_string()),
             window_min_size: Some(gpui::Size { width: px(480.0), height: px(320.0) }),
             ..Default::default()

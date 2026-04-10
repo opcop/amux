@@ -184,10 +184,42 @@ impl BrowserPaneState {
         if let Some(ref wv) = self.webview { let _ = wv.focus_parent(); }
     }
 
-    pub fn open_devtools(&self) {
-        #[cfg(debug_assertions)]
-        if let Some(ref wv) = self.webview { wv.open_devtools(); }
+    /// Toggle the WKWebView Web Inspector window.
+    ///
+    /// F12 in the browser pane should behave like Chrome / Safari /
+    /// Firefox: first press opens the inspector, second press closes
+    /// it. Without this you can stack multiple stale inspector
+    /// windows over each other and have to chase them with the mouse.
+    ///
+    /// Limitation: on macOS the inspector is a separate WebKit-managed
+    /// NSWindow whose initial size and dock state we cannot control
+    /// via the public wry API. WebKit *does* persist size/position
+    /// across launches in `~/Library/Preferences/com.apple.WebInspector.plist`,
+    /// so the user only pays the "huge default window" cost once per
+    /// machine. A future iteration can ship an embedded console
+    /// drawer (Tier 2 in the design notes) that gives the 80%-case
+    /// console output without the standalone window at all.
+    pub fn toggle_devtools(&self) {
+        if let Some(ref wv) = self.webview {
+            if wv.is_devtools_open() {
+                wv.close_devtools();
+            } else {
+                wv.open_devtools();
+            }
+        }
     }
+}
+
+/// Default URL when the browser pane opens with no explicit address.
+///
+/// `about:blank` is the WebKit / WebView2 standard "blank document"
+/// URL: it loads instantly with no network round-trip. The previous
+/// default of `http://localhost:3000` would sit on a 30-second TCP
+/// connect timeout when nothing was listening on that port, which is
+/// the most common state on a fresh machine.
+#[cfg(feature = "gpui")]
+pub fn default_welcome_url() -> String {
+    "about:blank".to_string()
 }
 
 #[cfg(feature = "gpui")]
@@ -269,10 +301,13 @@ pub fn render_browser_tab_content(
                                 .appearance(false)
                         )
                 )
-                // DevTools
+                // DevTools — same toggle semantics as the F12 keyboard
+                // shortcut. Clicking the button while the inspector is
+                // already open closes it instead of stacking another
+                // identical window.
                 .child(nav_btn_styled("browser-devtools", "F12", 0xb5bd68,
                     cx.listener(move |this: &mut GpuiShellView, _, _, cx| {
-                        if let Some(e) = this.browser_tabs.get(&bid) { e.browser.open_devtools(); } cx.notify();
+                        if let Some(e) = this.browser_tabs.get(&bid) { e.browser.toggle_devtools(); } cx.notify();
                     })))
                 // Close tab
                 .child(nav_btn_styled("browser-close", "\u{2715}", 0xcc6666,
