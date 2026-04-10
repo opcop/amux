@@ -31,6 +31,7 @@ fn main() {
     let parsed = parse_cli(&raw_args);
 
     let mut app = if parsed.demo_mode {
+        #[cfg(debug_assertions)]
         eprintln!("mode: in-memory demo (pass --real or omit --demo for production)");
         amux_ui::DesktopApp::new("AMUX")
     } else {
@@ -41,37 +42,51 @@ fn main() {
         workspace: parsed.workspace.clone(),
     });
 
-    for command in &parsed.commands {
-        match app.run_command(command) {
-            Ok(message) => println!("command: {message}"),
-            Err(err) => eprintln!("command error: {err}"),
+    // Startup banner — only in debug builds. Release builds go
+    // straight to the GUI with no console output, so double-clicking
+    // the binary on macOS doesn't flash a terminal window.
+    #[cfg(debug_assertions)]
+    {
+        for command in &parsed.commands {
+            match app.run_command(command) {
+                Ok(message) => println!("command: {message}"),
+                Err(err) => eprintln!("command error: {err}"),
+            }
         }
+
+        println!("{}", app.banner());
+        println!("session: {}", app.session_path().display());
+        match &startup.mode {
+            amux_ui::StartupMode::OpenedWorkspace { path } => {
+                println!(
+                    "startup: opened workspace {} ({} total)",
+                    path.display(),
+                    startup.workspace_count
+                );
+            }
+            amux_ui::StartupMode::Restored => {
+                println!(
+                    "startup: restored {} workspace(s) from session",
+                    startup.workspace_count
+                );
+            }
+            amux_ui::StartupMode::Empty => {
+                println!(
+                    "startup: empty session — use Ctrl+Shift+N or the command palette \
+                     (`workspace open <path>`) to open a folder"
+                );
+            }
+        }
+        println!();
     }
 
-    println!("{}", app.banner());
-    println!("session: {}", app.session_path().display());
-    match &startup.mode {
-        amux_ui::StartupMode::OpenedWorkspace { path } => {
-            println!(
-                "startup: opened workspace {} ({} total)",
-                path.display(),
-                startup.workspace_count
-            );
-        }
-        amux_ui::StartupMode::Restored => {
-            println!(
-                "startup: restored {} workspace(s) from session",
-                startup.workspace_count
-            );
-        }
-        amux_ui::StartupMode::Empty => {
-            println!(
-                "startup: empty session — use Ctrl+Shift+N or the command palette \
-                 (`workspace open <path>`) to open a folder"
-            );
+    // In release mode, still process inline commands silently.
+    #[cfg(not(debug_assertions))]
+    {
+        for command in &parsed.commands {
+            let _ = app.run_command(command);
         }
     }
-    println!();
 
     #[cfg(feature = "gpui")]
     {

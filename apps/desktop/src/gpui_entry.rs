@@ -2877,8 +2877,9 @@ impl Render for GpuiShellView {
                                 let vp = window.viewport_size();
                                 let content_w = vp.width.as_f32() - sidebar_w;
                                 let status_bar_h = 34.0_f32;
-                                let bottom_pad = crate::gpui_terminal::TERMINAL_BOTTOM_PADDING;
-                                let content_h = vp.height.as_f32() - status_bar_h - bottom_pad;
+                                // Must match the resize calculation exactly.
+                                let titlebar_h = if cfg!(target_os = "macos") { 28.0_f32 } else { 0.0 };
+                                let content_h = vp.height.as_f32() - status_bar_h - titlebar_h;
                                 // Cursor blinks: visible for 30 frames, hidden for 30 frames (~500ms each at 60fps)
                                 let cursor_blink_on = (self.cursor_blink_frame % 60) < 30;
                                 // Compute pane bounds for mouse hit-testing.
@@ -2887,7 +2888,10 @@ impl Render for GpuiShellView {
                                 let mut pane_bounds = std::mem::take(&mut self.pane_bounds);
                                 pane_bounds.clear();
                                 let origin_x = sidebar_w;
-                                let origin_y = 0.0_f32;
+                                // Include macOS titlebar offset so pane_bounds Y
+                                // matches GPUI mouse event coordinates (which are
+                                // in window coordinates, not content coordinates).
+                                let origin_y = titlebar_h;
                                 let zoomed = self.zoomed_pane.clone();
                                 let layout_cloned = self.terminal_manager_mut().active_layout().cloned();
                                 let renaming_tab = self.renaming_tab.clone();
