@@ -57,6 +57,11 @@ pub(crate) struct GpuiShellView {
     pub(crate) agent_picker: Option<AgentPickerState>,
     /// IME preedit text (composition in progress)
     pub(crate) ime_preedit: Option<String>,
+    /// Accumulated fractional scroll for smooth trackpad scrolling.
+    /// Trackpads send many small pixel-delta events; we accumulate
+    /// them and only scroll by integer lines when a full cell_h has
+    /// been reached. Positive = scrolling up (seeing earlier content).
+    scroll_accumulator: f32,
     /// Sidebar resize drag: (start_mouse_x, start_width)
     pub(crate) sidebar_drag_start: Option<(f32, f32)>,
     /// Preview tab states keyed by file path
@@ -364,6 +369,7 @@ impl GpuiShellView {
             template_picker: None,
             agent_picker: None,
             ime_preedit: None,
+            scroll_accumulator: 0.0,
             sidebar_drag_start: None,
             preview_tabs: std::collections::HashMap::new(),
             file_picker: None,
@@ -2102,9 +2108,13 @@ impl Render for GpuiShellView {
             let sidebar_w = self.sidebar_width();
             let vp = window.viewport_size();
             let content_w = vp.width.as_f32() - sidebar_w;
-            let status_bar_h = 28.0_f32;
-            let content_h = vp.height.as_f32() - status_bar_h;
-            if let Some(zpid) = self.zoomed_pane.clone() {
+            let status_bar_h = 34.0_f32;
+            // macOS transparent titlebar uses pt(28px) on the root div,
+            // which eats into the viewport but isn't accounted for by
+            // status_bar_h alone. Without subtracting it, the terminal
+            // computes 1-2 extra rows that get clipped at the bottom.
+            let titlebar_h = if cfg!(target_os = "macos") { 28.0_f32 } else { 0.0 };
+            let content_h = vp.height.as_f32() - status_bar_h - titlebar_h;            if let Some(zpid) = self.zoomed_pane.clone() {
                 // Zoom mode: give the zoomed pane the full content area
                 self.terminal_manager_mut().resize_pane_terminals(
                     &zpid, content_w, content_h, cell_w, cell_h,
@@ -2347,27 +2357,50 @@ impl Render for GpuiShellView {
             // For alt screen apps without mouse mode (less with ALTERNATE_SCROLL),
             // convert scroll to arrow keys.
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                // GPUI on Windows: pt.y > 0 when user scrolls UP (wheel away).
-                // We keep this sign: positive = scroll up = see earlier content.
-                let lines = match event.delta {
-                    gpui::ScrollDelta::Lines(pt) => pt.y,
-                    gpui::ScrollDelta::Pixels(pt) => pt.y.as_f32() / this.cell_dims().1,
+                // Smooth scrolling: trackpads send many small pixel-delta
+                // events (including momentum). We accumulate fractional
+                // pixels and only scroll by integer lines when a full
+                // cell_h has been reached. Mouse wheels send Lines deltas
+                // which are used directly (1 notch = 3 lines typically).
+                let cell_h = this.cell_dims().1;
+                let raw_delta = match event.delta {
+                    gpui::ScrollDelta::Lines(pt) => pt.y * cell_h,  // convert to pixels
+                    gpui::ScrollDelta::Pixels(pt) => pt.y.as_f32(),
                 };
-                if lines == 0.0 { return; }
+                if raw_delta == 0.0 { return; }
 
-                // If active tab is NOT a terminal, don't forward scroll to PTY.
-                // Preview tabs use GPUI's built-in overflow_y_scroll().
-                // Browser tabs have their own WebView2 scroll.
+                // If active tab is NOT a terminal, don't forward scroll.
                 {
                     let active_kind = this.terminal_manager().active_pane_id()
                         .and_then(|pid| this.terminal_manager().get_pane(pid))
                         .and_then(|p| p.active_tab_kind().cloned());
                     if let Some(ref k) = active_kind {
                         if !k.is_terminal() {
-                            return; // let GPUI's built-in scroll handle it
+                            return;
                         }
                     }
                 }
+
+                // Reset accumulator on direction change to prevent lag
+                // when the user reverses scroll direction quickly.
+                if (raw_delta > 0.0) != (this.scroll_accumulator > 0.0) {
+                    this.scroll_accumulator = 0.0;
+                }
+
+                this.scroll_accumulator += raw_delta;
+
+                // Convert accumulated pixels to integer line count.
+                let line_count = (this.scroll_accumulator / cell_h).trunc() as i32;
+                if line_count == 0 {
+                    // Not enough accumulated for a full line yet — wait
+                    // for more events. Don't notify (no visual change).
+                    return;
+                }
+                // Keep the fractional remainder for the next event.
+                this.scroll_accumulator -= line_count as f32 * cell_h;
+
+                let lines_abs = line_count.unsigned_abs() as usize;
+                let scrolling_up = line_count > 0;
 
                 let (mouse_mode, _sgr) = this.active_term_mouse_mode();
                 let alt_scroll = this.active_term_alt_screen_scroll();
@@ -2375,29 +2408,25 @@ impl Render for GpuiShellView {
 
                 if mouse_mode && !shift {
                     // Mouse mode ON: forward scroll events to the app.
-                    // Apps like Claude Code handle their own scrolling.
                     let (col, row) = this.pixel_to_term_cell(event.position);
-                    let count = lines.abs().ceil().max(1.0) as usize;
-                    let button: u8 = if lines > 0.0 { 64 } else { 65 };
-                    for _ in 0..count {
+                    let button: u8 = if scrolling_up { 64 } else { 65 };
+                    for _ in 0..lines_abs {
                         this.send_mouse_event(button, col, row, true);
                     }
                 } else if alt_scroll && !mouse_mode && !shift {
-                    // Alt screen + ALTERNATE_SCROLL, no mouse mode: send arrow keys.
-                    // (e.g. `less` without mouse mode)
-                    let count = lines.abs().ceil().max(1.0) as usize;
-                    let arrow: &[u8] = if lines > 0.0 { b"\x1b[A" } else { b"\x1b[B" };
+                    // Alt screen + ALTERNATE_SCROLL: send arrow keys.
+                    let arrow: &[u8] = if scrolling_up { b"\x1b[A" } else { b"\x1b[B" };
                     if let Some(term) = this.terminal_manager().active_terminal_ref() {
-                        for _ in 0..count {
+                        for _ in 0..lines_abs {
                             term.send_input(arrow);
                         }
                     }
                 } else if let Some(term) = this.terminal_manager_mut().active_terminal() {
-                    // No mouse mode (or Shift held): scroll scrollback buffer
-                    if lines > 0.0 {
-                        term.scroll_up(lines.ceil() as usize);
+                    // Scroll scrollback buffer.
+                    if scrolling_up {
+                        term.scroll_up(lines_abs);
                     } else {
-                        term.scroll_down((-lines).ceil() as usize);
+                        term.scroll_down(lines_abs);
                     }
                 }
                 cx.notify();
@@ -2847,8 +2876,9 @@ impl Render for GpuiShellView {
                                 let sidebar_w = self.sidebar_width();
                                 let vp = window.viewport_size();
                                 let content_w = vp.width.as_f32() - sidebar_w;
-                                let status_bar_h = 28.0_f32;
-                                let content_h = vp.height.as_f32() - status_bar_h;
+                                let status_bar_h = 34.0_f32;
+                                let bottom_pad = crate::gpui_terminal::TERMINAL_BOTTOM_PADDING;
+                                let content_h = vp.height.as_f32() - status_bar_h - bottom_pad;
                                 // Cursor blinks: visible for 30 frames, hidden for 30 frames (~500ms each at 60fps)
                                 let cursor_blink_on = (self.cursor_blink_frame % 60) < 30;
                                 // Compute pane bounds for mouse hit-testing.
@@ -2877,7 +2907,6 @@ impl Render for GpuiShellView {
                             // (Browser is now rendered inside pane tabs, not as a separate column)
                     ),
             )
-            // Status bar
             .child(render_status_bar(&StatusBarData {
                 workspace_name: self.model.active_workspace_name
                     .clone()

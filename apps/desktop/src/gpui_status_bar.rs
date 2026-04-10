@@ -31,7 +31,8 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
         .justify_between()
         .items_center()
         .px_3()
-        .h(px(26.0))
+        .pt(px(8.0)) // breathing room above the bar
+        .h(px(34.0)) // 26px content + 8px top padding
         .bg(rgb(0x11111b))
         .border_t_1()
         .border_color(rgb(0x252530))
