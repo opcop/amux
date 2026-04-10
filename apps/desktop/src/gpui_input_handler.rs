@@ -29,10 +29,23 @@ impl gpui::EntityInputHandler for GpuiShellView {
     }
 
     fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
-        None
+        // Return a valid range when IME composition is active so GPUI
+        // knows not to dispatch regular key events for the composing
+        // keystrokes. Without this, GPUI treats every keystroke as
+        // "not in composition" and fires both the IME callback AND
+        // the regular key_down event.
+        self.ime_preedit.as_ref().map(|text| 0..text.len())
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // Called when IME composition is canceled (Escape) or when the
+        // committed text has been sent via replace_text_in_range and
+        // the system wants to clear the marked state. Without clearing
+        // ime_preedit here, the preedit overlay persists on screen
+        // after the user cancels Chinese/Japanese/Korean input.
+        self.ime_preedit = None;
+        cx.notify();
+    }
 
     fn replace_text_in_range(
         &mut self, _range: Option<std::ops::Range<usize>>, text: &str,
@@ -105,22 +118,37 @@ impl gpui::EntityInputHandler for GpuiShellView {
         &mut self, _range: std::ops::Range<usize>, _element_bounds: Bounds<Pixels>,
         _window: &mut Window, _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // Only return bounds when IME composition is active.
-        // Returning bounds when idle causes GPUI to draw a phantom blue cursor.
-        if self.ime_preedit.is_none() {
-            return None;
-        }
-        // Position IME candidate window near the terminal cursor
+        // Always return the terminal cursor's screen position so that:
+        //   1. GPUI positions its built-in IME composition box ("方框")
+        //      right at the cursor instead of at the hidden 1×1 canvas.
+        //   2. macOS positions the candidate/suggestion window (the
+        //      floating bar with character choices) near the cursor.
+        //
+        // Previously this only returned bounds when `ime_preedit` was
+        // active, but GPUI queries bounds_for_range BEFORE the first
+        // replace_and_mark call, so the first keystroke's candidate
+        // window defaulted to the wrong location.
         let metrics = self.cell_metrics.as_ref()?;
         let active_pid = self.terminal_manager().active_pane_id()?.clone();
         let (cursor_col, cursor_row) = self.terminal_manager().active_terminal_ref()
             .map(|t| t.with_term(|term| {
                 let c = term.renderable_content().cursor;
-                (c.point.column.0, c.point.line.0.max(0) as usize)
+                let display_offset = term.grid().display_offset() as i32;
+                let viewport_row = (c.point.line.0 + display_offset).max(0) as usize;
+                (c.point.column.0, viewport_row)
             }))?;
-        let (origin_x, origin_y, _, _) = self.pane_bounds.get(&active_pid.0)?;
-        let x = origin_x + cursor_col as f32 * metrics.width;
-        let y = origin_y + cursor_row as f32 * metrics.height;
+        let &(origin_x, origin_y, _, _) = self.pane_bounds.get(&active_pid.0)?;
+        let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
+        let x = origin_x + pad + cursor_col as f32 * metrics.width;
+        // Position the candidate window right below the cursor line.
+        // The +1 row puts it below the preedit text (same line as cursor),
+        // matching macOS Terminal.app where the candidate window floats
+        // directly under the composition text.
+        // Note: bounds_for_range returns in WINDOW coordinates (GPUI
+        // converts them via get_frame in gpui_macos), so no titlebar
+        // inset is needed here — pane_bounds are in content coords and
+        // GPUI's first_rect_for_character_range adds the frame origin.
+        let y = origin_y + (cursor_row + 1) as f32 * metrics.height + 4.0;
         Some(Bounds {
             origin: gpui::point(gpui::px(x), gpui::px(y)),
             size: gpui::size(gpui::px(metrics.width), gpui::px(metrics.height)),
@@ -142,6 +170,20 @@ impl GpuiShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // IME composition guard: when the user is in the middle of
+        // composing a CJK character (Chinese pinyin, Japanese romaji,
+        // Korean hangul), do NOT forward keystrokes to the PTY.
+        // All input during composition flows through the
+        // EntityInputHandler trait (replace_and_mark_text_in_range for
+        // preedit updates, replace_text_in_range for commits,
+        // unmark_text for cancels). Without this guard, every preedit
+        // keystroke ("n", "i", "h", "a", "o") also gets sent to the
+        // shell as raw ASCII, producing phantom characters that
+        // persist after the IME composition is canceled.
+        if self.ime_preedit.is_some() {
+            return;
+        }
+
         // If a gpui-component Input has focus, let it handle keys.
         // Only intercept Escape (return focus to terminal).
         if let Some((_, entry)) = self.active_browser_entry() {

@@ -2118,12 +2118,24 @@ impl Render for GpuiShellView {
 
 
         
-        // Always register our IME input handler. When the browser URL Input has
-        // focus, our handler detects this and returns early (letting the platform
-        // deliver text to the focused Input's own handler via its paint-phase
-        // handle_input call which runs AFTER ours and takes precedence).
+        // IME input handler canvas. GPUI positions its built-in IME
+        // composition box (the "方框" with preedit text) at the canvas
+        // bounds and uses those bounds as the anchor for the macOS
+        // candidate/suggestion window. We track the terminal cursor
+        // position each frame so the composition box appears inline
+        // at the cursor — previously the canvas was a hidden 1×1px
+        // element at (-10, -10), which put the IME UI offscreen.
         let view_entity = cx.entity().clone();
         let focus_for_ime = self.focus_handle.clone();
+
+        // The IME canvas that registers handle_input is kept offscreen
+        // (0×0 at -100,-100) so GPUI's built-in composition box (the
+        // "方框") is invisible. We render our own preedit overlay
+        // further down in the tree, positioned at the terminal cursor.
+        // The macOS candidate window is positioned via bounds_for_range,
+        // which returns the cursor's screen position independently of
+        // the canvas bounds.
+        let (ime_x, ime_y, ime_w, ime_h) = (-100.0_f32, -100.0_f32, 0.0_f32, 0.0_f32);
 
         // Main layout - limux/mori style dark theme
         div()
@@ -2137,7 +2149,7 @@ impl Render for GpuiShellView {
                         cx,
                     );
                 },
-            ).w(px(1.0)).h(px(1.0)).absolute().left(px(-10.0)).top(px(-10.0)))
+            ).w(px(ime_w)).h(px(ime_h)).absolute().left(px(ime_x)).top(px(ime_y)))
             .flex()
             .flex_col()
             .size_full()
@@ -2950,34 +2962,51 @@ impl Render for GpuiShellView {
                         )
                 )
             })
-            // IME preedit overlay (near cursor)
+            // IME preedit overlay — renders the composition text (e.g.
+            // pinyin letters) inline at the terminal cursor position,
+            // matching how macOS Terminal.app displays it: just the
+            // characters with a subtle underline, no floating box or
+            // bordered dialog. The candidate selection window is
+            // positioned by macOS via `first_rect_for_character_range`
+            // / our `bounds_for_range`.
             .when_some(self.ime_preedit.clone(), |this, preedit| {
-                // Position near active terminal cursor
                 let pos = self.cell_metrics.as_ref().and_then(|m| {
                     let pid = self.terminal_manager().active_pane_id()?;
-                    let (ox, oy, _, _) = self.pane_bounds.get(&pid.0)?;
+                    let &(ox, oy, _, _) = self.pane_bounds.get(&pid.0)?;
                     let (col, row) = self.terminal_manager().active_terminal_ref()
                         .map(|t| t.with_term(|term| {
                             let c = term.renderable_content().cursor;
-                            (c.point.column.0, c.point.line.0.max(0) as usize)
+                            let display_offset = term.grid().display_offset() as i32;
+                            let viewport_row = (c.point.line.0 + display_offset).max(0) as usize;
+                            (c.point.column.0, viewport_row)
                         }))?;
-                    Some((ox + col as f32 * m.width, oy + row as f32 * m.height + m.height))
+                    let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
+                    // pane_bounds coordinates are in the root div's CONTENT
+                    // coordinate system (Y=0 = after macOS titlebar padding).
+                    // But .absolute().top() on the root div positions from the
+                    // PADDING BOX edge (Y=0 = window top, before padding).
+                    // On macOS we have pt(28px), so absolute Y needs +28 to
+                    // match content coordinates. On Windows/Linux there's no
+                    // titlebar padding, so no offset is needed.
+                    #[cfg(target_os = "macos")]
+                    let titlebar_inset = 28.0_f32;
+                    #[cfg(not(target_os = "macos"))]
+                    let titlebar_inset = 0.0_f32;
+                    Some((ox + pad + col as f32 * m.width, oy + row as f32 * m.height + titlebar_inset))
                 });
                 if let Some((x, y)) = pos {
+                    let font_size = self.config.font_size;
                     this.child(
                         div()
                             .absolute()
                             .left(px(x))
                             .top(px(y))
-                            .px_2()
-                            .py(px(2.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(0x282a2e))
-                            .border_1()
-                            .border_color(rgb(0x81a2be))
-                            .text_sm()
+                            .text_size(px(font_size))
+                            .font_family(self.config.font_family.clone())
                             .text_color(rgb(0xc5c8c6))
-                            .child(preedit)
+                            .text_decoration_1()
+                            .text_decoration_color(rgb(0x81a2be))
+                            .child(format!("{preedit}▏"))
                     )
                 } else {
                     this
