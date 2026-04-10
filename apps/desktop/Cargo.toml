@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The binary is named "amux" (not "amux-desktop") so that macOS shows
+# "AMUX" in the menu bar instead of "amux-desktop". The package name
+# stays "amux-desktop" so `cargo run -p amux-desktop` still works.
+[[bin]]
+name = "amux"
+path = "src/main.rs"
+
 [features]
 default = []
 # Base GPUI feature (all platforms)

@@ -3276,6 +3276,66 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
         #[cfg(target_os = "macos")]
         set_macos_dock_icon();
 
+        // macOS native menubar. Provides the standard app menu with
+        // About / Hide / Quit and an Edit menu with clipboard actions.
+        // macOS does NOT auto-inject these; we must add them explicitly
+        // and wire them to real gpui Actions that call cx.quit() /
+        // cx.hide().
+        //
+        // The binary is named "amux" (via [[bin]] in Cargo.toml) so the
+        // menu bar reads "amux" rather than "amux-desktop".
+        #[cfg(target_os = "macos")]
+        {
+            use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
+
+            // Define actions for app menu items. These are dispatched
+            // via gpui's global action system; the handlers are
+            // registered right after cx.set_menus.
+            gpui::actions!(amux, [QuitApp, HideApp, HideOthers, ShowAll, AboutAmux]);
+
+            cx.set_menus(vec![
+                Menu::new("amux").items(vec![
+                    MenuItem::action("About AMUX", AboutAmux),
+                    MenuItem::separator(),
+                    MenuItem::os_submenu("Services", SystemMenuType::Services),
+                    MenuItem::separator(),
+                    MenuItem::action("Hide AMUX", HideApp),
+                    MenuItem::action("Hide Others", HideOthers),
+                    MenuItem::action("Show All", ShowAll),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit AMUX", QuitApp),
+                ]),
+                Menu::new("Edit").items(vec![
+                    MenuItem::os_action("Undo", AboutAmux, OsAction::Undo),
+                    MenuItem::os_action("Redo", AboutAmux, OsAction::Redo),
+                    MenuItem::separator(),
+                    MenuItem::os_action("Cut", AboutAmux, OsAction::Cut),
+                    MenuItem::os_action("Copy", AboutAmux, OsAction::Copy),
+                    MenuItem::os_action("Paste", AboutAmux, OsAction::Paste),
+                    MenuItem::os_action("Select All", AboutAmux, OsAction::SelectAll),
+                ]),
+            ]);
+
+            // Global action handlers — these fire regardless of which
+            // view has focus, matching the macOS convention that app
+            // menu items are always available.
+            cx.on_action(|_: &QuitApp, cx| {
+                cx.quit();
+            });
+            cx.on_action(|_: &HideApp, cx| {
+                cx.hide();
+            });
+            cx.on_action(|_: &HideOthers, cx| {
+                cx.hide_other_apps();
+            });
+            cx.on_action(|_: &ShowAll, cx| {
+                cx.unhide_other_apps();
+            });
+            // About — just a no-op for now; a future iteration can
+            // show a modal with version / build info.
+            cx.on_action(|_: &AboutAmux, _cx| {});
+        }
+
         let model = model.clone();
         let app = app.clone();
         let config = config.clone();
