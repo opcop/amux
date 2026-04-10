@@ -5,6 +5,7 @@
 # Usage:
 #   ./scripts/build.sh              # Build for current platform
 #   ./scripts/build.sh --release    # Release build (optimized + stripped)
+#   ./scripts/build.sh --app        # Release build + macOS .app bundle
 #   ./scripts/build.sh --package    # Build + create distributable archive
 #
 set -euo pipefail
@@ -25,10 +26,12 @@ esac
 # Parse args
 RELEASE=""
 PACKAGE=""
+APP=""
 for arg in "$@"; do
     case "$arg" in
         --release) RELEASE="1";;
         --package) RELEASE="1"; PACKAGE="1";;
+        --app)     RELEASE="1"; APP="1";;
     esac
 done
 
@@ -75,10 +78,10 @@ cd "$PROJECT_DIR"
 
 if [ -n "$RELEASE" ]; then
     cargo build -p amux-desktop --features "$FEATURES" --release 2>&1 | grep -E "Compiling amux|Finished|error" || true
-    BINARY="target/release/amux-desktop"
+    BINARY="target/release/Amux"
 else
     cargo build -p amux-desktop --features "$FEATURES" 2>&1 | grep -E "Compiling amux|Finished|error" || true
-    BINARY="target/debug/amux-desktop"
+    BINARY="target/debug/Amux"
 fi
 
 if [ ! -f "$BINARY" ]; then
@@ -88,6 +91,78 @@ fi
 
 echo ""
 echo "Binary: $BINARY ($(du -h "$BINARY" | cut -f1))"
+
+# Helper: generate macOS .icns from amux.jpg using sips + iconutil
+generate_icns() {
+    local SRC_JPG="$1"
+    local OUT_ICNS="$2"
+    local TMP_DIR
+    TMP_DIR="$(mktemp -d)"
+    local ICONSET_DIR="$TMP_DIR/amux.iconset"
+    mkdir -p "$ICONSET_DIR"
+
+    # Convert source to a 1024x1024 PNG first
+    local SRC_PNG="$TMP_DIR/source.png"
+    sips -s format png -z 1024 1024 "$SRC_JPG" --out "$SRC_PNG" >/dev/null 2>&1
+
+    # Generate all required icon sizes from the PNG
+    for size in 16 32 128 256 512; do
+        sips -z $size $size "$SRC_PNG" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null 2>&1
+        local double=$((size * 2))
+        sips -z $double $double "$SRC_PNG" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null 2>&1
+    done
+
+    iconutil -c icns "$ICONSET_DIR" -o "$OUT_ICNS"
+    rm -rf "$TMP_DIR"
+    echo "Generated: $OUT_ICNS"
+}
+
+# Helper: create macOS .app bundle
+create_app_bundle() {
+    local BINARY_SRC="$1"
+    local APP_DIR="$2"
+    local ICON_JPG="$PROJECT_DIR/assets/icons/amux.jpg"
+
+    mkdir -p "$APP_DIR/Contents/MacOS"
+    mkdir -p "$APP_DIR/Contents/Resources"
+
+    cp "$BINARY_SRC" "$APP_DIR/Contents/MacOS/amux"
+
+    # Generate .icns for the bundle icon
+    generate_icns "$ICON_JPG" "$APP_DIR/Contents/Resources/amux.icns"
+
+    cat > "$APP_DIR/Contents/Info.plist" << PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>amux</string>
+    <key>CFBundleIdentifier</key><string>com.amux.terminal</string>
+    <key>CFBundleName</key><string>AMUX</string>
+    <key>CFBundleDisplayName</key><string>AMUX</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleVersion</key><string>${VERSION}</string>
+    <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+    <key>CFBundleIconFile</key><string>amux</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+</dict>
+</plist>
+PLIST_EOF
+}
+
+# --app: Quick .app bundle for dev/testing (macOS only)
+if [ -n "$APP" ] && [ "$PLATFORM" = "macos" ]; then
+    echo ""
+    echo "--- Creating .app bundle ---"
+    APP_DIR="$PROJECT_DIR/target/release/AMUX.app"
+    rm -rf "$APP_DIR"
+    create_app_bundle "$BINARY" "$APP_DIR"
+    echo ""
+    echo "=== .app bundle ready ==="
+    echo "$APP_DIR"
+    echo "Run: open $APP_DIR"
+fi
 
 # Package
 if [ -n "$PACKAGE" ]; then
@@ -136,24 +211,9 @@ INSTALL_EOF
     if [ "$PLATFORM" = "macos" ]; then
         # Create .app bundle for macOS
         APP_DIR="$STAGE_DIR/AMUX.app"
-        mkdir -p "$APP_DIR/Contents/MacOS"
-        mkdir -p "$APP_DIR/Contents/Resources"
-        mv "$STAGE_DIR/amux" "$APP_DIR/Contents/MacOS/amux"
-        cp "$PROJECT_DIR/assets/icons/amux-icon.svg" "$APP_DIR/Contents/Resources/"
-        cat > "$APP_DIR/Contents/Info.plist" << PLIST_EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key><string>amux</string>
-    <key>CFBundleIdentifier</key><string>com.amux.terminal</string>
-    <key>CFBundleName</key><string>AMUX</string>
-    <key>CFBundleVersion</key><string>${VERSION}</string>
-    <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-    <key>NSHighResolutionCapable</key><true/>
-</dict>
-</plist>
-PLIST_EOF
+        rm -rf "$APP_DIR"
+        create_app_bundle "$STAGE_DIR/amux" "$APP_DIR"
+        rm "$STAGE_DIR/amux"  # binary is now inside .app
         tar -czf "${DIST_NAME}.tar.gz" "$DIST_NAME"
     else
         tar -czf "${DIST_NAME}.tar.gz" "$DIST_NAME"
