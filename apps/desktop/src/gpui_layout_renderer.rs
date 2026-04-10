@@ -331,22 +331,30 @@ pub(crate) fn render_layout(
                 let pid_sd = pane_id.clone();
                 let pid_close = pane_id.clone();
 
+                // Pane action buttons — styled to be visible but
+                // unobtrusive. Slightly larger than before so they
+                // feel "clickable" rather than decorative.
+                let btn_text = rgb(0x7f849c);     // softer than bg but visible
+                let btn_hover_bg = rgb(0x313244);
+                let btn_hover_text = rgb(0xcdd6f4);
+
                 let actions_row = div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(2.0))
+                    .gap(px(4.0))
                     .px_2()
                     // + New Tab
                     .child(
                         div()
                             .id(gpui::ElementId::Name(format!("{}-btn-add", pane_id.0).into()))
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(3.0))
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .text_sm()
+                            .text_color(btn_text)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(btn_hover_bg).text_color(btn_hover_text))
                             .child("+")
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.terminal_manager_mut().set_active_pane(&pid_new);
@@ -360,12 +368,13 @@ pub(crate) fn render_layout(
                     .child(
                         div()
                             .id(gpui::ElementId::Name(format!("{}-btn-sr", pane_id.0).into()))
-                            .px(px(5.0))
-                            .py(px(2.0))
-                            .rounded(px(3.0))
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                            .px(px(7.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .text_sm()
+                            .text_color(btn_text)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(btn_hover_bg).text_color(btn_hover_text))
                             .child("⬕")
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.terminal_manager_mut().set_active_pane(&pid_sr);
@@ -379,12 +388,13 @@ pub(crate) fn render_layout(
                     .child(
                         div()
                             .id(gpui::ElementId::Name(format!("{}-btn-sd", pane_id.0).into()))
-                            .px(px(5.0))
-                            .py(px(2.0))
-                            .rounded(px(3.0))
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                            .px(px(7.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .text_sm()
+                            .text_color(btn_text)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(btn_hover_bg).text_color(btn_hover_text))
                             .child("⬓")
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.terminal_manager_mut().set_active_pane(&pid_sd);
@@ -401,12 +411,13 @@ pub(crate) fn render_layout(
                         d.child(
                             div()
                                 .id(gpui::ElementId::Name(format!("{}-btn-zoom", pane_id.0).into()))
-                                .px(px(5.0))
-                                .py(px(2.0))
-                                .rounded(px(3.0))
-                                .text_xs()
-                                .text_color(rgb(0x6c7086))
-                                .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                                .px(px(7.0))
+                                .py(px(3.0))
+                                .rounded(px(4.0))
+                                .text_sm()
+                                .text_color(btn_text)
+                                .cursor_pointer()
+                                .hover(|d| d.bg(btn_hover_bg).text_color(btn_hover_text))
                                 .child(zoom_icon)
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.terminal_manager_mut().set_active_pane(&pid_zoom);
@@ -419,13 +430,14 @@ pub(crate) fn render_layout(
                     .child(
                         div()
                             .id(gpui::ElementId::Name(format!("{}-btn-close", pane_id.0).into()))
-                            .px(px(5.0))
-                            .py(px(2.0))
-                            .rounded(px(3.0))
-                            .text_xs()
-                            .text_color(if has_multiple_panes { rgb(0x6c7086) } else { rgb(0x282a2e) })
+                            .px(px(7.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .text_sm()
+                            .text_color(if has_multiple_panes { btn_text } else { rgb(0x313244) })
+                            .cursor_pointer()
                             .when(has_multiple_panes, |d| {
-                                d.hover(|d| d.bg(rgb(0x373b41)).text_color(rgb(0xcc6666)))
+                                d.hover(|d| d.bg(rgb(0x3a2020)).text_color(rgb(0xcc6666)))
                             })
                             .child("✕")
                             .when(has_multiple_panes, |d| {

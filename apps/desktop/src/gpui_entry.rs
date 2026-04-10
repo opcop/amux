@@ -3345,16 +3345,16 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
             gpui::actions!(amux, [QuitApp, HideApp, HideOthers, ShowAll, AboutAmux]);
 
             cx.set_menus(vec![
-                Menu::new("amux").items(vec![
-                    MenuItem::action("About AMUX", AboutAmux),
+                Menu::new("Amux").items(vec![
+                    MenuItem::action("About Amux", AboutAmux),
                     MenuItem::separator(),
                     MenuItem::os_submenu("Services", SystemMenuType::Services),
                     MenuItem::separator(),
-                    MenuItem::action("Hide AMUX", HideApp),
+                    MenuItem::action("Hide Amux", HideApp),
                     MenuItem::action("Hide Others", HideOthers),
                     MenuItem::action("Show All", ShowAll),
                     MenuItem::separator(),
-                    MenuItem::action("Quit AMUX", QuitApp),
+                    MenuItem::action("Quit Amux", QuitApp),
                 ]),
                 Menu::new("Edit").items(vec![
                     MenuItem::os_action("Undo", NoAction, OsAction::Undo),
@@ -3406,7 +3406,7 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
         // overlay convention and the system titlebar is the right
         // choice.
         let titlebar = gpui::TitlebarOptions {
-            title: Some("AMUX".into()),
+            title: Some("Amux".into()),
             #[cfg(target_os = "macos")]
             appears_transparent: true,
             #[cfg(not(target_os = "macos"))]
