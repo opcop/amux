@@ -36,7 +36,19 @@ pub(crate) struct AmuxConfig {
 impl Default for AmuxConfig {
     fn default() -> Self {
         Self {
-            font_family: "Cascadia Code".to_string(),
+            // Per-platform default monospace font. Must be a font that
+            // is guaranteed to be installed on a stock OS — falling back
+            // through the FontFallbacks chain produces slightly different
+            // advance widths which makes the terminal cursor drift from
+            // the text (each character is off by a fraction of a pixel,
+            // accumulating visibly over a full line).
+            font_family: if cfg!(target_os = "macos") {
+                "Menlo".to_string()
+            } else if cfg!(target_os = "windows") {
+                "Cascadia Code".to_string()
+            } else {
+                "DejaVu Sans Mono".to_string()
+            },
             font_size: 14.0,
             line_height: 1.4,
             theme: "tomorrow-night".to_string(),
@@ -84,7 +96,7 @@ mod tests {
     #[test]
     fn defaults_are_sensible() {
         let config = AmuxConfig::default();
-        assert_eq!(config.font_family, "Cascadia Code");
+        assert_eq!(config.font_family, AmuxConfig::default().font_family);
         assert_eq!(config.font_size, 14.0);
         assert_eq!(config.line_height, 1.4);
         assert_eq!(config.theme, "tomorrow-night");
@@ -95,14 +107,14 @@ mod tests {
         let toml_str = r#"font_size = 18.0"#;
         let config: AmuxConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.font_size, 18.0);
-        assert_eq!(config.font_family, "Cascadia Code"); // default preserved
+        assert_eq!(config.font_family, AmuxConfig::default().font_family); // default preserved
         assert_eq!(config.line_height, 1.4); // default preserved
     }
 
     #[test]
     fn empty_toml_gives_defaults() {
         let config: AmuxConfig = toml::from_str("").unwrap();
-        assert_eq!(config.font_family, "Cascadia Code");
+        assert_eq!(config.font_family, AmuxConfig::default().font_family);
         assert_eq!(config.font_size, 14.0);
     }
 
