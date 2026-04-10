@@ -1,12 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::{
     BrowserService, ClipboardService, DefaultPathMapper, FsService, HostPlatform,
     MetricsService, NoopBrowserService, NoopWorkspaceDialogService,
     PathService, PlatformCapabilities, PlatformId, RealFsBackend, RealTerminalBackend,
-    SystemMetrics, SystemMetricsCollector, TerminalService, WorkspaceDialogService,
+    TerminalService, WorkspaceDialogService,
 };
-use crate::common::{ArboardClipboardService, LinuxWorkspaceDialogService};
+use crate::common::{ArboardClipboardService, CollectorMetricsService, LinuxWorkspaceDialogService};
 
 #[derive(Clone)]
 pub struct LinuxPlatform {
@@ -97,23 +97,3 @@ impl HostPlatform for LinuxPlatform {
     }
 }
 
-#[derive(Default)]
-struct CollectorMetricsService {
-    collector: Mutex<SystemMetricsCollector>,
-}
-
-impl std::fmt::Debug for CollectorMetricsService {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CollectorMetricsService").finish()
-    }
-}
-
-impl MetricsService for CollectorMetricsService {
-    fn current_metrics(&self) -> Result<SystemMetrics, String> {
-        let mut collector = self
-            .collector
-            .lock()
-            .map_err(|_| "system metrics mutex poisoned".to_string())?;
-        Ok(collector.get_metrics())
-    }
-}

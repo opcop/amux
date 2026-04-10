@@ -262,10 +262,16 @@ pub fn measure_cell_metrics(window: &mut Window, font_family: &str, font_size_f3
 /// cells (selection rectangles still draw, but no text glyphs).
 #[cfg(feature = "gpui")]
 fn make_font_styled(font_family: &str, bold: bool, italic: bool) -> Font {
-    Font {
-        family: SharedString::from(font_family.to_string()),
-        features: gpui::FontFeatures::default(),
-        fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+    use std::sync::OnceLock;
+
+    // Cache the fallback list. This function is called per text run per
+    // row per frame (~hundreds of times in a 16ms tick), and the
+    // fallback chain is a fixed set of platform strings that never
+    // changes. Without caching, each call allocates a Vec<String> +
+    // Arc<Vec<String>> via FontFallbacks::from_fonts.
+    static FALLBACKS: OnceLock<gpui::FontFallbacks> = OnceLock::new();
+    let fallbacks = FALLBACKS.get_or_init(|| {
+        gpui::FontFallbacks::from_fonts(vec![
             #[cfg(target_os = "macos")]
             "Menlo".to_string(),
             #[cfg(target_os = "macos")]
@@ -284,7 +290,13 @@ fn make_font_styled(font_family: &str, bold: bool, italic: bool) -> Font {
             "Liberation Mono".to_string(),
             #[cfg(target_os = "linux")]
             "Noto Sans Mono".to_string(),
-        ])),
+        ])
+    });
+
+    Font {
+        family: SharedString::from(font_family.to_string()),
+        features: gpui::FontFeatures::default(),
+        fallbacks: Some(fallbacks.clone()),
         weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },
     }

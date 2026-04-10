@@ -2,11 +2,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
-    DefaultPathMapper, FsBackend, InMemoryFsBackend, InMemoryTerminalBackend, MappedFile,
+    DefaultPathMapper, FsBackend, InMemoryFsBackend, InMemoryTerminalBackend,
     PathMapper, PlatformCapabilities, PlatformId, RealFsBackend, RealTerminalBackend,
     SystemMetrics, TerminalBackend,
 };
-use amux_core::{TerminalLaunchProfile, TerminalSessionId, WorkspaceTarget};
+use amux_core::TerminalSessionId;
 
 /// Stable host abstraction for wiring platform-specific services into UI/runtime layers.
 pub trait HostPlatform: Send + Sync {
@@ -170,22 +170,3 @@ impl WorkspaceDialogService for NoopWorkspaceDialogService {
     }
 }
 
-/// Small helper that keeps Phase 1 test scaffolding concise.
-pub fn launch_spec_title(spec: &TerminalLaunchProfile) -> Option<&str> {
-    spec.title.as_deref()
-}
-
-/// Small helper shared by future platform adapters.
-pub fn workspace_runtime_target(target: &WorkspaceTarget) -> &WorkspaceTarget {
-    target
-}
-
-/// Small helper shared by future platform adapters.
-pub fn session_id_str(id: &TerminalSessionId) -> &str {
-    &id.0
-}
-
-/// Small helper shared by future path service tests.
-pub fn mapped_file_display(file: &MappedFile) -> &str {
-    &file.display_path
-}

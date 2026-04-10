@@ -1,12 +1,11 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::{
     BrowserService, ClipboardService, DefaultPathMapper, FsService, HostPlatform, MetricsService,
     NoopBrowserService, PathService, PlatformCapabilities, PlatformId,
-    RealFsBackend, RealTerminalBackend, SystemMetrics, SystemMetricsCollector, TerminalService,
-    WorkspaceDialogService,
+    RealFsBackend, RealTerminalBackend, TerminalService, WorkspaceDialogService,
 };
-use crate::common::{ArboardClipboardService, WindowsWorkspaceDialogService};
+use crate::common::{ArboardClipboardService, CollectorMetricsService, WindowsWorkspaceDialogService};
 
 /// Windows host adapter for the existing stable platform services.
 ///
@@ -142,26 +141,6 @@ impl HostPlatform for WindowsPlatform {
     }
 }
 
-#[derive(Default)]
-struct CollectorMetricsService {
-    collector: Mutex<SystemMetricsCollector>,
-}
-
-impl std::fmt::Debug for CollectorMetricsService {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CollectorMetricsService").finish()
-    }
-}
-
-impl MetricsService for CollectorMetricsService {
-    fn current_metrics(&self) -> Result<SystemMetrics, String> {
-        let mut collector = self
-            .collector
-            .lock()
-            .map_err(|_| "system metrics mutex poisoned".to_string())?;
-        Ok(collector.get_metrics())
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -190,23 +190,15 @@ impl Render for DragWorkspace {
 #[derive(Clone)]
 pub(crate) struct ContextMenuItem {
     pub(crate) label: &'static str,
-    /// Owned because shortcut labels are now per-platform-rendered at
-    /// build time (e.g. "⌘⇧C" on macOS vs "Ctrl+Shift+C" elsewhere) and
-    /// therefore cannot be `&'static str` literals.
-    pub(crate) shortcut: Option<String>,
+    pub(crate) shortcut: Option<&'static str>,
     pub(crate) enabled: bool,
     pub(crate) separator_after: bool,
 }
 
 #[cfg(feature = "gpui")]
 impl ContextMenuItem {
-    fn action(label: &'static str, shortcut: Option<&str>, enabled: bool) -> Self {
-        Self {
-            label,
-            shortcut: shortcut.map(str::to_string),
-            enabled,
-            separator_after: false,
-        }
+    fn action(label: &'static str, shortcut: Option<&'static str>, enabled: bool) -> Self {
+        Self { label, shortcut, enabled, separator_after: false }
     }
     fn separator(mut self) -> Self {
         self.separator_after = true;
@@ -976,45 +968,46 @@ impl GpuiShellView {
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
-        // Native modifier label per host platform.
-        //
-        // On macOS users expect ⌘ where Windows / Linux users expect Ctrl,
-        // and "Ctrl" labels in macOS context menus look immediately
-        // foreign. We render the actual symbol via cfg() so the menu
-        // matches each platform's HIG without the input handler having
-        // to know about display strings.
+        // Per-platform shortcut labels as compile-time constants. Zero
+        // allocations per render frame (previously each build_context_
+        // menu_items call produced 7+ format! Strings).
         #[cfg(target_os = "macos")]
-        let mod_label = |suffix: &str| format!("⌘⇧{suffix}");
+        mod shortcut_labels {
+            pub const COPY: &str = "⌘⇧C";
+            pub const SEND: &str = "⌘⇧Enter";
+            pub const PASTE: &str = "⌘V";
+            pub const SPLIT_RIGHT: &str = "⌘⇧\\";
+            pub const SPLIT_DOWN: &str = "⌘⇧D";
+            pub const NEW_TAB: &str = "⌘⇧T";
+            pub const CLOSE_PANE: &str = "⌘⇧W";
+            pub const ZOOM: &str = "⌘⇧F";
+        }
         #[cfg(not(target_os = "macos"))]
-        let mod_label = |suffix: &str| format!("Ctrl+Shift+{suffix}");
-
-        // Cmd+V on macOS, Ctrl+V on Windows/Linux for Paste.
-        #[cfg(target_os = "macos")]
-        let paste_label: String = "⌘V".to_string();
-        #[cfg(not(target_os = "macos"))]
-        let paste_label: String = "Ctrl+V".to_string();
-
-        let copy_label = mod_label("C");
-        let send_label = mod_label("Enter");
-        let split_right_label = mod_label("\\");
-        let split_down_label = mod_label("D");
-        let new_tab_label = mod_label("T");
-        let close_pane_label = mod_label("W");
-        let zoom_label = mod_label("F");
+        mod shortcut_labels {
+            pub const COPY: &str = "Ctrl+Shift+C";
+            pub const SEND: &str = "Ctrl+Shift+Enter";
+            pub const PASTE: &str = "Ctrl+V";
+            pub const SPLIT_RIGHT: &str = "Ctrl+Shift+\\";
+            pub const SPLIT_DOWN: &str = "Ctrl+Shift+D";
+            pub const NEW_TAB: &str = "Ctrl+Shift+T";
+            pub const CLOSE_PANE: &str = "Ctrl+Shift+W";
+            pub const ZOOM: &str = "Ctrl+Shift+F";
+        }
+        use shortcut_labels::*;
 
         let mut items = vec![
             ContextMenuItem::action("Open Workspace", None, self.model.local_workspace_supported).separator(),
-            ContextMenuItem::action("Copy", Some(&copy_label), has_selection),
-            ContextMenuItem::action("Send to Pane", Some(&send_label), self.terminal_manager().total_panes() > 1),
-            ContextMenuItem::action("Paste", Some(&paste_label), true).separator(),
-            ContextMenuItem::action("Split Right", Some(&split_right_label), true),
-            ContextMenuItem::action("Split Down", Some(&split_down_label), true).separator(),
-            ContextMenuItem::action("New Tab", Some(&new_tab_label), true),
-            ContextMenuItem::action("Close Pane", Some(&close_pane_label), self.terminal_manager().total_panes() > 1).separator(),
+            ContextMenuItem::action("Copy", Some(COPY), has_selection),
+            ContextMenuItem::action("Send to Pane", Some(SEND), self.terminal_manager().total_panes() > 1),
+            ContextMenuItem::action("Paste", Some(PASTE), true).separator(),
+            ContextMenuItem::action("Split Right", Some(SPLIT_RIGHT), true),
+            ContextMenuItem::action("Split Down", Some(SPLIT_DOWN), true).separator(),
+            ContextMenuItem::action("New Tab", Some(NEW_TAB), true),
+            ContextMenuItem::action("Close Pane", Some(CLOSE_PANE), self.terminal_manager().total_panes() > 1).separator(),
             if self.zoomed_pane.is_some() {
-                ContextMenuItem::action("Restore Pane", Some(&zoom_label), true).separator()
+                ContextMenuItem::action("Restore Pane", Some(ZOOM), true).separator()
             } else {
-                ContextMenuItem::action("Zoom Pane", Some(&zoom_label), self.terminal_manager().total_panes() > 1).separator()
+                ContextMenuItem::action("Zoom Pane", Some(ZOOM), self.terminal_manager().total_panes() > 1).separator()
             },
         ];
 
@@ -3286,7 +3279,7 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
         // menu bar reads "amux" rather than "amux-desktop".
         #[cfg(target_os = "macos")]
         {
-            use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
+            use gpui::{Menu, MenuItem, NoAction, OsAction, SystemMenuType};
 
             // Define actions for app menu items. These are dispatched
             // via gpui's global action system; the handlers are
@@ -3306,13 +3299,13 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                     MenuItem::action("Quit AMUX", QuitApp),
                 ]),
                 Menu::new("Edit").items(vec![
-                    MenuItem::os_action("Undo", AboutAmux, OsAction::Undo),
-                    MenuItem::os_action("Redo", AboutAmux, OsAction::Redo),
+                    MenuItem::os_action("Undo", NoAction, OsAction::Undo),
+                    MenuItem::os_action("Redo", NoAction, OsAction::Redo),
                     MenuItem::separator(),
-                    MenuItem::os_action("Cut", AboutAmux, OsAction::Cut),
-                    MenuItem::os_action("Copy", AboutAmux, OsAction::Copy),
-                    MenuItem::os_action("Paste", AboutAmux, OsAction::Paste),
-                    MenuItem::os_action("Select All", AboutAmux, OsAction::SelectAll),
+                    MenuItem::os_action("Cut", NoAction, OsAction::Cut),
+                    MenuItem::os_action("Copy", NoAction, OsAction::Copy),
+                    MenuItem::os_action("Paste", NoAction, OsAction::Paste),
+                    MenuItem::os_action("Select All", NoAction, OsAction::SelectAll),
                 ]),
             ]);
 
