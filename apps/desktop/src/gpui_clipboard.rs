@@ -12,6 +12,8 @@ use crate::gpui_entry::GpuiShellView;
 #[cfg(feature = "gpui")]
 impl GpuiShellView {
     /// Copy selected text to clipboard via alacritty's selection.
+    /// Selection is preserved after copy (matching Terminal.app behavior)
+    /// so the user can see what was copied.
     pub(crate) fn copy_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(term) = self.terminal_manager_mut().active_terminal() {
             let text = term.with_term(|t| t.selection_to_string());
@@ -20,8 +22,6 @@ impl GpuiShellView {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
             }
-            // Clear selection after copy
-            term.with_term_mut(|t| { t.selection = None; });
         }
     }
 

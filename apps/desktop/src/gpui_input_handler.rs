@@ -725,6 +725,43 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
+                // macOS-standard shortcuts (Cmd+K/T/W/N on macOS,
+                // Ctrl+K/T/W/N on Windows/Linux). These match the
+                // muscle memory from Terminal.app / iTerm2.
+                "ctrl+k" => {
+                    // Clear scrollback + visible screen (Cmd+K on macOS)
+                    if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                        term.with_term_mut(|t| {
+                            use alacritty_terminal::vte::ansi::Handler;
+                            t.clear_screen(alacritty_terminal::vte::ansi::ClearMode::Saved);
+                            t.clear_screen(alacritty_terminal::vte::ansi::ClearMode::All);
+                        });
+                    }
+                    cx.notify();
+                    return;
+                }
+                "ctrl+t" => {
+                    // New tab (Cmd+T on macOS)
+                    let env = self.capture_active_env();
+                    self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
+                    self.spawn_with_captured_env(&env);
+                    cx.notify();
+                    return;
+                }
+                "ctrl+w" => {
+                    // Close active tab/pane (Cmd+W on macOS)
+                    self.cleanup_pane_tab_entries();
+                    if self.terminal_manager_mut().close_active_pane() {
+                        cx.notify();
+                    }
+                    return;
+                }
+                "ctrl+n" => {
+                    // Open workspace (Cmd+N on macOS)
+                    self.prompt_open_local_workspace(cx);
+                    cx.notify();
+                    return;
+                }
                 // Tab/workspace switching
                 "ctrl+pageup" => {
                     let _ = self.app.run_command("switch tab prev");

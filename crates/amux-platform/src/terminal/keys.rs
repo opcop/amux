@@ -114,20 +114,39 @@ pub fn to_pty_with_mode(key: &str, ctrl: bool, shift: bool, alt: bool, app_curso
     result
 }
 
-fn escape_seq(suffix: &str, ctrl: bool, _shift: bool, alt: bool) -> Vec<u8> {
+/// Generate xterm-style escape sequence with modifier encoding.
+///
+/// Modifier parameter (CSI 1;Ps suffix):
+///   2 = Shift, 3 = Alt, 4 = Shift+Alt, 5 = Ctrl, 6 = Ctrl+Shift,
+///   7 = Ctrl+Alt, 8 = Ctrl+Shift+Alt
+///
+/// Without modifiers the sequence is just `ESC [ suffix`.
+/// With modifiers it becomes `ESC [ 1 ; Ps suffix`.
+fn escape_seq(suffix: &str, ctrl: bool, shift: bool, alt: bool) -> Vec<u8> {
     let mut result = Vec::new();
 
-    if alt {
+    // Compute the xterm modifier parameter. A value of 1 means "no
+    // modifier" but is never emitted — the bare sequence is used
+    // instead.
+    let modifier = 1
+        + if shift { 1 } else { 0 }
+        + if alt   { 2 } else { 0 }
+        + if ctrl  { 4 } else { 0 };
+
+    if alt && modifier == 3 {
+        // Alt-only without CSI modifier encoding: ESC ESC [ suffix
+        // (some terminals prefer this for Alt+Arrow)
         result.push(0x1B);
     }
 
     result.push(0x1B);
     result.push(b'[');
 
-    if ctrl {
+    if modifier > 1 {
         result.push(b'1');
         result.push(b';');
-        result.push(b'5');
+        // modifier is 2..=8, fits in one ASCII digit
+        result.push(b'0' + modifier as u8);
     }
 
     result.extend_from_slice(suffix.as_bytes());
