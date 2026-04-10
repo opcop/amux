@@ -200,6 +200,7 @@ impl BrowserPaneState {
     /// drawer (Tier 2 in the design notes) that gives the 80%-case
     /// console output without the standalone window at all.
     pub fn toggle_devtools(&self) {
+        #[cfg(debug_assertions)]
         if let Some(ref wv) = self.webview {
             if wv.is_devtools_open() {
                 wv.close_devtools();
