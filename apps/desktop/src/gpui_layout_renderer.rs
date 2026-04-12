@@ -215,7 +215,8 @@ pub(crate) fn render_layout(
                                         idx,
                                     );
                                 } else {
-                                    // Different pane: move tab, insert at this position
+                                    // Different pane: append to target pane (positional
+                                    // cross-pane insert not yet supported).
                                     this.terminal_manager_mut().move_tab_to_pane(
                                         &drag.source_pane,
                                         drag.tab_index,

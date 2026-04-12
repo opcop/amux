@@ -1622,6 +1622,44 @@ mod tests {
     }
 
     #[test]
+    fn test_reorder_tab_within_pane() {
+        let mut mgr = make_manager();
+        mgr.add_tab_to_active_pane("B".into());
+        mgr.add_tab_to_active_pane("C".into());
+        mgr.add_tab_to_active_pane("D".into());
+        // tabs: [Terminal, B, C, D], active = 3 (D) after last add_tab
+        assert_eq!(mgr.panes[&pane_id(1)].active_tab, 3);
+
+        // Move D (idx 3) to position 1: [Terminal, D, B, C], active follows D → 1
+        assert!(mgr.reorder_tab(&pane_id(1), 3, 1));
+        let pane = &mgr.panes[&pane_id(1)];
+        assert_eq!(pane.tabs[1].title, "D");
+        assert_eq!(pane.tabs[2].title, "B");
+        assert_eq!(pane.active_tab, 1);
+
+        // Move D (idx 1) back to end (idx 3): [Terminal, B, C, D], active → 3
+        assert!(mgr.reorder_tab(&pane_id(1), 1, 3));
+        let pane = &mgr.panes[&pane_id(1)];
+        assert_eq!(pane.tabs[3].title, "D");
+        assert_eq!(pane.active_tab, 3);
+
+        // Reorder with non-active tab: activate Terminal (idx 0), move B (idx 1) to end
+        mgr.set_active_tab_in_pane(0);
+        assert!(mgr.reorder_tab(&pane_id(1), 1, 3));
+        let pane = &mgr.panes[&pane_id(1)];
+        assert_eq!(pane.tabs[0].title, "Terminal");
+        assert_eq!(pane.tabs[3].title, "B");
+        // Active tab was 0 (Terminal); B moved from 1 to 3, doesn't cross 0 → stays 0
+        assert_eq!(pane.active_tab, 0);
+
+        // Invalid cases
+        assert!(!mgr.reorder_tab(&pane_id(1), 0, 0)); // from == to
+        assert!(!mgr.reorder_tab(&pane_id(1), 99, 0)); // out of bounds
+        assert!(!mgr.reorder_tab(&pane_id(1), 0, 99)); // out of bounds
+        assert!(!mgr.reorder_tab(&pane_id(99), 0, 1)); // no such pane
+    }
+
+    #[test]
     fn test_total_panes() {
         let mut mgr = make_manager();
         assert_eq!(mgr.total_panes(), 1);

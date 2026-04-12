@@ -482,14 +482,12 @@ impl GpuiShellView {
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    if let Some(ref picker) = self.agent_picker {
-                        if n <= picker.agents.len() {
-                            drop(picker);
-                            if let Some(ref mut picker) = self.agent_picker {
-                                picker.selected_index = n - 1;
-                            }
-                            self.execute_agent_picker();
+                    let len = self.agent_picker.as_ref().map(|p| p.agents.len()).unwrap_or(0);
+                    if n >= 1 && n <= len {
+                        if let Some(ref mut picker) = self.agent_picker {
+                            picker.selected_index = n - 1;
                         }
+                        self.execute_agent_picker();
                     }
                 }
                 _ => {}
@@ -547,14 +545,12 @@ impl GpuiShellView {
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    if let Some(ref picker) = self.template_picker {
-                        if n <= picker.templates.len() {
-                            drop(picker);
-                            if let Some(ref mut picker) = self.template_picker {
-                                picker.selected_index = n - 1;
-                            }
-                            self.execute_template_picker();
+                    let len = self.template_picker.as_ref().map(|p| p.templates.len()).unwrap_or(0);
+                    if n >= 1 && n <= len {
+                        if let Some(ref mut picker) = self.template_picker {
+                            picker.selected_index = n - 1;
                         }
+                        self.execute_template_picker();
                     }
                 }
                 _ => {}
@@ -584,14 +580,12 @@ impl GpuiShellView {
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    if let Some(ref picker) = self.pane_picker {
-                        if n <= picker.targets.len() {
-                            drop(picker);
-                            if let Some(ref mut picker) = self.pane_picker {
-                                picker.selected_index = n - 1;
-                            }
-                            self.execute_pane_picker();
+                    let len = self.pane_picker.as_ref().map(|p| p.targets.len()).unwrap_or(0);
+                    if n >= 1 && n <= len {
+                        if let Some(ref mut picker) = self.pane_picker {
+                            picker.selected_index = n - 1;
                         }
+                        self.execute_pane_picker();
                     }
                 }
                 _ => {}
