@@ -613,7 +613,7 @@ pub fn render_preview_panel(
         .flex()
         .flex_col()
         .h_full()
-        .bg(rgb(0x1d1f21))
+        .bg(rgb(crate::theme::SURFACE))
         .overflow_hidden()
         // Header bar
         .child(
@@ -623,9 +623,9 @@ pub fn render_preview_panel(
                 .justify_between()
                 .px_3()
                 .py(px(6.0))
-                .bg(rgb(0x181a1e))
+                .bg(rgb(crate::theme::SURFACE_DIM))
                 .border_b_1()
-                .border_color(rgb(0x282a2e))
+                .border_color(rgb(crate::theme::SURFACE_RAISED))
                 .flex_shrink_0()
                 .child(
                     div()
@@ -635,17 +635,17 @@ pub fn render_preview_panel(
                         .flex_1()
                         .overflow_hidden()
                         .child(
-                            div().text_xs().text_color(rgb(0x81a2be))
+                            div().text_xs().text_color(rgb(crate::theme::ACCENT))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(file_type_icon(&state.file_name))
                         )
                         .child(
-                            div().text_xs().text_color(rgb(0xc5c8c6))
+                            div().text_xs().text_color(rgb(crate::theme::TEXT))
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(state.file_name.clone())
                         )
                         .child(
-                            div().text_xs().text_color(rgb(0x969896))
+                            div().text_xs().text_color(rgb(crate::theme::TEXT_DIM))
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .child(format!("  {}", state.file_path))
@@ -662,12 +662,12 @@ pub fn render_preview_panel(
                             div()
                                 .id("preview-copy")
                                 .text_xs()
-                                .text_color(rgb(0x969896))
+                                .text_color(rgb(crate::theme::TEXT_DIM))
                                 .px(px(5.0))
                                 .py(px(2.0))
                                 .rounded(px(3.0))
                                 .cursor_pointer()
-                                .hover(|d| d.text_color(rgb(0xb5bd68)).bg(rgb(0x282a2e)))
+                                .hover(|d| d.text_color(rgb(crate::theme::SUCCESS)).bg(rgb(crate::theme::SURFACE_RAISED)))
                                 .child("Copy")
                                 .on_click(cx.listener(move |_this, _, _, cx| {
                                     if let Ok(content) = std::fs::read_to_string(&copy_path) {
@@ -713,7 +713,7 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                 )
                 .when(*level <= 2, |d| {
                     d.child(
-                        div().w_full().h(px(1.0)).mt(px(4.0)).bg(rgb(0x282a2e))
+                        div().w_full().h(px(1.0)).mt(px(4.0)).bg(rgb(crate::theme::SURFACE_RAISED))
                     )
                 })
                 .into_any_element()
@@ -733,10 +733,10 @@ fn render_element(el: &PreviewElement) -> AnyElement {
             div()
                 .mb(px(10.0))
                 .w_full()
-                .bg(rgb(0x141618))
+                .bg(rgb(crate::theme::SURFACE_DIM))
                 .rounded(px(6.0))
                 .border_1()
-                .border_color(rgb(0x282a2e))
+                .border_color(rgb(crate::theme::SURFACE_RAISED))
                 .overflow_hidden()
                 .when_some(lang_label, |d, lang| {
                     d.child(
@@ -745,11 +745,11 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                             .justify_between()
                             .px_3()
                             .py(px(3.0))
-                            .bg(rgb(0x181a1e))
+                            .bg(rgb(crate::theme::SURFACE_DIM))
                             .border_b_1()
-                            .border_color(rgb(0x282a2e))
+                            .border_color(rgb(crate::theme::SURFACE_RAISED))
                             .text_xs()
-                            .text_color(rgb(0x969896))
+                            .text_color(rgb(crate::theme::TEXT_DIM))
                             .child(lang)
                             .child(format!("{} lines", total_lines))
                     )
@@ -774,10 +774,10 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                             .px_3()
                             .py_2()
                             .text_xs()
-                            .text_color(rgb(0x969896))
-                            .bg(rgb(0x181a1e))
+                            .text_color(rgb(crate::theme::TEXT_DIM))
+                            .bg(rgb(crate::theme::SURFACE_DIM))
                             .border_t_1()
-                            .border_color(rgb(0x282a2e))
+                            .border_color(rgb(crate::theme::SURFACE_RAISED))
                             .child(format!("... {} more lines", total_lines - formatted_lines.len()))
                     )
                 })
@@ -801,7 +801,7 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                 .flex()
                 .gap(px(6.0))
                 .child(
-                    div().text_sm().text_color(rgb(0x969896)).w(px(16.0))
+                    div().text_sm().text_color(rgb(crate::theme::TEXT_DIM)).w(px(16.0))
                         .flex_shrink_0()
                         .child(bullet)
                 )
@@ -814,7 +814,7 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                 .my_3()
                 .w_full()
                 .h(px(1.0))
-                .bg(rgb(0x373b41))
+                .bg(rgb(crate::theme::BORDER))
                 .into_any_element()
         }
 
@@ -823,11 +823,11 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                 .mb(px(8.0))
                 .pl(px(12.0))
                 .border_l_2()
-                .border_color(rgb(0x969896))
+                .border_color(rgb(crate::theme::TEXT_DIM))
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0xb4b7b4))
+                        .text_color(rgb(crate::theme::TEXT_DIM))
                         .italic()
                         .child(render_spans(spans))
                 )
@@ -841,15 +841,15 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                 .w_full()
                 .rounded(px(4.0))
                 .border_1()
-                .border_color(rgb(0x373b41))
+                .border_color(rgb(crate::theme::BORDER))
                 .overflow_hidden()
                 // Header row
                 .child(
                     div()
                         .flex()
-                        .bg(rgb(0x282a2e))
+                        .bg(rgb(crate::theme::SURFACE_RAISED))
                         .border_b_1()
-                        .border_color(rgb(0x373b41))
+                        .border_color(rgb(crate::theme::BORDER))
                         .children(headers.iter().map(|cell_spans| {
                             div()
                                 .flex_1()
@@ -857,9 +857,9 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                                 .py(px(5.0))
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xc5c8c6))
+                                .text_color(rgb(crate::theme::TEXT))
                                 .border_r_1()
-                                .border_color(rgb(0x373b41))
+                                .border_color(rgb(crate::theme::BORDER))
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .child(render_spans(cell_spans))
@@ -868,12 +868,12 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                 )
                 // Data rows
                 .children(rows.iter().enumerate().map(|(row_idx, row)| {
-                    let row_bg = if row_idx % 2 == 0 { rgb(0x1d1f21) } else { rgb(0x222426) };
+                    let row_bg = if row_idx % 2 == 0 { rgb(crate::theme::SURFACE) } else { rgb(crate::theme::SURFACE_RAISED) };
                     div()
                         .flex()
                         .bg(row_bg)
                         .when(row_idx + 1 < rows.len(), |d| {
-                            d.border_b_1().border_color(rgb(0x282a2e))
+                            d.border_b_1().border_color(rgb(crate::theme::SURFACE_RAISED))
                         })
                         .children(row.iter().map(|cell_spans| {
                             div()
@@ -881,9 +881,9 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                                 .px_2()
                                 .py(px(4.0))
                                 .text_xs()
-                                .text_color(rgb(0xc5c8c6))
+                                .text_color(rgb(crate::theme::TEXT))
                                 .border_r_1()
-                                .border_color(rgb(0x282a2e))
+                                .border_color(rgb(crate::theme::SURFACE_RAISED))
                                 .overflow_hidden()
                                 .child(render_spans(cell_spans))
                                 .into_any_element()
@@ -910,7 +910,7 @@ fn render_spans(spans: &[TextSpan]) -> AnyElement {
     // but concatenate adjacent spans with identical styling
     div()
         .text_sm()
-        .text_color(rgb(0xc5c8c6))
+        .text_color(rgb(crate::theme::TEXT))
         .children(spans.iter().map(|span| {
             let mut d = div().child(span.text.clone());
 
@@ -922,15 +922,15 @@ fn render_spans(spans: &[TextSpan]) -> AnyElement {
             }
             if span.code {
                 d = d
-                    .bg(rgb(0x282a2e))
+                    .bg(rgb(crate::theme::SURFACE_RAISED))
                     .rounded(px(3.0))
                     .px(px(4.0))
                     .py(px(1.0))
                     .text_xs()
-                    .text_color(rgb(0xcc6666));
+                    .text_color(rgb(crate::theme::DANGER));
             }
             if span.link_url.is_some() {
-                d = d.text_color(rgb(0x81a2be));
+                d = d.text_color(rgb(crate::theme::ACCENT));
             }
 
             // Only use inline display for styled spans, plain text flows naturally
@@ -1057,7 +1057,7 @@ pub fn render_file_picker(
     } else {
         format!("{}▎", picker.query)
     };
-    let query_color = if picker.query.is_empty() { rgb(0x969896) } else { rgb(0xc5c8c6) };
+    let query_color = if picker.query.is_empty() { rgb(crate::theme::TEXT_DIM) } else { rgb(crate::theme::TEXT) };
 
     div()
         .absolute()
@@ -1083,9 +1083,9 @@ pub fn render_file_picker(
                 .id("file-picker-panel")
                 .w(px(500.0))
                 .max_h(px(400.0))
-                .bg(rgb(0x1d1f21))
+                .bg(rgb(crate::theme::SURFACE))
                 .border_1()
-                .border_color(rgb(0x373b41))
+                .border_color(rgb(crate::theme::BORDER))
                 .rounded(px(8.0))
                 .flex()
                 .flex_col()
@@ -1103,9 +1103,9 @@ pub fn render_file_picker(
                         .px_3()
                         .py_2()
                         .border_b_1()
-                        .border_color(rgb(0x282a2e))
+                        .border_color(rgb(crate::theme::SURFACE_RAISED))
                         .child(
-                            div().text_xs().text_color(rgb(0x81a2be)).child("🔍")
+                            div().text_xs().text_color(rgb(crate::theme::ACCENT)).child("🔍")
                         )
                         .child(
                             div()
@@ -1128,15 +1128,15 @@ pub fn render_file_picker(
                                         .px_3()
                                         .py_2()
                                         .text_xs()
-                                        .text_color(rgb(0x969896))
+                                        .text_color(rgb(crate::theme::TEXT_DIM))
                                         .child("No files found")
                                         .into_any_element()
                                 ]
                             } else {
                                 picker.matches.iter().enumerate().map(|(i, path)| {
                                     let is_selected = i == picker.selected_index;
-                                    let bg = if is_selected { rgb(0x282a2e) } else { rgb(0x1d1f21) };
-                                    let text_c = if is_selected { rgb(0xc5c8c6) } else { rgb(0x969896) };
+                                    let bg = if is_selected { rgb(crate::theme::SURFACE_RAISED) } else { rgb(crate::theme::SURFACE) };
+                                    let text_c = if is_selected { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) };
 
                                     // Highlight .md files with an icon
                                     let icon = if path.ends_with(".md") { "📄 " }
@@ -1154,8 +1154,8 @@ pub fn render_file_picker(
                                         .text_xs()
                                         .text_color(text_c)
                                         .cursor_pointer()
-                                        .hover(|d| d.bg(rgb(0x282a2e)))
-                                        .when(is_selected, |d| d.border_l_2().border_color(rgb(0x81a2be)))
+                                        .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
+                                        .when(is_selected, |d| d.border_l_2().border_color(rgb(crate::theme::ACCENT)))
                                         .child(icon.to_string())
                                         .child(path.clone())
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1173,9 +1173,9 @@ pub fn render_file_picker(
                         .px_3()
                         .py(px(4.0))
                         .border_t_1()
-                        .border_color(rgb(0x282a2e))
+                        .border_color(rgb(crate::theme::SURFACE_RAISED))
                         .text_xs()
-                        .text_color(rgb(0x969896))
+                        .text_color(rgb(crate::theme::TEXT_DIM))
                         .child("Enter: preview  ↑↓: navigate  Esc: close")
                 )
         )

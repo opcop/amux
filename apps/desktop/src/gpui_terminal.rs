@@ -436,8 +436,8 @@ impl Default for RenderCell {
     fn default() -> Self {
         Self {
             ch: ' ',
-            fg: rgb(0xcdd6f4),
-            bg: rgb(0x1d1f21),
+            fg: rgb(crate::theme::TEXT),
+            bg: rgb(crate::theme::SURFACE),
             bold: false,
             italic: false,
             underline: UnderlineKind::None,

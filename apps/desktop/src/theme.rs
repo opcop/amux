@@ -69,9 +69,13 @@ pub const BORDER_DIM: u32 = TN_BORDER_DIM;
 
 // Text
 /// Primary readable text.
-pub const TEXT:       u32 = TN_FG;
+pub const TEXT:          u32 = TN_FG;
 /// Secondary/muted text — hints, labels.
-pub const TEXT_DIM:   u32 = TN_FG_DIM;
+pub const TEXT_DIM:      u32 = TN_FG_DIM;
+/// Disabled menu items / unavailable actions. Dimmer than
+/// `TEXT_DIM` so the eye registers "inactive" rather than
+/// "secondary".
+pub const TEXT_DISABLED: u32 = 0x4a4d4e;
 
 // Semantic accents
 /// Accent used for neutral information or links.

@@ -1535,8 +1535,8 @@ impl Render for GpuiShellView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x1d1f21))
-            .text_color(rgb(0xffffff))
+            .bg(rgb(crate::theme::SURFACE))
+            .text_color(rgb(crate::theme::TEXT))
             // macOS: with `appears_transparent: true` the content area
             // extends behind the titlebar, so the top ~28px overlap the
             // traffic light buttons. Pad the root flex column down on
@@ -1847,7 +1847,7 @@ impl Render for GpuiShellView {
                             div()
                                 .id("sidebar-expanded")
                                 .w(px(sw))
-                                .bg(rgb(0x181818))
+                                .bg(rgb(crate::theme::SURFACE_DIM))
                                 .flex()
                                 .flex_row()
                                 .overflow_hidden()
@@ -1861,8 +1861,8 @@ impl Render for GpuiShellView {
                                 // Header: mode tabs + collapse button
                                 .child({
                                     let is_ws_mode = self.sidebar_state.mode == SidebarMode::Workspaces;
-                                    let ws_text_color = if is_ws_mode { rgb(0xc5c8c6) } else { rgb(0x585b70) };
-                                    let ag_text_color = if !is_ws_mode { rgb(0xc5c8c6) } else { rgb(0x585b70) };
+                                    let ws_text_color = if is_ws_mode { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) };
+                                    let ag_text_color = if !is_ws_mode { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) };
                                     div()
                                         .flex()
                                         .justify_between()
@@ -1884,8 +1884,8 @@ impl Render for GpuiShellView {
                                                         .text_xs()
                                                         .font_weight(FontWeight::SEMIBOLD)
                                                         .text_color(ws_text_color)
-                                                        .when(is_ws_mode, |d| d.border_b_2().border_color(rgb(0x81a2be)))
-                                                        .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                                                        .when(is_ws_mode, |d| d.border_b_2().border_color(rgb(crate::theme::ACCENT)))
+                                                        .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
                                                         .cursor_pointer()
                                                         .child("WS")
                                                         .on_click(cx.listener(|this, _e, _w, cx| {
@@ -1903,8 +1903,8 @@ impl Render for GpuiShellView {
                                                         .text_xs()
                                                         .font_weight(FontWeight::SEMIBOLD)
                                                         .text_color(ag_text_color)
-                                                        .when(!is_ws_mode, |d| d.border_b_2().border_color(rgb(0x81a2be)))
-                                                        .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                                                        .when(!is_ws_mode, |d| d.border_b_2().border_color(rgb(crate::theme::ACCENT)))
+                                                        .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
                                                         .cursor_pointer()
                                                         .child("Agents")
                                                         .on_click(cx.listener(|this, _e, _w, cx| {
@@ -1920,8 +1920,8 @@ impl Render for GpuiShellView {
                                                 .py(px(2.0))
                                                 .rounded(px(3.0))
                                                 .text_xs()
-                                                .text_color(rgb(0x969896))
-                                                .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                                                .text_color(rgb(crate::theme::TEXT_DIM))
+                                                .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
                                                 .child("◀")
                                                 .on_click(cx.listener(|this, _e, _w, cx| {
                                                     this.sidebar_state.collapsed = true;
@@ -1980,7 +1980,7 @@ impl Render for GpuiShellView {
                                             div()
                                                 .px_3().py_2()
                                                 .text_xs()
-                                                .text_color(rgb(0x969896))
+                                                .text_color(rgb(crate::theme::TEXT_DIM))
                                                 .child("No panes in workspace"),
                                         );
                                     }
@@ -1993,7 +1993,7 @@ impl Render for GpuiShellView {
                                                     .px_3().pt(px(8.0)).pb(px(4.0))
                                                     .child(div().text_xs().text_color(rgb(*color)).font_weight(FontWeight::BOLD).child(*icon))
                                                     .child(div().text_xs().text_color(rgb(*color)).font_weight(FontWeight::SEMIBOLD).child(*label))
-                                                    .child(div().text_xs().text_color(rgb(0x585b70)).child(format!("({})", items.len()))),
+                                                    .child(div().text_xs().text_color(rgb(crate::theme::TEXT_DIM)).child(format!("({})", items.len()))),
                                             );
                                             for agent in items {
                                                 let pane_id_click = agent.pane_id.clone();
@@ -2013,13 +2013,13 @@ impl Render for GpuiShellView {
                                                         .px_3().py(px(5.0)).mx_1()
                                                         .rounded(px(4.0))
                                                         .cursor_pointer()
-                                                        .hover(|d| d.bg(rgb(0x252530)))
+                                                        .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
                                                         .child(div().text_xs().text_color(rgb(icon_color)).child(icon_c))
-                                                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_sm().text_color(rgb(0xc5c8c6)).child(title_c))
+                                                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_sm().text_color(rgb(crate::theme::TEXT)).child(title_c))
                                                         .when(!kind_c.is_empty(), move |d| {
-                                                            d.child(div().text_xs().text_color(rgb(0x585b70)).child(kind_c))
+                                                            d.child(div().text_xs().text_color(rgb(crate::theme::TEXT_DIM)).child(kind_c))
                                                         })
-                                                        .child(div().text_xs().text_color(rgb(0x45475a)).child(pane_short))
+                                                        .child(div().text_xs().text_color(rgb(crate::theme::SURFACE_RAISED)).child(pane_short))
                                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                                             let pid = amux_platform::terminal::manager::PaneId(pane_id_click.clone());
                                                             this.terminal_manager_mut().set_active_pane(&pid);
@@ -2042,8 +2042,8 @@ impl Render for GpuiShellView {
                                                 .get(&item.id)
                                                 .map(|tm| tm.has_any_activity())
                                                 .unwrap_or(false);
-                                            let bg_color = if is_active { rgb(0x252530) } else { rgb(0x181818) };
-                                            let text_color = if is_active { rgb(0xc5c8c6) } else { rgb(0x7f849c) };
+                                            let bg_color = if is_active { rgb(crate::theme::SURFACE_RAISED) } else { rgb(crate::theme::SURFACE_DIM) };
+                                            let text_color = if is_active { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) };
                                             let ws_id = item.id.clone();
                                             let ws_id_dbl = item.id.clone();
                                             let ws_id_drop = item.id.clone();
@@ -2068,8 +2068,8 @@ impl Render for GpuiShellView {
                                                 .rounded(px(4.0))
                                                 .bg(bg_color)
                                                 .cursor_grab()
-                                                .hover(|d| d.bg(rgb(0x252530)))
-                                                .when(is_active, |d| d.border_l_2().border_color(rgb(0x81a2be)))
+                                                .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
+                                                .when(is_active, |d| d.border_l_2().border_color(rgb(crate::theme::ACCENT)))
                                                 // Drag to reorder
                                                 .on_drag(
                                                     DragWorkspace { name: drag_name, index: ws_idx },
@@ -2079,7 +2079,7 @@ impl Render for GpuiShellView {
                                                     },
                                                 )
                                                 .drag_over::<DragWorkspace>(|style, _, _, _| {
-                                                    style.bg(rgb(0x282a2e)).border_t_2().border_color(rgb(0x81a2be))
+                                                    style.bg(rgb(crate::theme::SURFACE_RAISED)).border_t_2().border_color(rgb(crate::theme::ACCENT))
                                                 })
                                                 .on_drop(cx.listener(move |this, drag: &DragWorkspace, _window, cx| {
                                                     this.reorder_workspace(drag.index, &ws_id_drop);
@@ -2104,12 +2104,12 @@ impl Render for GpuiShellView {
                                                         .unwrap_or_default();
                                                     div()
                                                         .text_sm()
-                                                        .text_color(rgb(0xc5c8c6))
+                                                        .text_color(rgb(crate::theme::TEXT))
                                                         .px_1()
-                                                        .bg(rgb(0x282a2e))
+                                                        .bg(rgb(crate::theme::SURFACE_RAISED))
                                                         .rounded(px(2.0))
                                                         .border_1()
-                                                        .border_color(rgb(0x81a2be))
+                                                        .border_color(rgb(crate::theme::ACCENT))
                                                         .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
                                                         .into_any_element()
                                                 } else {
@@ -2123,7 +2123,7 @@ impl Render for GpuiShellView {
                                                         .when(has_ws_activity, |d| {
                                                             d.child(
                                                                 div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
-                                                                    .bg(rgb(0xa6e3a1)).flex_shrink_0()
+                                                                    .bg(rgb(crate::theme::SUCCESS)).flex_shrink_0()
                                                             )
                                                         })
                                                         .child(
@@ -2143,11 +2143,11 @@ impl Render for GpuiShellView {
                                                                     .px(px(3.0))
                                                                     .rounded(px(3.0))
                                                                     .text_xs()
-                                                                    .text_color(rgb(0x181818))
+                                                                    .text_color(rgb(crate::theme::SURFACE_DIM))
                                                                     .group_hover(&group_name, |d| {
-                                                                        d.text_color(rgb(0x969896))
+                                                                        d.text_color(rgb(crate::theme::TEXT_DIM))
                                                                     })
-                                                                    .hover(|d| d.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
+                                                                    .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::DANGER)))
                                                                     .child("✕")
                                                                     .on_click(cx.listener(move |this, _event, _window, cx| {
                                                                         let _ = this.app.run_command(&format!("workspace close {}", ws_id_del));
@@ -2181,9 +2181,9 @@ impl Render for GpuiShellView {
                                             .mb_1()
                                             .rounded(px(4.0))
                                             .text_xs()
-                                            .text_color(rgb(0x969896))
+                                            .text_color(rgb(crate::theme::TEXT_DIM))
                                             .cursor_pointer()
-                                            .hover(|d| d.bg(rgb(0x252530)).text_color(rgb(0xc5c8c6)))
+                                            .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
                                             .child("+  Open Workspace")
                                             .on_click(cx.listener(|this, _event, _window, cx| {
                                                 this.prompt_open_local_workspace(cx);
@@ -2206,8 +2206,8 @@ impl Render for GpuiShellView {
                                             div()
                                                 .w(px(1.0))
                                                 .h_full()
-                                                .bg(rgb(0x2a2a2a))
-                                                .group_hover("sidebar-handle", |d| d.w(px(2.0)).bg(rgb(0x81a2be)))
+                                                .bg(rgb(crate::theme::SURFACE_RAISED))
+                                                .group_hover("sidebar-handle", |d| d.w(px(2.0)).bg(rgb(crate::theme::ACCENT)))
                                         )
                                         .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _w, _cx| {
                                             this.sidebar_drag_start = Some(
@@ -2220,12 +2220,12 @@ impl Render for GpuiShellView {
                             div()
                                 .id("sidebar-expand")
                                 .w(px(SIDEBAR_WIDTH_COLLAPSED))
-                                .bg(rgb(0x181818))
+                                .bg(rgb(crate::theme::SURFACE_DIM))
                                 .flex()
                                 .flex_col()
                                 .items_center()
                                 .border_r_1()
-                                .border_color(rgb(0x2a2a2a))
+                                .border_color(rgb(crate::theme::SURFACE_RAISED))
                                 .child(
                                     div()
                                         .id("sidebar-expand-btn")
@@ -2234,8 +2234,8 @@ impl Render for GpuiShellView {
                                         .py(px(4.0))
                                         .rounded(px(3.0))
                                         .text_xs()
-                                        .text_color(rgb(0x969896))
-                                        .hover(|d| d.bg(rgb(0x282a2e)).text_color(rgb(0xc5c8c6)))
+                                        .text_color(rgb(crate::theme::TEXT_DIM))
+                                        .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
                                         .child("▶")
                                         .on_click(cx.listener(|this, _e, _w, cx| {
                                             this.sidebar_state.collapsed = false;
@@ -2298,7 +2298,7 @@ impl Render for GpuiShellView {
                                 } else if let Some(layout) = layout_cloned {
                                     render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, cx)
                                 } else {
-                                    div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
+                                    div().flex_1().bg(rgb(crate::theme::SURFACE)).child("No terminal").into_any_element()
                                 };
                                 self.pane_bounds = pane_bounds;
                                 result
@@ -2482,9 +2482,9 @@ impl Render for GpuiShellView {
                             .top(px(y))
                             .text_size(px(font_size))
                             .font_family(self.config.font_family.clone())
-                            .text_color(rgb(0xc5c8c6))
+                            .text_color(rgb(crate::theme::TEXT))
                             .text_decoration_1()
-                            .text_decoration_color(rgb(0x81a2be))
+                            .text_decoration_color(rgb(crate::theme::ACCENT))
                             .child(format!("{preedit}▏"))
                     )
                 } else {
@@ -2521,14 +2521,14 @@ impl Render for GpuiShellView {
                         .px_3()
                         .py(px(6.0))
                         .rounded(px(6.0))
-                        .bg(rgb(0x1d1f21))
+                        .bg(rgb(crate::theme::SURFACE))
                         .border_1()
                         .border_color(rgb(t.color))
                         .shadow_lg()
                         .text_xs()
                         .text_color(rgb(t.color))
                         .cursor_pointer()
-                        .hover(|d| d.bg(rgb(0x252530)))
+                        .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
                         .child(t.message.clone())
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.terminal_manager_mut().set_active_pane(&pane_id);

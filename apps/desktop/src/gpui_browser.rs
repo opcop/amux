@@ -264,7 +264,7 @@ pub fn render_browser_tab_content(
         .flex_col()
         .w_full()
         .overflow_hidden()
-        .bg(rgb(0x1d1f21))
+        .bg(rgb(crate::theme::SURFACE))
         // URL bar
         .child(
             div()
@@ -274,9 +274,9 @@ pub fn render_browser_tab_content(
                 .h(px(32.0))
                 .px_2()
                 .gap_1()
-                .bg(rgb(0x282a2e))
+                .bg(rgb(crate::theme::SURFACE_RAISED))
                 .border_b_1()
-                .border_color(rgb(0x373b41))
+                .border_color(rgb(crate::theme::BORDER))
                 // Back
                 .child(nav_btn("browser-back", "\u{25C0}", cx.listener(move |this: &mut GpuiShellView, _, _, cx| {
                     if let Some(e) = this.browser_tabs.get(&bid) { e.browser.go_back(); } cx.notify();
@@ -294,7 +294,7 @@ pub fn render_browser_tab_content(
                     div()
                         .flex_1()
                         .mx_1()
-                        .bg(rgb(0x1d1f21))
+                        .bg(rgb(crate::theme::SURFACE))
                         .rounded(px(4.0))
                         .child(
                             Input::new(&url_input)
@@ -335,8 +335,8 @@ fn nav_btn(
     div()
         .id(id)
         .px(px(6.0)).py(px(2.0)).rounded(px(4.0))
-        .text_sm().text_color(rgb(0x969896))
-        .hover(|d| d.bg(rgb(0x373b41)).text_color(rgb(0xc5c8c6)))
+        .text_sm().text_color(rgb(crate::theme::TEXT_DIM))
+        .hover(|d| d.bg(rgb(crate::theme::BORDER)).text_color(rgb(crate::theme::TEXT)))
         .cursor_pointer()
         .child(label)
         .on_click(handler)
@@ -352,8 +352,8 @@ fn nav_btn_styled(
     div()
         .id(id)
         .px(px(6.0)).py(px(2.0)).rounded(px(4.0))
-        .text_sm().text_color(rgb(0x969896))
-        .hover(|d| d.bg(rgb(0x373b41)).text_color(rgb(hover_color)))
+        .text_sm().text_color(rgb(crate::theme::TEXT_DIM))
+        .hover(|d| d.bg(rgb(crate::theme::BORDER)).text_color(rgb(hover_color)))
         .cursor_pointer()
         .child(label)
         .on_click(handler)

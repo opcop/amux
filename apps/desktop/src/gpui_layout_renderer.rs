@@ -46,9 +46,9 @@ pub(crate) fn render_context_menu(
         .max_h(px(max_menu_h))
         .overflow_y_scroll()
         .rounded(px(8.0))
-        .bg(rgb(0x282a2e))
+        .bg(rgb(crate::theme::SURFACE_RAISED))
         .border_1()
-        .border_color(rgb(0x373b41))
+        .border_color(rgb(crate::theme::BORDER))
         .shadow_lg()
         .py_1()
         .flex()
@@ -58,7 +58,7 @@ pub(crate) fn render_context_menu(
         let label = item.label;
         let enabled = item.enabled;
 
-        let text_color = if enabled { rgb(0xc5c8c6) } else { rgb(0x4a4d4e) };
+        let text_color = if enabled { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DISABLED) };
 
         let left = div().flex().flex_row().items_center().gap(px(6.0))
             .child(div().text_sm().text_color(text_color).child(label));
@@ -72,7 +72,7 @@ pub(crate) fn render_context_menu(
             .flex()
             .justify_between()
             .items_center()
-            .when(enabled, |d| d.hover(|d| d.bg(rgb(0x373b41))))
+            .when(enabled, |d| d.hover(|d| d.bg(rgb(crate::theme::BORDER))))
             .when(enabled, |d| {
                 d.on_click(cx.listener(move |this, _event, window, cx| {
                     crate::menu::dispatch(this, label, window, cx);
@@ -82,7 +82,7 @@ pub(crate) fn render_context_menu(
             .children(item.shortcut.map(|kb| {
                 div()
                     .text_xs()
-                    .text_color(rgb(0x696d70))
+                    .text_color(rgb(crate::theme::TEXT_DIM))
                     .child(kb)
             }));
 
@@ -94,7 +94,7 @@ pub(crate) fn render_context_menu(
                     .mx_2()
                     .my_1()
                     .h(px(1.0))
-                    .bg(rgb(0x373b41)),
+                    .bg(rgb(crate::theme::BORDER)),
             );
         }
     }
@@ -186,12 +186,12 @@ pub(crate) fn render_layout(
                             .py(px(4.0))
                             .text_xs()
                             .cursor_grab()
-                            .text_color(if is_tab_active { rgb(0xc5c8c6) } else { rgb(0x7f849c) })
-                            .bg(if is_tab_active { rgb(0x1d1f21) } else { rgb(0x141618) })
+                            .text_color(if is_tab_active { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) })
+                            .bg(if is_tab_active { rgb(crate::theme::SURFACE) } else { rgb(crate::theme::SURFACE_DIM) })
                             .border_b_2()
-                            .border_color(if is_tab_active { rgb(0x81a2be) } else { rgb(0x141618) })
+                            .border_color(if is_tab_active { rgb(crate::theme::ACCENT) } else { rgb(crate::theme::SURFACE_DIM) })
                             .when(is_tab_active, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                            .hover(|d| d.bg(rgb(0x252530)))
+                            .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
                             .on_drag(
                                 DragTab {
                                     source_pane: pid_drag,
@@ -205,7 +205,7 @@ pub(crate) fn render_layout(
                             )
                             // Drop on tab: reorder within same pane, or move across panes
                             .drag_over::<DragTab>(|style, _, _, _| {
-                                style.border_l_2().border_color(rgb(0x81a2be))
+                                style.border_l_2().border_color(rgb(crate::theme::ACCENT))
                             })
                             .on_drop(cx.listener(move |this, drag: &DragTab, _window, cx| {
                                 if drag.source_pane == pid_tab_drop {
@@ -263,11 +263,11 @@ pub(crate) fn render_layout(
                                         .flex_1()
                                         .overflow_hidden()
                                         .text_sm()
-                                        .text_color(rgb(0xc5c8c6))
-                                        .bg(rgb(0x282a2e))
+                                        .text_color(rgb(crate::theme::TEXT))
+                                        .bg(rgb(crate::theme::SURFACE_RAISED))
                                         .rounded(px(2.0))
                                         .border_1()
-                                        .border_color(rgb(0x81a2be))
+                                        .border_color(rgb(crate::theme::ACCENT))
                                         .px_1()
                                         .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
                                         .into_any_element()
@@ -283,12 +283,12 @@ pub(crate) fn render_layout(
                                     if tab_exited {
                                         tab_content = tab_content.child(
                                             div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
-                                                .bg(rgb(0xcc6666)).flex_shrink_0() // red
+                                                .bg(rgb(crate::theme::DANGER)).flex_shrink_0() // red
                                         );
                                     } else if has_activity && !is_tab_active {
                                         tab_content = tab_content.child(
                                             div().w(px(6.0)).h(px(6.0)).rounded(px(3.0))
-                                                .bg(rgb(0xb5bd68)).flex_shrink_0() // green
+                                                .bg(rgb(crate::theme::SUCCESS)).flex_shrink_0() // green
                                         );
                                     }
                                     // Show tab kind icon for non-terminal tabs
@@ -322,8 +322,8 @@ pub(crate) fn render_layout(
                                         ))
                                         .px(px(2.0))
                                         .rounded(px(3.0))
-                                        .text_color(rgb(0x969896))
-                                        .hover(|d| d.bg(rgb(0x373b41)).text_color(rgb(0xcc6666)))
+                                        .text_color(rgb(crate::theme::TEXT_DIM))
+                                        .hover(|d| d.bg(rgb(crate::theme::BORDER)).text_color(rgb(crate::theme::DANGER)))
                                         .child("×")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close_tab);
@@ -359,9 +359,9 @@ pub(crate) fn render_layout(
                 // Pane action buttons — styled to be visible but
                 // unobtrusive. Slightly larger than before so they
                 // feel "clickable" rather than decorative.
-                let btn_text = rgb(0x7f849c);     // softer than bg but visible
-                let btn_hover_bg = rgb(0x313244);
-                let btn_hover_text = rgb(0xcdd6f4);
+                let btn_text = rgb(crate::theme::TEXT_DIM);     // softer than bg but visible
+                let btn_hover_bg = rgb(crate::theme::BORDER);
+                let btn_hover_text = rgb(crate::theme::TEXT);
 
                 let pid_dropdown = pane_id.clone();
                 let actions_row = div()
@@ -396,7 +396,7 @@ pub(crate) fn render_layout(
                                     })),
                             )
                             // thin divider
-                            .child(div().w(px(1.0)).h(px(14.0)).bg(rgb(0x3a3d4e)))
+                            .child(div().w(px(1.0)).h(px(14.0)).bg(rgb(crate::theme::BORDER)))
                             // "▾" half
                             .child(
                                 div()
@@ -488,10 +488,10 @@ pub(crate) fn render_layout(
                             .py(px(3.0))
                             .rounded(px(4.0))
                             .text_sm()
-                            .text_color(if has_multiple_panes { btn_text } else { rgb(0x313244) })
+                            .text_color(if has_multiple_panes { btn_text } else { rgb(crate::theme::BORDER) })
                             .cursor_pointer()
                             .when(has_multiple_panes, |d| {
-                                d.hover(|d| d.bg(rgb(0x3a2020)).text_color(rgb(0xcc6666)))
+                                d.hover(|d| d.bg(rgb(crate::theme::DANGER_BG)).text_color(rgb(crate::theme::DANGER)))
                             })
                             .child("✕")
                             .when(has_multiple_panes, |d| {
@@ -510,9 +510,9 @@ pub(crate) fn render_layout(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .bg(rgb(0x141618))
+                    .bg(rgb(crate::theme::SURFACE_DIM))
                     .border_b_1()
-                    .border_color(rgb(0x252530))
+                    .border_color(rgb(crate::theme::SURFACE_RAISED))
                     .child(tabs_row)
                     .child(actions_row)
                     // Zoom indicator: absolutely centered over the entire tab strip
@@ -533,9 +533,9 @@ pub(crate) fn render_layout(
                                         .px_2()
                                         .py(px(2.0))
                                         .rounded(px(8.0))
-                                        .bg(rgb(0x1d1f21))
+                                        .bg(rgb(crate::theme::SURFACE))
                                         .border_1()
-                                        .border_color(rgb(0x373b41))
+                                        .border_color(rgb(crate::theme::BORDER))
                                         .flex()
                                         .flex_row()
                                         .items_center()
@@ -545,12 +545,12 @@ pub(crate) fn render_layout(
                                                 .w(px(6.0))
                                                 .h(px(6.0))
                                                 .rounded(px(3.0))
-                                                .bg(rgb(0xb5bd68)) // green for "zoomed" state
+                                                .bg(rgb(crate::theme::SUCCESS)) // green for "zoomed" state
                                         )
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0xa6adc8))
+                                                .text_color(rgb(crate::theme::TEXT_DIM))
                                                 .child("ZOOMED")
                                         )
                                 )
@@ -573,7 +573,7 @@ pub(crate) fn render_layout(
                             let bcell = entry.bounds_cell.clone();
                             crate::gpui_browser::render_browser_tab_content(input, bcell, bid, browser_content_w, browser_content_h, cx).into_any_element()
                         } else {
-                            div().flex_1().bg(rgb(0x1d1f21)).child("Browser loading...").into_any_element()
+                            div().flex_1().bg(rgb(crate::theme::SURFACE)).child("Browser loading...").into_any_element()
                         }
                     }
                     Some(TabKind::Preview { path }) => {
@@ -582,7 +582,7 @@ pub(crate) fn render_layout(
                         if let Some(preview) = preview_tabs.get(path) {
                             crate::gpui_preview::render_preview_panel(preview, preview_w, preview_h, cx).into_any_element()
                         } else {
-                            div().flex_1().bg(rgb(0x1d1f21))
+                            div().flex_1().bg(rgb(crate::theme::SURFACE))
                                 .child(format!("Preview: {}", path))
                                 .into_any_element()
                         }
@@ -603,10 +603,10 @@ pub(crate) fn render_layout(
                             }
                         } else {
                             div().flex_1().flex().items_center().justify_center()
-                                .bg(rgb(0x1d1f21))
+                                .bg(rgb(crate::theme::SURFACE))
                                 .child(
                                     div().flex().flex_col().items_center().gap_2()
-                                        .child(div().text_sm().text_color(rgb(0x969896)).child("Starting terminal..."))
+                                        .child(div().text_sm().text_color(rgb(crate::theme::TEXT_DIM)).child("Starting terminal..."))
                                 )
                                 .into_any_element()
                         }
@@ -616,7 +616,7 @@ pub(crate) fn render_layout(
             } else {
                 (
                     div().into_any_element(),
-                    div().flex_1().bg(rgb(0x1d1f21)).child("Empty pane").into_any_element(),
+                    div().flex_1().bg(rgb(crate::theme::SURFACE)).child("Empty pane").into_any_element(),
                 )
             };
 
@@ -628,7 +628,7 @@ pub(crate) fn render_layout(
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .bg(rgb(0x1d1f21))
+                .bg(rgb(crate::theme::SURFACE))
                 // Active pane indicator: only show when multiple panes exist
                 // No extra border — active pane is indicated by tab strip's blue underline
                 // Tab strip at top (limux style)
@@ -637,7 +637,7 @@ pub(crate) fn render_layout(
                 .child(content)
                 // Drag-and-drop: visual feedback when dragging a tab over this pane
                 .drag_over::<DragTab>(|style, _, _, _| {
-                    style.border_t_2().border_color(rgb(0x969896))
+                    style.border_t_2().border_color(rgb(crate::theme::TEXT_DIM))
                 })
                 // Drag-and-drop: accept a dropped tab
                 .on_drop(cx.listener(move |this, drag: &DragTab, _window, cx| {
@@ -694,8 +694,8 @@ pub(crate) fn render_layout(
                         .w(px(1.0))
                         .h_full()
                         .mx_auto()
-                        .bg(rgb(0x252530))
-                        .group_hover("resize-h", |d| d.w(px(2.0)).bg(rgb(0x969896)))
+                        .bg(rgb(crate::theme::SURFACE_RAISED))
+                        .group_hover("resize-h", |d| d.w(px(2.0)).bg(rgb(crate::theme::TEXT_DIM)))
                 )
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _window, _cx| {
                     this.resize_drag = Some(ResizeDragState {
@@ -755,8 +755,8 @@ pub(crate) fn render_layout(
                         .h(px(1.0))
                         .w_full()
                         .my_auto()
-                        .bg(rgb(0x252530))
-                        .group_hover("resize-v", |d| d.h(px(2.0)).bg(rgb(0x969896)))
+                        .bg(rgb(crate::theme::SURFACE_RAISED))
+                        .group_hover("resize-v", |d| d.h(px(2.0)).bg(rgb(crate::theme::TEXT_DIM)))
                 )
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, _window, _cx| {
                     this.resize_drag = Some(ResizeDragState {
@@ -809,23 +809,23 @@ pub(crate) fn render_agent_picker(
                 .flex()
                 .items_center()
                 .gap_2()
-                .bg(if is_selected { rgb(0x282a2e) } else { rgb(0x1d1f21) })
-                .hover(|d| d.bg(rgb(0x282a2e)))
+                .bg(if is_selected { rgb(crate::theme::SURFACE_RAISED) } else { rgb(crate::theme::SURFACE) })
+                .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
                 .cursor_pointer()
                 .child(
-                    div().text_xs().text_color(rgb(0x81a2be)).min_w(px(16.0))
+                    div().text_xs().text_color(rgb(crate::theme::ACCENT)).min_w(px(16.0))
                         .child(format!("{}", i + 1))
                 )
                 .child(
                     div().text_sm()
-                        .text_color(if is_selected { rgb(0xc5c8c6) } else { rgb(0xa6adc8) })
+                        .text_color(if is_selected { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) })
                         .child(label.clone())
                 )
                 .when(*is_wsl, |d| {
                     d.child(
                         div().text_xs().px(px(4.0)).py(px(1.0))
-                            .rounded(px(3.0)).bg(rgb(0x282a2e))
-                            .text_color(rgb(0x969896)).child("WSL")
+                            .rounded(px(3.0)).bg(rgb(crate::theme::SURFACE_RAISED))
+                            .text_color(rgb(crate::theme::TEXT_DIM)).child("WSL")
                     )
                 })
                 .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -856,26 +856,26 @@ pub(crate) fn render_agent_picker(
             div()
                 .w(px(320.0))
                 .rounded(px(8.0))
-                .bg(rgb(0x1d1f21))
+                .bg(rgb(crate::theme::SURFACE))
                 .border_1()
-                .border_color(rgb(0x373b41))
+                .border_color(rgb(crate::theme::BORDER))
                 .shadow_lg()
                 .flex().flex_col().overflow_hidden()
                 .child(
                     div().px_3().py(px(8.0))
-                        .border_b_1().border_color(rgb(0x282a2e))
+                        .border_b_1().border_color(rgb(crate::theme::SURFACE_RAISED))
                         .child(
                             div().text_sm()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xc5c8c6))
+                                .text_color(rgb(crate::theme::TEXT))
                                 .child("Launch Agent")
                         )
                 )
                 .child(div().p_1().child(list))
                 .child(
                     div().px_3().py(px(6.0))
-                        .border_t_1().border_color(rgb(0x282a2e))
-                        .text_xs().text_color(rgb(0x969896))
+                        .border_t_1().border_color(rgb(crate::theme::SURFACE_RAISED))
+                        .text_xs().text_color(rgb(crate::theme::TEXT_DIM))
                         .child("↑↓ navigate  1-9 quick select  Enter launch  Esc cancel")
                 )
         )
@@ -904,27 +904,27 @@ pub(crate) fn render_template_picker(
             .flex()
             .items_center()
             .gap_2()
-            .bg(if is_selected { rgb(0x282a2e) } else { rgb(0x1d1f21) })
-            .hover(|d| d.bg(rgb(0x282a2e)))
+            .bg(if is_selected { rgb(crate::theme::SURFACE_RAISED) } else { rgb(crate::theme::SURFACE) })
+            .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
             .cursor_pointer()
             .child(
-                div().text_xs().text_color(rgb(0x81a2be)).min_w(px(16.0))
+                div().text_xs().text_color(rgb(crate::theme::ACCENT)).min_w(px(16.0))
                     .child(format!("{}", i + 1))
             )
             .child(
                 div().flex().flex_col().flex_1().overflow_hidden()
                     .child(
                         div().text_sm().flex().gap_1().items_center()
-                            .text_color(if is_selected { rgb(0xc5c8c6) } else { rgb(0xa6adc8) })
+                            .text_color(if is_selected { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) })
                             .child(template.name.clone())
                             .when(is_custom, |d| {
                                 d.child(
-                                    div().text_xs().text_color(rgb(0x969896)).child("(custom)")
+                                    div().text_xs().text_color(rgb(crate::theme::TEXT_DIM)).child("(custom)")
                                 )
                             })
                     )
                     .child(
-                        div().text_xs().text_color(rgb(0x969896))
+                        div().text_xs().text_color(rgb(crate::theme::TEXT_DIM))
                             .child(format!("{} — {} panes", template.description, pane_count))
                     )
             )
@@ -945,9 +945,9 @@ pub(crate) fn render_template_picker(
                     .py(px(2.0))
                     .rounded(px(3.0))
                     .text_xs()
-                    .text_color(rgb(0x1d1f21)) // invisible by default (matches bg)
-                    .group_hover("tpl-row", |d| d.text_color(rgb(0x969896))) // visible on row hover
-                    .hover(|d| d.bg(rgb(0x373b41)).text_color(rgb(0xcc6666))) // red on button hover
+                    .text_color(rgb(crate::theme::SURFACE)) // invisible by default (matches bg)
+                    .group_hover("tpl-row", |d| d.text_color(rgb(crate::theme::TEXT_DIM))) // visible on row hover
+                    .hover(|d| d.bg(rgb(crate::theme::BORDER)).text_color(rgb(crate::theme::DANGER))) // red on button hover
                     .child("✕")
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         if let Some(ref mut p) = this.template_picker {
@@ -981,19 +981,19 @@ pub(crate) fn render_template_picker(
             div()
                 .w(px(360.0))
                 .rounded(px(8.0))
-                .bg(rgb(0x1d1f21))
+                .bg(rgb(crate::theme::SURFACE))
                 .border_1()
-                .border_color(rgb(0x373b41))
+                .border_color(rgb(crate::theme::BORDER))
                 .shadow_lg()
                 .flex().flex_col().overflow_hidden()
                 // Header
                 .child(
                     div().px_3().py(px(8.0))
-                        .border_b_1().border_color(rgb(0x282a2e))
+                        .border_b_1().border_color(rgb(crate::theme::SURFACE_RAISED))
                         .child(
                             div().text_sm()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xc5c8c6))
+                                .text_color(rgb(crate::theme::TEXT))
                                 .child("Apply Layout Template")
                         )
                 )
@@ -1002,8 +1002,8 @@ pub(crate) fn render_template_picker(
                 // Footer
                 .child(
                     div().px_3().py(px(6.0))
-                        .border_t_1().border_color(rgb(0x282a2e))
-                        .text_xs().text_color(rgb(0x969896))
+                        .border_t_1().border_color(rgb(crate::theme::SURFACE_RAISED))
+                        .text_xs().text_color(rgb(crate::theme::TEXT_DIM))
                         .child("↑↓ navigate  1-9 select  Enter apply  Del remove  Esc cancel")
                 )
         )
@@ -1038,20 +1038,20 @@ pub(crate) fn render_pane_picker(
                 .flex()
                 .items_center()
                 .gap_2()
-                .bg(if is_selected { rgb(0x282a2e) } else { rgb(0x1d1f21) })
-                .hover(|d| d.bg(rgb(0x282a2e)))
+                .bg(if is_selected { rgb(crate::theme::SURFACE_RAISED) } else { rgb(crate::theme::SURFACE) })
+                .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
                 .cursor_pointer()
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x81a2be))
+                        .text_color(rgb(crate::theme::ACCENT))
                         .min_w(px(16.0))
                         .child(format!("{}", i + 1))
                 )
                 .child(
                     div()
                         .text_sm()
-                        .text_color(if is_selected { rgb(0xc5c8c6) } else { rgb(0xa6adc8) })
+                        .text_color(if is_selected { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) })
                         .child(title.clone())
                 )
                 .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -1088,9 +1088,9 @@ pub(crate) fn render_pane_picker(
             div()
                 .w(px(320.0))
                 .rounded(px(8.0))
-                .bg(rgb(0x1d1f21))
+                .bg(rgb(crate::theme::SURFACE))
                 .border_1()
-                .border_color(rgb(0x373b41))
+                .border_color(rgb(crate::theme::BORDER))
                 .shadow_lg()
                 .flex()
                 .flex_col()
@@ -1101,7 +1101,7 @@ pub(crate) fn render_pane_picker(
                         .px_3()
                         .py(px(8.0))
                         .border_b_1()
-                        .border_color(rgb(0x282a2e))
+                        .border_color(rgb(crate::theme::SURFACE_RAISED))
                         .flex()
                         .flex_col()
                         .gap_1()
@@ -1109,13 +1109,13 @@ pub(crate) fn render_pane_picker(
                             div()
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xc5c8c6))
+                                .text_color(rgb(crate::theme::TEXT))
                                 .child("Send to Pane")
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x969896))
+                                .text_color(rgb(crate::theme::TEXT_DIM))
                                 .child(text_preview)
                         )
                 )
@@ -1129,9 +1129,9 @@ pub(crate) fn render_pane_picker(
                         .px_3()
                         .py(px(6.0))
                         .border_t_1()
-                        .border_color(rgb(0x282a2e))
+                        .border_color(rgb(crate::theme::SURFACE_RAISED))
                         .text_xs()
-                        .text_color(rgb(0x969896))
+                        .text_color(rgb(crate::theme::TEXT_DIM))
                         .child("↑↓ navigate  1-9 quick select  Enter send  Esc cancel")
                 )
         )
@@ -1178,7 +1178,7 @@ fn render_exited_overlay(
                         .items_center()
                         .gap_3()
                         .child(
-                            div().text_sm().text_color(rgb(0x6c7086)).child("Process exited")
+                            div().text_sm().text_color(rgb(crate::theme::TEXT_DIM)).child("Process exited")
                         )
                         .child(
                             div()
@@ -1188,10 +1188,10 @@ fn render_exited_overlay(
                                     div()
                                         .id(gpui::ElementId::Name(format!("{}-restart", pane_id.0).into()))
                                         .px_3().py_1().rounded(px(4.0))
-                                        .bg(rgb(0x282a2e))
-                                        .hover(|d| d.bg(rgb(0x373b41)))
+                                        .bg(rgb(crate::theme::SURFACE_RAISED))
+                                        .hover(|d| d.bg(rgb(crate::theme::BORDER)))
                                         .cursor_pointer()
-                                        .text_sm().text_color(rgb(0xb5bd68))
+                                        .text_sm().text_color(rgb(crate::theme::SUCCESS))
                                         .child("↻ Restart")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.restart_terminal_in_pane(&pid_restart);
@@ -1202,10 +1202,10 @@ fn render_exited_overlay(
                                     div()
                                         .id(gpui::ElementId::Name(format!("{}-close-exited", pane_id.0).into()))
                                         .px_3().py_1().rounded(px(4.0))
-                                        .bg(rgb(0x282a2e))
-                                        .hover(|d| d.bg(rgb(0x373b41)))
+                                        .bg(rgb(crate::theme::SURFACE_RAISED))
+                                        .hover(|d| d.bg(rgb(crate::theme::BORDER)))
                                         .cursor_pointer()
-                                        .text_sm().text_color(rgb(0xcc6666))
+                                        .text_sm().text_color(rgb(crate::theme::DANGER))
                                         .child("✕ Close")
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.terminal_manager_mut().set_active_pane(&pid_close);
@@ -1242,16 +1242,16 @@ pub(crate) fn render_new_tab_picker(
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .bg(if is_selected { rgb(0x282a2e) } else { rgb(0x1d1f21) })
-                    .hover(|d| d.bg(rgb(0x282a2e)))
+                    .bg(if is_selected { rgb(crate::theme::SURFACE_RAISED) } else { rgb(crate::theme::SURFACE) })
+                    .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
                     .cursor_pointer()
                     .child(
-                        div().text_xs().text_color(rgb(0x81a2be)).min_w(px(18.0))
+                        div().text_xs().text_color(rgb(crate::theme::ACCENT)).min_w(px(18.0))
                             .child(item.icon)
                     )
                     .child(
                         div().text_sm()
-                            .text_color(if is_selected { rgb(0xc5c8c6) } else { rgb(0xa6adc8) })
+                            .text_color(if is_selected { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) })
                             .child(item.label.clone())
                     )
                     .on_click(cx.listener(move |this, _event, window, cx| {
@@ -1264,7 +1264,7 @@ pub(crate) fn render_new_tab_picker(
             )
             .when(item.separator_after, |d| {
                 d.child(
-                    div().mx_2().my(px(3.0)).h(px(1.0)).bg(rgb(0x282a2e))
+                    div().mx_2().my(px(3.0)).h(px(1.0)).bg(rgb(crate::theme::SURFACE_RAISED))
                 )
             });
     }
@@ -1292,9 +1292,9 @@ pub(crate) fn render_new_tab_picker(
                 .left(anchor.x)
                 .w(px(220.0))
                 .rounded(px(6.0))
-                .bg(rgb(0x1d1f21))
+                .bg(rgb(crate::theme::SURFACE))
                 .border_1()
-                .border_color(rgb(0x373b41))
+                .border_color(rgb(crate::theme::BORDER))
                 .shadow_lg()
                 .flex().flex_col().overflow_hidden()
                 .py_1()

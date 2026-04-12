@@ -43,11 +43,11 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
         .px_3()
         .pt(px(8.0)) // breathing room above the bar
         .h(px(34.0)) // 26px content + 8px top padding
-        .bg(rgb(0x11111b))
+        .bg(rgb(crate::theme::SURFACE))
         .border_t_1()
-        .border_color(rgb(0x252530))
+        .border_color(rgb(crate::theme::SURFACE_RAISED))
         .text_xs()
-        .text_color(rgb(0x6c7086))
+        .text_color(rgb(crate::theme::TEXT_DIM))
         // Left section
         .child(
             div()
@@ -65,17 +65,17 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                                 .w(px(6.0))
                                 .h(px(6.0))
                                 .rounded_full()
-                                .bg(rgb(0xa6e3a1))  // green dot = active
+                                .bg(rgb(crate::theme::SUCCESS))  // green dot = active
                         )
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xcdd6f4))
+                                .text_color(rgb(crate::theme::TEXT))
                                 .child(workspace.clone()),
                         ),
                 )
                 // Separator
-                .child(div().w_px().h(px(12.0)).bg(rgb(0x313244)))
+                .child(div().w_px().h(px(12.0)).bg(rgb(crate::theme::BORDER)))
                 // Pane/Tab counts
                 .child(
                     div()
@@ -83,14 +83,14 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                         .gap_2()
                         .items_center()
                         .child(
-                            div().text_color(rgb(0x7f849c))
+                            div().text_color(rgb(crate::theme::TEXT_DIM))
                                 .child(format!("{} {}", pane_count, if pane_count == 1 { "pane" } else { "panes" }))
                         )
                         .child(
-                            div().text_color(rgb(0x585b70)).child("·")
+                            div().text_color(rgb(crate::theme::TEXT_DIM)).child("·")
                         )
                         .child(
-                            div().text_color(rgb(0x7f849c))
+                            div().text_color(rgb(crate::theme::TEXT_DIM))
                                 .child(format!("{} {}", tab_count, if tab_count == 1 { "tab" } else { "tabs" }))
                         ),
                 ),
@@ -113,7 +113,7 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                             .text_color(rgb(theme::INFO))
                             .child(s.to_string())
                             .into_any_element(),
-                        div().w_px().h(px(12.0)).bg(rgb(0x313244)).into_any_element(),
+                        div().w_px().h(px(12.0)).bg(rgb(crate::theme::BORDER)).into_any_element(),
                     ],
                     None => Vec::new(),
                 })
@@ -138,7 +138,7 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                                 if n == 1 { "" } else { "s" }
                             ))
                             .into_any_element(),
-                        div().w_px().h(px(12.0)).bg(rgb(0x313244)).into_any_element(),
+                        div().w_px().h(px(12.0)).bg(rgb(crate::theme::BORDER)).into_any_element(),
                     ],
                     _ => Vec::new(),
                 })
@@ -147,7 +147,7 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                     Vec::new()
                 } else {
                     let mut els = vec![
-                        div().w_px().h(px(12.0)).bg(rgb(0x313244)).into_any_element(),
+                        div().w_px().h(px(12.0)).bg(rgb(crate::theme::BORDER)).into_any_element(),
                     ];
                     for agent in &data.agents {
                         els.push(
@@ -160,7 +160,7 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                                         .child(agent.status_icon)
                                 )
                                 .child(
-                                    div().text_color(rgb(0x7f849c))
+                                    div().text_color(rgb(crate::theme::TEXT_DIM))
                                         .child(agent.name.clone())
                                 )
                                 .into_any_element(),
@@ -173,8 +173,8 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                         .px(px(6.0))
                         .py(px(2.0))
                         .rounded(px(3.0))
-                        .bg(rgb(0x1e1e2e))
-                        .text_color(rgb(0x7f849c))
+                        .bg(rgb(crate::theme::SURFACE_DIM))
+                        .text_color(rgb(crate::theme::TEXT_DIM))
                         .child(shell.clone()),
                 ),
         )
