@@ -148,26 +148,12 @@ impl Render for DragWorkspace {
     }
 }
 
-/// Context menu item definition
+// `ContextMenuItem` lives in `crate::menu` along with the menu
+// builder and dispatch. Re-exported here so existing imports like
+// `use crate::gpui_entry::ContextMenuItem` in
+// `gpui_layout_renderer.rs` keep compiling unchanged.
 #[cfg(feature = "gpui")]
-#[derive(Clone)]
-pub(crate) struct ContextMenuItem {
-    pub(crate) label: &'static str,
-    pub(crate) shortcut: Option<&'static str>,
-    pub(crate) enabled: bool,
-    pub(crate) separator_after: bool,
-}
-
-#[cfg(feature = "gpui")]
-impl ContextMenuItem {
-    fn action(label: &'static str, shortcut: Option<&'static str>, enabled: bool) -> Self {
-        Self { label, shortcut, enabled, separator_after: false }
-    }
-    fn separator(mut self) -> Self {
-        self.separator_after = true;
-        self
-    }
-}
+pub(crate) use crate::menu::ContextMenuItem;
 
 /// Captured terminal environment for spawning a new pane/tab.
 #[cfg(feature = "gpui")]
@@ -1014,108 +1000,11 @@ impl GpuiShellView {
     }
 
 
-    /// Build context menu items based on current state
-    fn build_context_menu_items(&self) -> Vec<ContextMenuItem> {
-        let has_selection = self.terminal_manager().active_terminal_ref()
-            .and_then(|t| t.with_term(|term| term.selection_to_string()))
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
-
-        // Per-platform shortcut labels as compile-time constants. Zero
-        // allocations per render frame (previously each build_context_
-        // menu_items call produced 7+ format! Strings).
-        #[cfg(target_os = "macos")]
-        mod shortcut_labels {
-            pub const COPY: &str = "⌘⇧C";
-            pub const SEND: &str = "⌘⇧Enter";
-            pub const PASTE: &str = "⌘V";
-            pub const SPLIT_RIGHT: &str = "⌘⇧\\";
-            pub const SPLIT_DOWN: &str = "⌘⇧D";
-            pub const NEW_TAB: &str = "⌘⇧T";
-            pub const CLOSE_PANE: &str = "⌘⇧W";
-            pub const ZOOM: &str = "⌘⇧F";
-        }
-        #[cfg(not(target_os = "macos"))]
-        mod shortcut_labels {
-            pub const COPY: &str = "Ctrl+Shift+C";
-            pub const SEND: &str = "Ctrl+Shift+Enter";
-            pub const PASTE: &str = "Ctrl+V";
-            pub const SPLIT_RIGHT: &str = "Ctrl+Shift+\\";
-            pub const SPLIT_DOWN: &str = "Ctrl+Shift+D";
-            pub const NEW_TAB: &str = "Ctrl+Shift+T";
-            pub const CLOSE_PANE: &str = "Ctrl+Shift+W";
-            pub const ZOOM: &str = "Ctrl+Shift+F";
-        }
-        use shortcut_labels::*;
-
-        let items = vec![
-            ContextMenuItem::action("Copy", Some(COPY), has_selection),
-            ContextMenuItem::action("Paste", Some(PASTE), true).separator(),
-            ContextMenuItem::action("Send to Pane", Some(SEND), self.terminal_manager().total_panes() > 1),
-            ContextMenuItem::action("Split Right", Some(SPLIT_RIGHT), true),
-            ContextMenuItem::action("Split Down", Some(SPLIT_DOWN), true).separator(),
-            ContextMenuItem::action("New Tab", Some(NEW_TAB), true),
-            ContextMenuItem::action("Close Pane", Some(CLOSE_PANE), self.terminal_manager().total_panes() > 1),
-            if self.zoomed_pane.is_some() {
-                ContextMenuItem::action("Restore Pane", Some(ZOOM), true)
-            } else {
-                ContextMenuItem::action("Zoom Pane", Some(ZOOM), self.terminal_manager().total_panes() > 1)
-            },
-        ];
-
-        items
-    }
-
-    /// Execute a context menu action by label
-    pub(crate) fn execute_context_menu_action(&mut self, label: &str, window: &mut Window, cx: &mut Context<Self>) {
-        // Restore the pane that was active when the context menu was opened,
-        // so actions target the correct pane (not the one under the menu click).
-        let source_pane = self.context_menu.as_ref().and_then(|m| m.source_pane.clone());
-        self.context_menu = None;
-        if let Some(pid) = source_pane {
-            self.terminal_manager_mut().set_active_pane(&pid);
-        }
-        match label {
-            "Open Workspace" => {
-                self.prompt_open_local_workspace(cx);
-            }
-            "Copy" => {
-                self.copy_selection(cx);
-            }
-            "Send to Pane" => {
-                self.start_send_to_pane(cx);
-            }
-            "Paste" => {
-                self.paste_clipboard(cx);
-            }
-            "Split Right" => {
-                let env = self.capture_active_env();
-                self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-                self.spawn_with_captured_env(&env);
-            }
-            "Split Down" => {
-                let env = self.capture_active_env();
-                self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
-                self.spawn_with_captured_env(&env);
-            }
-            "New Tab" => {
-                let env = self.capture_active_env();
-                self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
-                self.spawn_with_captured_env(&env);
-            }
-            "Close Pane" => {
-                self.zoomed_pane = None; // unzoom on close
-                self.cleanup_pane_tab_entries();
-                self.terminal_manager_mut().close_active_pane();
-            }
-            "Zoom Pane" | "Restore Pane" => {
-                self.toggle_zoom();
-            }
-            _ => {}
-        }
-        self.context_menu = None;
-        cx.notify();
-    }
+    // Terminal context menu lives in `crate::menu` now — the
+    // builder and action dispatch are free functions taking
+    // `&GpuiShellView` / `&mut GpuiShellView`. Call sites go
+    // through `crate::menu::build_items(self)` and
+    // `crate::menu::dispatch(self, label, window, cx)`.
 
     // ─── File Preview ────────────────────────────────────────────
 
@@ -2938,7 +2827,7 @@ impl Render for GpuiShellView {
             }))
             // Context menu: dismiss overlay + menu
             .when_some(self.context_menu.clone(), |this, menu| {
-                let items = self.build_context_menu_items();
+                let items = crate::menu::build_items(self);
                 let vp = window.viewport_size();
                 this
                     // Full-screen transparent overlay to catch clicks outside menu

@@ -6,6 +6,8 @@ mod gpui_clipboard;
 mod crash;
 mod gpui_config;
 #[cfg(feature = "gpui")]
+mod menu;
+#[cfg(feature = "gpui")]
 mod metrics;
 #[cfg(feature = "gpui")]
 mod search;

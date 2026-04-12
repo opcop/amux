@@ -75,7 +75,7 @@ pub(crate) fn render_context_menu(
             .when(enabled, |d| d.hover(|d| d.bg(rgb(0x373b41))))
             .when(enabled, |d| {
                 d.on_click(cx.listener(move |this, _event, window, cx| {
-                    this.execute_context_menu_action(label, window, cx);
+                    crate::menu::dispatch(this, label, window, cx);
                 }))
             })
             .child(left)
