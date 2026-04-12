@@ -17,6 +17,10 @@ pub struct StatusBarData {
     pub tab_count: usize,
     pub shell_name: String,
     pub agents: Vec<AgentSummary>,
+    /// If the last startup found crash reports on disk, this holds
+    /// the count so the status bar can surface a passive warning.
+    /// `None` when there are no crashes to notify about.
+    pub crash_notice: Option<usize>,
 }
 
 #[cfg(feature = "gpui")]
@@ -91,6 +95,31 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                 .flex()
                 .gap_3()
                 .items_center()
+                // Crash notice (shown when ~/.amux/logs/crash has entries).
+                // Passive — points the user at the log directory.
+                .children(match data.crash_notice {
+                    Some(n) if n > 0 => vec![
+                        div()
+                            .flex()
+                            .gap(px(4.0))
+                            .items_center()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .bg(rgb(0x3a1e1e))
+                            .border_1()
+                            .border_color(rgb(0xcc6666))
+                            .text_color(rgb(0xf2777a))
+                            .child(format!(
+                                "⚠ {} crash log{} — see ~/.amux/logs/crash",
+                                n,
+                                if n == 1 { "" } else { "s" }
+                            ))
+                            .into_any_element(),
+                        div().w_px().h(px(12.0)).bg(rgb(0x313244)).into_any_element(),
+                    ],
+                    _ => Vec::new(),
+                })
                 // Agent status indicators
                 .children(if data.agents.is_empty() {
                     Vec::new()

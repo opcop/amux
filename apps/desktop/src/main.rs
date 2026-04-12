@@ -3,6 +3,7 @@
 
 #[cfg(feature = "gpui")]
 mod gpui_clipboard;
+mod crash;
 mod gpui_config;
 #[cfg(feature = "gpui")]
 mod gpui_entry;
@@ -27,6 +28,10 @@ mod gpui_browser;
 mod text_entry;
 
 fn main() {
+    // Install panic hook first so any subsequent panic — including
+    // during startup — lands in ~/.amux/logs/crash for post-mortem.
+    crash::install(crash::crash_log_dir());
+
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let parsed = parse_cli(&raw_args);
 

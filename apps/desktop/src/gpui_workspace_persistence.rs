@@ -5,6 +5,59 @@
 
 #[cfg(feature = "gpui")]
 use amux_platform::terminal::manager::SplitDirection;
+#[cfg(feature = "gpui")]
+use serde::{Deserialize, Serialize};
+
+/// Current on-disk schema version for workspace persistence files.
+/// Bump whenever the shape of the envelope or its payload changes in
+/// a way old code can't read.
+#[cfg(feature = "gpui")]
+const PERSISTENCE_SCHEMA_VERSION: u32 = 1;
+
+/// Envelope around the per-workspace layouts map. Old files are a
+/// bare `HashMap<String, String>`; the loader falls back to that
+/// shape if deserializing as an envelope fails.
+#[cfg(feature = "gpui")]
+#[derive(Serialize, Deserialize)]
+struct LayoutsEnvelope {
+    schema_version: u32,
+    layouts: std::collections::HashMap<String, String>,
+}
+
+/// Envelope around a single layout template file. Same back-compat
+/// story — old files are a bare `LayoutTemplate`.
+#[cfg(feature = "gpui")]
+#[derive(Serialize, Deserialize)]
+struct TemplateEnvelope {
+    schema_version: u32,
+    template: amux_platform::terminal::manager::LayoutTemplate,
+}
+
+/// Atomic file write: write to `<path>.tmp`, fsync, rename. Prevents
+/// half-written files on crash or power loss — the previous version
+/// stays intact until the rename succeeds.
+#[cfg(feature = "gpui")]
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+        })?;
+    let tmp = parent.join(format!(".{file_name}.tmp"));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
 
 /// Get the AMUX config directory.
 ///
@@ -314,11 +367,14 @@ impl GpuiShellView {
     /// Save a layout template to ~/.amux/templates/
     pub(crate) fn save_template(template: &amux_platform::terminal::manager::LayoutTemplate) {
         let dir = Self::templates_dir();
-        let _ = std::fs::create_dir_all(&dir);
         let safe_name = template.name.replace(['/', '\\', ':', ' '], "_");
         let path = dir.join(format!("{}.json", safe_name));
-        if let Ok(json) = serde_json::to_string_pretty(template) {
-            let _ = std::fs::write(path, json);
+        let envelope = TemplateEnvelope {
+            schema_version: PERSISTENCE_SCHEMA_VERSION,
+            template: template.clone(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&envelope) {
+            let _ = atomic_write(&path, json.as_bytes());
         }
     }
 
@@ -334,7 +390,12 @@ impl GpuiShellView {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
                 if let Ok(data) = std::fs::read_to_string(&path) {
-                    if let Ok(t) = serde_json::from_str(&data) {
+                    // Prefer the envelope shape; fall back to the
+                    // legacy bare template for files written by older
+                    // versions.
+                    if let Ok(env) = serde_json::from_str::<TemplateEnvelope>(&data) {
+                        templates.push(env.template);
+                    } else if let Ok(t) = serde_json::from_str(&data) {
                         templates.push(t);
                     }
                 }
@@ -357,28 +418,36 @@ impl GpuiShellView {
         all
     }
 
-    /// Save all workspace layouts to disk
+    /// Save all workspace layouts to disk (atomic, versioned).
     pub(crate) fn save_all_layouts(&self) {
         let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for (ws_id, tm) in &self.workspace_terminals {
             map.insert(ws_id.clone(), tm.save_layout());
         }
+        let envelope = LayoutsEnvelope {
+            schema_version: PERSISTENCE_SCHEMA_VERSION,
+            layouts: map,
+        };
+        let Ok(json) = serde_json::to_string(&envelope) else { return; };
         let path = Self::layout_file_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string(&map) {
-            let _ = std::fs::write(&path, json);
+        if atomic_write(&path, json.as_bytes()).is_ok() {
+            // Publish the last known-good snapshot to the crash
+            // logger so a subsequent panic can attach it to the
+            // crash report.
+            crate::crash::update_layout_snapshot(json);
         }
     }
 
-    /// Load all workspace layouts from disk
+    /// Load all workspace layouts from disk. Accepts both the current
+    /// envelope format and legacy bare-map files.
     pub(crate) fn load_all_layouts() -> std::collections::HashMap<String, String> {
         let path = Self::layout_file_path();
-        if let Ok(data) = std::fs::read_to_string(&path) {
-            serde_json::from_str(&data).unwrap_or_default()
-        } else {
-            std::collections::HashMap::new()
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            return std::collections::HashMap::new();
+        };
+        if let Ok(env) = serde_json::from_str::<LayoutsEnvelope>(&data) {
+            return env.layouts;
         }
+        serde_json::from_str(&data).unwrap_or_default()
     }
 }

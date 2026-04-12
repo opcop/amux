@@ -81,6 +81,11 @@ pub(crate) struct GpuiShellView {
     /// Cached raw window handle for WebView2 creation (avoids RefCell re-borrow)
     #[cfg(feature = "gpui")]
     pub(crate) cached_window_handle: Option<raw_window_handle::RawWindowHandle>,
+    /// Count of crash logs found in `~/.amux/logs/crash` at startup.
+    /// Surfaces as a passive red badge in the status bar until the
+    /// user clears the directory manually. `None` when nothing was
+    /// found (nothing to display).
+    pub(crate) crash_notice: Option<usize>,
 }
 
 /// Right-click context menu
@@ -402,6 +407,11 @@ impl GpuiShellView {
             restore_terminal_focus: false,
             pending_url_bar_update: None,
             cached_window_handle: None,
+            crash_notice: {
+                let dir = crate::crash::crash_log_dir();
+                let n = crate::crash::list_crashes(&dir).len();
+                if n > 0 { Some(n) } else { None }
+            },
         }
     }
 
@@ -3005,6 +3015,7 @@ impl Render for GpuiShellView {
                         color,
                     })
                     .collect(),
+                crash_notice: self.crash_notice,
             }))
             // Context menu: dismiss overlay + menu
             .when_some(self.context_menu.clone(), |this, menu| {
