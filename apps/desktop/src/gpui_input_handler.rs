@@ -80,10 +80,12 @@ impl gpui::EntityInputHandler for GpuiShellView {
             cx.notify();
             return;
         }
-        // If searching, append to search query and auto-navigate
-        if let Some((ref mut query, _)) = self.search_state {
-            query.push_str(text);
-            self.search_navigate(true);
+        // If searching, append to search query and rebuild matches.
+        // Rebuild (not navigate) so the new query's match list is
+        // fresh — navigate only cycles within an existing list.
+        if let Some(ref mut state) = self.search_state {
+            state.query.push_str(text);
+            self.search_rebuild();
             cx.notify();
             return;
         }
@@ -335,7 +337,7 @@ impl GpuiShellView {
         }
 
         // Terminal search handling
-        if let Some((ref mut query, ref mut _match_idx)) = self.search_state {
+        if self.search_state.is_some() {
             match keystr.as_str() {
                 "escape" | "ctrl+f" => {
                     // Clear selection and close search
@@ -356,17 +358,21 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
-                "backspace" => {
-                    query.pop();
-                    if !query.is_empty() {
-                        // Auto-search on each keystroke
-                        self.search_navigate(true);
-                    } else {
-                        // Clear selection when query is empty
-                        if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                            term.with_term_mut(|t| { t.selection = None; });
-                        }
+                "tab" => {
+                    // Cycle Literal → Regex → Fuzzy → Literal and
+                    // rebuild against the current query.
+                    if let Some(state) = self.search_state.as_mut() {
+                        state.mode = state.mode.cycle();
                     }
+                    self.search_rebuild();
+                    cx.notify();
+                    return;
+                }
+                "backspace" => {
+                    if let Some(state) = self.search_state.as_mut() {
+                        state.query.pop();
+                    }
+                    self.search_rebuild();
                     cx.notify();
                     return;
                 }
@@ -685,7 +691,7 @@ impl GpuiShellView {
                 }
                 "ctrl+shift+s" => {
                     // Open terminal search
-                    self.search_state = Some((String::new(), 0));
+                    self.search_state = Some(crate::gpui_entry::SearchState::new());
                     cx.notify();
                     return;
                 }

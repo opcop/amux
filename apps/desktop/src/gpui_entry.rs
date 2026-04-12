@@ -37,7 +37,7 @@ pub(crate) struct GpuiShellView {
     pub(crate) cursor_blink_frame: u32,
     pub(crate) renaming_workspace: Option<(String, String)>,
     pub(crate) renaming_tab: Option<(String, usize, String)>,
-    pub(crate) search_state: Option<(String, usize)>,
+    pub(crate) search_state: Option<SearchState>,
     pub(crate) detected_vibe_tools: Vec<(&'static str, &'static str, &'static str)>,
     pub(crate) wsl_detected: bool,
     pub(crate) terminals_spawned: bool,
@@ -86,6 +86,81 @@ pub(crate) struct GpuiShellView {
     /// user clears the directory manually. `None` when nothing was
     /// found (nothing to display).
     pub(crate) crash_notice: Option<usize>,
+}
+
+/// Scrollback search mode. Cycled with Tab inside the search bar.
+///
+///  * `Literal` — exact substring, smart case. Empty-result friendly.
+///  * `Regex`   — full regex (alacritty's regex_automata engine).
+///                Smart case unless the pattern already contains `(?i)`
+///                or any uppercase. Invalid regex shows `err` in the UI.
+///  * `Fuzzy`   — fzf-style subsequence match against each scrollback
+///                line, case-insensitive. Scoring is not exposed
+///                yet — results are returned in scrollback order.
+#[cfg(feature = "gpui")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SearchMode {
+    Literal,
+    Regex,
+    Fuzzy,
+}
+
+#[cfg(feature = "gpui")]
+impl SearchMode {
+    pub(crate) fn short_label(self) -> &'static str {
+        match self {
+            SearchMode::Literal => "L",
+            SearchMode::Regex => "R",
+            SearchMode::Fuzzy => "F",
+        }
+    }
+
+    pub(crate) fn cycle(self) -> Self {
+        match self {
+            SearchMode::Literal => SearchMode::Regex,
+            SearchMode::Regex => SearchMode::Fuzzy,
+            SearchMode::Fuzzy => SearchMode::Literal,
+        }
+    }
+}
+
+/// Maximum matches collected per query — keeps UI responsive on huge
+/// scrollbacks. UI indicates truncation with a trailing `+`.
+#[cfg(feature = "gpui")]
+pub(crate) const SEARCH_MATCH_CAP: usize = 1000;
+
+/// State for the terminal scrollback search bar (Ctrl+Shift+S).
+///
+/// On every query or mode change the matches list is rebuilt from
+/// scratch against the active terminal's scrollback. Navigation
+/// (`Enter` / `Shift+Enter`) just advances `current` — the expensive
+/// work happens once per edit, not per jump. `truncated` is set when
+/// the scan hit `SEARCH_MATCH_CAP`; the UI shows it as a trailing
+/// `+`. `error` is `true` when the last rebuild failed to compile
+/// (regex mode with an invalid pattern).
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub(crate) struct SearchState {
+    pub(crate) query: String,
+    pub(crate) mode: SearchMode,
+    pub(crate) matches: Vec<alacritty_terminal::term::search::Match>,
+    pub(crate) current: usize,
+    pub(crate) truncated: bool,
+    pub(crate) error: bool,
+}
+
+#[cfg(feature = "gpui")]
+impl SearchState {
+    pub(crate) fn new() -> Self {
+        Self {
+            query: String::new(),
+            mode: SearchMode::Literal,
+            matches: Vec::new(),
+            current: 0,
+            truncated: false,
+            error: false,
+        }
+    }
 }
 
 /// Right-click context menu
@@ -1036,59 +1111,243 @@ impl GpuiShellView {
         }
     }
 
-    /// Jump to the next/previous search match in the active terminal.
-    pub(crate) fn search_navigate(&mut self, forward: bool) {
-        use alacritty_terminal::index::{Direction, Side};
-        use alacritty_terminal::term::search::RegexSearch;
+    /// Rebuild the match list from the current query + mode. Cheap
+    /// when the query is empty — just clears. Called on every edit or
+    /// mode toggle from the input handler.
+    pub(crate) fn search_rebuild(&mut self) {
+        let Some(state) = self.search_state.as_mut() else { return };
+        state.matches.clear();
+        state.current = 0;
+        state.truncated = false;
+        state.error = false;
 
-        let query = match &self.search_state {
-            Some((q, _)) if !q.is_empty() => q.clone(),
-            _ => return,
-        };
-
-        // Escape regex special chars for literal search
-        let escaped: String = query.chars().flat_map(|c| {
-            if "\\^$.|?*+()[]{}".contains(c) {
-                vec!['\\', c]
-            } else {
-                vec![c]
+        if state.query.is_empty() {
+            if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                term.with_term_mut(|t| t.selection = None);
             }
-        }).collect();
-        let mut regex = match RegexSearch::new(&escaped) {
-            Ok(r) => r,
-            Err(_) => return,
-        };
+            return;
+        }
 
-        if let Some(term) = self.terminal_manager_mut().active_terminal() {
-            let result = term.with_term(|t| {
-                let direction = if forward { Direction::Right } else { Direction::Left };
-                let origin = t.renderable_content().cursor.point;
-                t.search_next(&mut regex, origin, direction, Side::Left, None)
-            });
-            if let Some(m) = result {
-                term.with_term_mut(|t| {
-                    // Scroll to bring match into view
-                    let line_i32 = m.start().line.0;
-                    if line_i32 < 0 {
-                        let needed = (-line_i32) as usize;
-                        let display_offset = t.grid().display_offset();
-                        if needed > display_offset {
-                            t.scroll_display(alacritty_terminal::grid::Scroll::Delta(
-                                (needed - display_offset) as i32
-                            ));
-                        }
-                    } else if t.grid().display_offset() > 0 {
-                        // Match is on screen but we're scrolled up — scroll to bottom
-                        t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+        let query = state.query.clone();
+        let mode = state.mode;
+
+        match mode {
+            SearchMode::Literal | SearchMode::Regex => {
+                let pattern = Self::build_regex_pattern(&query, mode);
+                let mut regex = match alacritty_terminal::term::search::RegexSearch::new(&pattern) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        self.search_state.as_mut().unwrap().error = true;
+                        return;
                     }
-                    // Highlight the match via selection
-                    use alacritty_terminal::selection::{Selection, SelectionType};
-                    let mut sel = Selection::new(SelectionType::Simple, *m.start(), Side::Left);
-                    sel.update(*m.end(), Side::Right);
-                    t.selection = Some(sel);
-                });
+                };
+                let (matches, truncated) = match self.terminal_manager_mut().active_terminal() {
+                    Some(term) => term.with_term(|t| Self::collect_regex_matches(t, &mut regex)),
+                    None => (Vec::new(), false),
+                };
+                let s = self.search_state.as_mut().unwrap();
+                s.matches = matches;
+                s.truncated = truncated;
+            }
+            SearchMode::Fuzzy => {
+                let (matches, truncated) = match self.terminal_manager_mut().active_terminal() {
+                    Some(term) => term.with_term(|t| Self::collect_fuzzy_matches(t, &query)),
+                    None => (Vec::new(), false),
+                };
+                let s = self.search_state.as_mut().unwrap();
+                s.matches = matches;
+                s.truncated = truncated;
             }
         }
+
+        // Jump to first match if any.
+        if self.search_state.as_ref().is_some_and(|s| !s.matches.is_empty()) {
+            self.search_apply_current();
+        }
+    }
+
+    /// Smart-case regex pattern builder. In `Literal` mode the query
+    /// is escaped first so `.` / `*` etc. are matched literally. In
+    /// either mode, if the query is all lowercase we prepend `(?i)`
+    /// so users don't have to think about case.
+    fn build_regex_pattern(query: &str, mode: SearchMode) -> String {
+        let base: String = if mode == SearchMode::Literal {
+            query
+                .chars()
+                .flat_map(|c| {
+                    if "\\^$.|?*+()[]{}".contains(c) {
+                        vec!['\\', c]
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect()
+        } else {
+            query.to_string()
+        };
+        let has_upper = query.chars().any(|c| c.is_ascii_uppercase());
+        let already_flagged = query.starts_with("(?i)") || query.starts_with("(?-i)");
+        if has_upper || already_flagged {
+            base
+        } else {
+            format!("(?i){}", base)
+        }
+    }
+
+    /// Enumerate regex matches across the entire terminal buffer
+    /// (scrollback + viewport), capped at `SEARCH_MATCH_CAP`.
+    fn collect_regex_matches<T: alacritty_terminal::event::EventListener>(
+        t: &alacritty_terminal::term::Term<T>,
+        regex: &mut alacritty_terminal::term::search::RegexSearch,
+    ) -> (Vec<alacritty_terminal::term::search::Match>, bool) {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
+
+        let mut out = Vec::new();
+        let mut origin = Point::new(t.topmost_line(), Column(0));
+        let end = Point::new(t.bottommost_line(), Column(t.columns().saturating_sub(1)));
+
+        while out.len() < SEARCH_MATCH_CAP {
+            let Some(m) = t.search_next(regex, origin, Direction::Right, Side::Left, None) else {
+                break;
+            };
+            // Stop once we walk past the bottom of the buffer.
+            if *m.start() > end {
+                break;
+            }
+            // Advance origin past the end of this match to avoid
+            // re-matching the same span. Zero-width matches are not
+            // possible with RegexSearch but we still bump by one
+            // column defensively.
+            let next_col = m.end().column.0 + 1;
+            let next_line = m.end().line;
+            origin = if next_col >= t.columns() {
+                if next_line >= t.bottommost_line() {
+                    out.push(m);
+                    break;
+                }
+                Point::new(Line(next_line.0 + 1), Column(0))
+            } else {
+                Point::new(next_line, Column(next_col))
+            };
+            out.push(m);
+        }
+
+        let truncated = out.len() == SEARCH_MATCH_CAP;
+        (out, truncated)
+    }
+
+    /// Fuzzy (subsequence) matcher. Walks every line in scrollback +
+    /// viewport and records a match for each line whose characters
+    /// contain the query letters in order, case-insensitive.
+    /// Returns a match spanning the first → last matched character
+    /// on that line so the existing "scroll + select" path can
+    /// highlight it unchanged.
+    fn collect_fuzzy_matches<T: alacritty_terminal::event::EventListener>(
+        t: &alacritty_terminal::term::Term<T>,
+        query: &str,
+    ) -> (Vec<alacritty_terminal::term::search::Match>, bool) {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point};
+
+        let needle: Vec<char> = query.chars().flat_map(|c| c.to_lowercase()).collect();
+        if needle.is_empty() {
+            return (Vec::new(), false);
+        }
+
+        let cols = t.columns();
+        let top = t.topmost_line().0;
+        let bot = t.bottommost_line().0;
+        let mut out = Vec::new();
+
+        for line_i32 in top..=bot {
+            if out.len() >= SEARCH_MATCH_CAP {
+                break;
+            }
+            let line = Line(line_i32);
+            let start_pt = Point::new(line, Column(0));
+            let end_pt = Point::new(line, Column(cols.saturating_sub(1)));
+            let text = t.bounds_to_string(start_pt, end_pt);
+
+            // Single-pass subsequence match: record the column of the
+            // first and last matched needle char. If we run out of
+            // haystack before matching the whole needle, reject.
+            let mut needle_idx = 0usize;
+            let mut first_col: Option<usize> = None;
+            let mut last_col: usize = 0;
+            for (col, ch) in text.chars().enumerate() {
+                if needle_idx >= needle.len() {
+                    break;
+                }
+                if ch.to_lowercase().next() == Some(needle[needle_idx]) {
+                    if first_col.is_none() {
+                        first_col = Some(col);
+                    }
+                    last_col = col;
+                    needle_idx += 1;
+                }
+            }
+            if needle_idx == needle.len() {
+                if let Some(fc) = first_col {
+                    let fc = fc.min(cols.saturating_sub(1));
+                    let lc = last_col.min(cols.saturating_sub(1));
+                    let s = Point::new(line, Column(fc));
+                    let e = Point::new(line, Column(lc));
+                    out.push(s..=e);
+                }
+            }
+        }
+        let truncated = out.len() == SEARCH_MATCH_CAP;
+        (out, truncated)
+    }
+
+    /// Scroll to and highlight the match at `current`. No-op when
+    /// `matches` is empty.
+    pub(crate) fn search_apply_current(&mut self) {
+        let Some(state) = self.search_state.as_ref() else { return };
+        if state.matches.is_empty() {
+            return;
+        }
+        let idx = state.current.min(state.matches.len() - 1);
+        let m = state.matches[idx].clone();
+
+        if let Some(term) = self.terminal_manager_mut().active_terminal() {
+            term.with_term_mut(|t| {
+                use alacritty_terminal::grid::Scroll;
+                use alacritty_terminal::index::Side;
+                use alacritty_terminal::selection::{Selection, SelectionType};
+
+                let line_i32 = m.start().line.0;
+                if line_i32 < 0 {
+                    let needed = (-line_i32) as usize;
+                    let display_offset = t.grid().display_offset();
+                    if needed > display_offset {
+                        t.scroll_display(Scroll::Delta((needed - display_offset) as i32));
+                    }
+                } else if t.grid().display_offset() > 0 {
+                    t.scroll_display(Scroll::Bottom);
+                }
+                let mut sel = Selection::new(SelectionType::Simple, *m.start(), Side::Left);
+                sel.update(*m.end(), Side::Right);
+                t.selection = Some(sel);
+            });
+        }
+    }
+
+    /// Jump to the next/previous search match in the active
+    /// terminal, wrapping around at either end.
+    pub(crate) fn search_navigate(&mut self, forward: bool) {
+        let Some(state) = self.search_state.as_mut() else { return };
+        if state.matches.is_empty() {
+            return;
+        }
+        let len = state.matches.len();
+        state.current = if forward {
+            (state.current + 1) % len
+        } else {
+            (state.current + len - 1) % len
+        };
+        self.search_apply_current();
     }
 
     /// Toggle zoom on the active pane — fills the entire content area.
@@ -3046,13 +3305,35 @@ impl Render for GpuiShellView {
                     .child(render_context_menu(menu.position, items, vp.width, vp.height, cx))
             })
             // Search bar overlay (top-right)
-            .when_some(self.search_state.clone(), |this, (query, _idx)| {
+            .when_some(self.search_state.clone(), |this, state| {
+                // Counter string: "3/17", "1/1000+", "0/0", or "err"
+                // when the regex didn't compile.
+                let counter = if state.error {
+                    "err".to_string()
+                } else if state.matches.is_empty() {
+                    if state.query.is_empty() { String::new() } else { "0/0".to_string() }
+                } else {
+                    let total = state.matches.len();
+                    let suffix = if state.truncated { "+" } else { "" };
+                    format!("{}/{}{}", state.current + 1, total, suffix)
+                };
+                let counter_color = if state.error || (!state.query.is_empty() && state.matches.is_empty()) {
+                    0xcc6666  // red for no-match / bad regex
+                } else {
+                    0x969896  // muted grey otherwise
+                };
+                let mode_label = state.mode.short_label();
+                let mode_bg = match state.mode {
+                    SearchMode::Literal => 0x3a3a4a,
+                    SearchMode::Regex => 0x4a3a3a,
+                    SearchMode::Fuzzy => 0x3a4a3a,
+                };
                 this.child(
                     div()
                         .absolute()
                         .top(px(4.0))
                         .right(px(16.0))
-                        .w(px(320.0))
+                        .w(px(380.0))
                         .px_3()
                         .py(px(6.0))
                         .rounded(px(8.0))
@@ -3063,9 +3344,18 @@ impl Render for GpuiShellView {
                         .flex()
                         .items_center()
                         .gap_2()
+                        // Mode badge (Tab to cycle)
                         .child(
-                            div().text_xs().text_color(rgb(0x969896)).child("Find:")
+                            div()
+                                .px(px(6.0))
+                                .py(px(1.0))
+                                .rounded(px(3.0))
+                                .bg(rgb(mode_bg))
+                                .text_xs()
+                                .text_color(rgb(0xc5c8c6))
+                                .child(mode_label)
                         )
+                        // Query field
                         .child(
                             div()
                                 .flex_1()
@@ -3078,14 +3368,24 @@ impl Render for GpuiShellView {
                                 .text_sm()
                                 .text_color(rgb(0xc5c8c6))
                                 .min_h(px(20.0))
-                                .child(if query.is_empty() {
-                                    div().text_color(rgb(0x969896)).child("Type to search...").into_any_element()
+                                .child(if state.query.is_empty() {
+                                    div().text_color(rgb(0x969896))
+                                        .child("Type to search…  Tab: cycle mode")
+                                        .into_any_element()
                                 } else {
-                                    div().child(format!("{}▎", query)).into_any_element()
+                                    div().child(format!("{}▎", state.query)).into_any_element()
                                 })
                         )
+                        // Match counter
                         .child(
-                            div().text_xs().text_color(rgb(0x969896)).child("Enter/Shift+Enter  Esc close")
+                            div()
+                                .text_xs()
+                                .text_color(rgb(counter_color))
+                                .min_w(px(52.0))
+                                .child(counter)
+                        )
+                        .child(
+                            div().text_xs().text_color(rgb(0x585b70)).child("Esc")
                         )
                 )
             })
@@ -3693,3 +3993,48 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
 
 #[cfg(not(feature = "gpui"))]
 pub fn run(_: &amux_ui::DesktopApp, _config: crate::gpui_config::AmuxConfig) {}
+
+#[cfg(all(test, feature = "gpui"))]
+mod search_tests {
+    use super::*;
+
+    // Smart case: all-lowercase query gets `(?i)`, anything with an
+    // uppercase letter stays as-is. Applies to both Literal and Regex
+    // modes, with Literal additionally escaping regex metachars.
+    #[test]
+    fn smart_case_literal_lower() {
+        let p = GpuiShellView::build_regex_pattern("error", SearchMode::Literal);
+        assert_eq!(p, "(?i)error");
+    }
+
+    #[test]
+    fn smart_case_literal_mixed() {
+        let p = GpuiShellView::build_regex_pattern("Error", SearchMode::Literal);
+        assert_eq!(p, "Error");
+    }
+
+    #[test]
+    fn literal_escapes_regex_metachars() {
+        let p = GpuiShellView::build_regex_pattern("a.b*c", SearchMode::Literal);
+        assert_eq!(p, "(?i)a\\.b\\*c");
+    }
+
+    #[test]
+    fn regex_mode_passes_through_metachars() {
+        let p = GpuiShellView::build_regex_pattern("a.b*c", SearchMode::Regex);
+        assert_eq!(p, "(?i)a.b*c");
+    }
+
+    #[test]
+    fn explicit_case_flag_respected() {
+        let p = GpuiShellView::build_regex_pattern("(?i)ERROR", SearchMode::Regex);
+        assert_eq!(p, "(?i)ERROR");
+    }
+
+    #[test]
+    fn mode_cycle_wraps() {
+        assert_eq!(SearchMode::Literal.cycle(), SearchMode::Regex);
+        assert_eq!(SearchMode::Regex.cycle(), SearchMode::Fuzzy);
+        assert_eq!(SearchMode::Fuzzy.cycle(), SearchMode::Literal);
+    }
+}
