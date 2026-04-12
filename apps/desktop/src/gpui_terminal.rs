@@ -64,14 +64,17 @@ mod glyph_cache {
 
     /// Look up a shaped line in the cache (zero-allocation).
     pub fn get(text: &str, style: u8) -> Option<gpui::ShapedLine> {
+        use std::sync::atomic::Ordering;
         let key = hash_key(text, style);
         CACHE.with(|c| {
             let mut cache = c.borrow_mut();
             let cur_gen = cache.generation;
             if let Some(entry) = cache.entries.get_mut(&key) {
                 entry.generation = cur_gen; // mark as recently used
+                crate::metrics::GLYPH_HITS.fetch_add(1, Ordering::Relaxed);
                 Some(entry.shaped.clone())
             } else {
+                crate::metrics::GLYPH_MISSES.fetch_add(1, Ordering::Relaxed);
                 None
             }
         })

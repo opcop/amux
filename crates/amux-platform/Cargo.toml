@@ -38,3 +38,12 @@ rfd.workspace = true
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+# vte's `ansi` feature exposes `Processor` — the same parser alacritty
+# uses internally to drive Term. Used by examples/terminal_throughput.
+vte = { version = "0.15", features = ["ansi"] }
+
+[[example]]
+name = "terminal_throughput"
+path = "examples/terminal_throughput.rs"
+

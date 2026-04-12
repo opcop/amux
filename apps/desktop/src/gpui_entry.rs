@@ -2105,6 +2105,12 @@ fn expand_tilde(path: &str) -> String {
 #[cfg(feature = "gpui")]
 impl Render for GpuiShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Record frame time into the debug-stats HUD ring buffer.
+        // Cheap when the HUD is disabled (one Instant + one atomic
+        // push); the formatted snapshot is only materialized below if
+        // AMUX_DEBUG_STATS=1.
+        let _frame_guard = crate::metrics::FrameGuard::start();
+
         // Focus management.
         // When the browser is open, trust GPUI's own focus system:
         // - Input's track_focus + prevent_default handles URL bar focus correctly
@@ -3016,6 +3022,7 @@ impl Render for GpuiShellView {
                     })
                     .collect(),
                 crash_notice: self.crash_notice,
+                debug_stats: crate::metrics::snapshot(),
             }))
             // Context menu: dismiss overlay + menu
             .when_some(self.context_menu.clone(), |this, menu| {

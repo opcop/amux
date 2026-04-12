@@ -21,6 +21,10 @@ pub struct StatusBarData {
     /// the count so the status bar can surface a passive warning.
     /// `None` when there are no crashes to notify about.
     pub crash_notice: Option<usize>,
+    /// Pre-formatted debug stats line (frame time, glyph cache hit
+    /// rate). Populated from `metrics::snapshot()` when
+    /// `AMUX_DEBUG_STATS=1`; `None` otherwise.
+    pub debug_stats: Option<String>,
 }
 
 #[cfg(feature = "gpui")]
@@ -95,6 +99,22 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                 .flex()
                 .gap_3()
                 .items_center()
+                // Debug stats HUD (AMUX_DEBUG_STATS=1). Monospace-ish,
+                // dim, read-only — no borders, never interactive.
+                .children(match data.debug_stats.as_deref() {
+                    Some(s) => vec![
+                        div()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .bg(rgb(0x1a1b26))
+                            .text_color(rgb(0x89ddff))
+                            .child(s.to_string())
+                            .into_any_element(),
+                        div().w_px().h(px(12.0)).bg(rgb(0x313244)).into_any_element(),
+                    ],
+                    None => Vec::new(),
+                })
                 // Crash notice (shown when ~/.amux/logs/crash has entries).
                 // Passive — points the user at the log directory.
                 .children(match data.crash_notice {

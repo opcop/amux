@@ -159,6 +159,7 @@ dependencies = [
  "serde_json",
  "sysinfo 0.32.1",
  "tokio",
+ "vte",
 ]
 
 [[package]]
