@@ -10,7 +10,7 @@ use gpui::{rgb, px, div, prelude::*, Context, IntoElement, Styled};
 use amux_platform::terminal::manager::{TerminalManager, SplitDirection};
 
 #[cfg(feature = "gpui")]
-use crate::gpui_entry::{GpuiShellView, ContextMenuItem, ResizeDragState, DragTab};
+use crate::gpui_entry::{GpuiShellView, ContextMenuItem, ResizeDragState, DragTab, NewTabPickerState};
 
 /// Render the right-click context menu
 #[cfg(feature = "gpui")]
@@ -166,6 +166,7 @@ pub(crate) fn render_layout(
                         let pid_click = pid_for_tabs.clone();
                         let pid_close_tab = pid_for_tabs.clone();
                         let pid_drag = pid_for_tabs.clone();
+                        let pid_tab_drop = pid_for_tabs.clone();
                         let can_close_tab = tab_count > 1;
                         let drag_title = title.clone();
                         div()
@@ -201,6 +202,28 @@ pub(crate) fn render_layout(
                                     cx.new(|_| drag.clone())
                                 },
                             )
+                            // Drop on tab: reorder within same pane, or move across panes
+                            .drag_over::<DragTab>(|style, _, _, _| {
+                                style.border_l_2().border_color(rgb(0x81a2be))
+                            })
+                            .on_drop(cx.listener(move |this, drag: &DragTab, _window, cx| {
+                                if drag.source_pane == pid_tab_drop {
+                                    // Same pane: reorder
+                                    this.terminal_manager_mut().reorder_tab(
+                                        &drag.source_pane,
+                                        drag.tab_index,
+                                        idx,
+                                    );
+                                } else {
+                                    // Different pane: move tab, insert at this position
+                                    this.terminal_manager_mut().move_tab_to_pane(
+                                        &drag.source_pane,
+                                        drag.tab_index,
+                                        &pid_tab_drop,
+                                    );
+                                }
+                                cx.notify();
+                            }))
                             .on_click({
                                 let pid_rename = pid_click.clone();
                                 cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
@@ -338,31 +361,60 @@ pub(crate) fn render_layout(
                 let btn_hover_bg = rgb(0x313244);
                 let btn_hover_text = rgb(0xcdd6f4);
 
+                let pid_dropdown = pane_id.clone();
                 let actions_row = div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(4.0))
                     .px_2()
-                    // + New Tab
+                    // [+][▾] composite: + = new terminal, ▾ = dropdown picker
                     .child(
                         div()
-                            .id(gpui::ElementId::Name(format!("{}-btn-add", pane_id.0).into()))
-                            .px(px(8.0))
-                            .py(px(3.0))
+                            .flex().flex_row().items_center()
                             .rounded(px(4.0))
-                            .text_sm()
-                            .text_color(btn_text)
-                            .cursor_pointer()
-                            .hover(|d| d.bg(btn_hover_bg).text_color(btn_hover_text))
-                            .child("+")
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.terminal_manager_mut().set_active_pane(&pid_new);
-                                let env = this.capture_active_env();
-                                this.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
-                                this.spawn_with_captured_env(&env);
-                                cx.notify();
-                            })),
+                            .overflow_hidden()
+                            // "+" half
+                            .child(
+                                div()
+                                    .id(gpui::ElementId::Name(format!("{}-btn-add", pane_id.0).into()))
+                                    .px(px(8.0))
+                                    .py(px(3.0))
+                                    .text_sm()
+                                    .text_color(btn_text)
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(btn_hover_bg).text_color(btn_hover_text))
+                                    .child("+")
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.terminal_manager_mut().set_active_pane(&pid_new);
+                                        let env = this.capture_active_env();
+                                        this.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
+                                        this.spawn_with_captured_env(&env);
+                                        cx.notify();
+                                    })),
+                            )
+                            // thin divider
+                            .child(div().w(px(1.0)).h(px(14.0)).bg(rgb(0x3a3d4e)))
+                            // "▾" half
+                            .child(
+                                div()
+                                    .id(gpui::ElementId::Name(format!("{}-btn-dropdown", pane_id.0).into()))
+                                    .px(px(6.0))
+                                    .py(px(3.0))
+                                    .text_sm()
+                                    .text_color(btn_text)
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(btn_hover_bg).text_color(btn_hover_text))
+                                    .child("▾")
+                                    .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, _window, cx| {
+                                        let bounds = this.pane_bounds.get(&pid_dropdown.0)
+                                            .copied()
+                                            .unwrap_or((0.0, 0.0, 400.0, 30.0));
+                                        let anchor = gpui::point(px(bounds.0 + bounds.2 - 230.0), px(bounds.1 + 30.0));
+                                        this.open_new_tab_picker(pid_dropdown.clone(), anchor);
+                                        cx.notify();
+                                    })),
+                            )
                     )
                     // Split Right
                     .child(
@@ -1157,4 +1209,86 @@ fn render_exited_overlay(
                 )
         )
         .into_any_element()
+}
+
+/// Render the new-tab dropdown picker (from the `+▾` button)
+#[cfg(feature = "gpui")]
+pub(crate) fn render_new_tab_picker(
+    picker: &NewTabPickerState,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    let mut list = div().flex().flex_col();
+
+    for (i, item) in picker.items.iter().enumerate() {
+        let is_selected = i == picker.selected_index;
+        let idx = i;
+        list = list
+            .child(
+                div()
+                    .id(gpui::ElementId::Name(format!("newtab-{}", i).into()))
+                    .px_2()
+                    .py(px(5.0))
+                    .mx_1()
+                    .rounded(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .bg(if is_selected { rgb(0x282a2e) } else { rgb(0x1d1f21) })
+                    .hover(|d| d.bg(rgb(0x282a2e)))
+                    .cursor_pointer()
+                    .child(
+                        div().text_xs().text_color(rgb(0x81a2be)).min_w(px(18.0))
+                            .child(item.icon)
+                    )
+                    .child(
+                        div().text_sm()
+                            .text_color(if is_selected { rgb(0xc5c8c6) } else { rgb(0xa6adc8) })
+                            .child(item.label.clone())
+                    )
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        if let Some(ref mut p) = this.new_tab_picker {
+                            p.selected_index = idx;
+                        }
+                        this.execute_new_tab_picker(window, cx);
+                        cx.notify();
+                    }))
+            )
+            .when(item.separator_after, |d| {
+                d.child(
+                    div().mx_2().my(px(3.0)).h(px(1.0)).bg(rgb(0x282a2e))
+                )
+            });
+    }
+
+    let anchor = picker.anchor;
+    div()
+        .absolute()
+        .top_0().left_0().right_0().bottom_0()
+        // Backdrop: click to dismiss
+        .child(
+            div()
+                .id("newtab-picker-backdrop")
+                .absolute()
+                .top_0().left_0().right_0().bottom_0()
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.new_tab_picker = None;
+                    cx.notify();
+                }))
+        )
+        // Dropdown panel anchored below the button
+        .child(
+            div()
+                .absolute()
+                .top(anchor.y)
+                .left(anchor.x)
+                .w(px(220.0))
+                .rounded(px(6.0))
+                .bg(rgb(0x1d1f21))
+                .border_1()
+                .border_color(rgb(0x373b41))
+                .shadow_lg()
+                .flex().flex_col().overflow_hidden()
+                .py_1()
+                .child(list)
+        )
 }

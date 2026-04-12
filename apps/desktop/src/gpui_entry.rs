@@ -14,7 +14,7 @@ use crate::gpui_status_bar::{render_status_bar, StatusBarData, AgentSummary};
 #[cfg(feature = "gpui")]
 use crate::gpui_workspace_sidebar::{WorkspaceSidebarState, SidebarMode, AgentSidebarItem};
 #[cfg(feature = "gpui")]
-use crate::gpui_layout_renderer::{render_context_menu, render_layout, render_pane_picker, render_template_picker, render_agent_picker};
+use crate::gpui_layout_renderer::{render_context_menu, render_layout, render_pane_picker, render_template_picker, render_agent_picker, render_new_tab_picker};
 
 
 #[cfg(feature = "gpui")]
@@ -55,6 +55,8 @@ pub(crate) struct GpuiShellView {
     pub(crate) template_picker: Option<TemplatePickerState>,
     /// Agent launcher picker
     pub(crate) agent_picker: Option<AgentPickerState>,
+    /// New-tab dropdown picker (from `+▾` button on tab bar)
+    pub(crate) new_tab_picker: Option<NewTabPickerState>,
     /// IME preedit text (composition in progress)
     pub(crate) ime_preedit: Option<String>,
     /// Accumulated fractional scroll for smooth trackpad scrolling.
@@ -137,6 +139,27 @@ pub(crate) struct AgentPickerState {
     /// (tool_id, display_label, is_wsl)
     pub(crate) agents: Vec<(String, String, bool)>,
     pub(crate) selected_index: usize,
+}
+
+/// New-tab picker state (dropdown from the `+▾` button)
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub(crate) struct NewTabPickerState {
+    /// Which pane this picker was opened from
+    pub(crate) pane_id: amux_platform::terminal::manager::PaneId,
+    pub(crate) items: Vec<NewTabPickerItem>,
+    pub(crate) selected_index: usize,
+    /// Anchor position (top-right of the `+▾` button) for dropdown placement
+    pub(crate) anchor: gpui::Point<gpui::Pixels>,
+}
+
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub(crate) struct NewTabPickerItem {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) icon: &'static str,
+    pub(crate) separator_after: bool,
 }
 
 /// Drag data for tab drag-and-drop between panes
@@ -368,6 +391,7 @@ impl GpuiShellView {
             pane_picker: None,
             template_picker: None,
             agent_picker: None,
+            new_tab_picker: None,
             ime_preedit: None,
             scroll_accumulator: 0.0,
             sidebar_drag_start: None,
@@ -448,8 +472,31 @@ impl GpuiShellView {
         })
     }
 
-    /// Convert pixel position to terminal cell (col, row) for the active pane.
-    /// Uses cached pane_bounds from render_layout for correct multi-pane coordinates.
+    /// Convert a window-space pixel position to terminal cell coordinates.
+    /// Finds the pane under the cursor — does NOT assume the active pane.
+    /// Returns (pane_id, col, row) so the caller knows which pane was clicked.
+    fn pixel_to_term_cell_at(&self, pos: gpui::Point<gpui::Pixels>) -> Option<(amux_platform::terminal::manager::PaneId, usize, usize)> {
+        let (cw, ch) = self.cell_dims();
+        let cw = cw.max(1.0);
+        let ch = ch.max(1.0);
+        let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
+
+        let x = pos.x.as_f32();
+        let y = pos.y.as_f32();
+
+        // Find which pane contains this pixel position.
+        for (pid, &(px_x, px_y, pw, ph)) in &self.pane_bounds {
+            if x >= px_x && x < px_x + pw && y >= px_y && y < px_y + ph {
+                let col = ((x - px_x - pad).max(0.0) / cw) as usize;
+                let row = ((y - px_y) / ch).max(0.0) as usize;
+                return Some((amux_platform::terminal::manager::PaneId(pid.clone()), col, row));
+            }
+        }
+        None
+    }
+
+    /// Convert a window-space pixel position to terminal cell coordinates
+    /// for the currently active pane. (Fallback for single-pane layouts.)
     fn pixel_to_term_cell(&self, pos: gpui::Point<gpui::Pixels>) -> (usize, usize) {
         let (cw, ch) = self.cell_dims();
         let cw = cw.max(1.0);
@@ -848,6 +895,84 @@ impl GpuiShellView {
         }
     }
 
+    /// Open the new-tab dropdown picker for a specific pane.
+    pub(crate) fn open_new_tab_picker(
+        &mut self,
+        pane_id: amux_platform::terminal::manager::PaneId,
+        anchor: gpui::Point<gpui::Pixels>,
+    ) {
+        let mut items = vec![
+            NewTabPickerItem { id: "terminal".into(), label: "Terminal".into(), icon: ">_", separator_after: false },
+        ];
+
+        // WSL terminal
+        if self.wsl_supported() && self.wsl_detected {
+            items.push(NewTabPickerItem {
+                id: "wsl".into(), label: "WSL Terminal".into(), icon: "🐧", separator_after: false,
+            });
+        }
+
+        // Add separator after terminal group if there are agents
+        if !self.detected_vibe_tools.is_empty() {
+            items.last_mut().unwrap().separator_after = true;
+        }
+
+        // Detected vibe coding tools
+        for &(tool_id, label, _env) in &self.detected_vibe_tools {
+            items.push(NewTabPickerItem {
+                id: tool_id.into(), label: label.into(), icon: "●", separator_after: false,
+            });
+        }
+
+        // Separator before utility items
+        items.last_mut().unwrap().separator_after = true;
+
+        // Preview & Browser
+        items.push(NewTabPickerItem {
+            id: "preview".into(), label: "Preview File...".into(), icon: "◈", separator_after: false,
+        });
+        if self.browser_supported() {
+            items.push(NewTabPickerItem {
+                id: "browser".into(), label: "Browser".into(), icon: "◉", separator_after: false,
+            });
+        }
+
+        self.new_tab_picker = Some(NewTabPickerState {
+            pane_id,
+            items,
+            selected_index: 0,
+            anchor,
+        });
+    }
+
+    /// Execute the selected item from the new-tab picker.
+    pub(crate) fn execute_new_tab_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.new_tab_picker.take() else { return };
+        let Some(item) = picker.items.get(picker.selected_index) else { return };
+        self.terminal_manager_mut().set_active_pane(&picker.pane_id);
+
+        match item.id.as_str() {
+            "terminal" => {
+                let env = self.capture_active_env();
+                self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
+                self.spawn_with_captured_env(&env);
+            }
+            "wsl" => {
+                self.launch_wsl_shell();
+            }
+            "preview" => {
+                self.open_file_picker();
+            }
+            "browser" => {
+                self.open_browser("", window, cx);
+            }
+            tool_id => {
+                // Vibe coding tool
+                self.launch_vibe_tool_env(tool_id, false);
+            }
+        }
+    }
+
     /// Restart the terminal in a specific pane (used when process exits)
     pub(crate) fn restart_terminal_in_pane(&mut self, pane_id: &amux_platform::terminal::manager::PaneId) {
         self.terminal_manager_mut().set_active_pane(pane_id);
@@ -1001,46 +1126,21 @@ impl GpuiShellView {
         }
         use shortcut_labels::*;
 
-        let mut items = vec![
-            ContextMenuItem::action("Open Workspace", None, self.model.local_workspace_supported).separator(),
+        let items = vec![
             ContextMenuItem::action("Copy", Some(COPY), has_selection),
-            ContextMenuItem::action("Send to Pane", Some(SEND), self.terminal_manager().total_panes() > 1),
             ContextMenuItem::action("Paste", Some(PASTE), true).separator(),
+            ContextMenuItem::action("Send to Pane", Some(SEND), self.terminal_manager().total_panes() > 1),
             ContextMenuItem::action("Split Right", Some(SPLIT_RIGHT), true),
             ContextMenuItem::action("Split Down", Some(SPLIT_DOWN), true).separator(),
             ContextMenuItem::action("New Tab", Some(NEW_TAB), true),
-            ContextMenuItem::action("Close Pane", Some(CLOSE_PANE), self.terminal_manager().total_panes() > 1).separator(),
+            ContextMenuItem::action("Close Pane", Some(CLOSE_PANE), self.terminal_manager().total_panes() > 1),
             if self.zoomed_pane.is_some() {
-                ContextMenuItem::action("Restore Pane", Some(ZOOM), true).separator()
+                ContextMenuItem::action("Restore Pane", Some(ZOOM), true)
             } else {
-                ContextMenuItem::action("Zoom Pane", Some(ZOOM), self.terminal_manager().total_panes() > 1).separator()
+                ContextMenuItem::action("Zoom Pane", Some(ZOOM), self.terminal_manager().total_panes() > 1)
             },
         ];
 
-        // Workspace startup commands
-        {
-            let ws_name = self.workspace_name();
-            let has_startup = Self::startup_file_path(&ws_name).exists();
-            if has_startup {
-                items.push(ContextMenuItem::action("Run Startup", None, true));
-            }
-            items.push(ContextMenuItem::action("Edit Startup", None, true).separator());
-        }
-
-        // Layout templates (opens picker)
-        items.push(ContextMenuItem::action("Apply Layout...", None, true));
-        items.push(ContextMenuItem::action("Save Layout as Template", None, true).separator());
-
-        // File preview & browser
-        items.push(ContextMenuItem::action("Preview File...", None, true));
-        let browser_label = if self.has_visible_browser() { "Close Browser" } else { "Open Browser" };
-        items.push(ContextMenuItem::action(browser_label, None, self.browser_supported()).separator());
-
-        // Terminal launchers
-        let has_launchers = (self.wsl_supported() && self.wsl_detected) || !self.detected_vibe_tools.is_empty();
-        if has_launchers {
-            items.push(ContextMenuItem::action("Launch Agent...", None, true));
-        }
         items
     }
 
@@ -1089,46 +1189,6 @@ impl GpuiShellView {
             "Zoom Pane" | "Restore Pane" => {
                 self.toggle_zoom();
             }
-            "WSL Terminal" | "Launch Agent..." => {
-                self.open_agent_picker();
-            }
-            "Clear" => {
-                if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                    let _ = term.send_input(&[0x0c]);
-                }
-            }
-            "Run Startup" => {
-                self.run_startup_commands();
-            }
-            "Edit Startup" => {
-                self.edit_startup_file();
-            }
-            "Preview File..." => {
-                self.open_file_picker();
-            }
-            "Open Browser" => {
-                // Empty URL → open_browser falls through to the embedded
-                // welcome page. This avoids the 30-second TCP timeout that
-                // happened when the menu hardcoded http://localhost:3000
-                // and no dev server was running.
-                self.open_browser("", window, cx);
-            }
-            "Close Browser" => {
-                self.close_browser();
-            }
-            "Apply Layout..." => {
-                self.open_template_picker();
-            }
-            "Save Layout as Template" => {
-                let ws_name = self.workspace_name();
-                self.save_current_as_template(&ws_name);
-            }
-            l if l.starts_with("Launch Claude")   => self.launch_vibe_tool_env("claude", l.contains("WSL")),
-            l if l.starts_with("Launch Codex")    => self.launch_vibe_tool_env("codex", l.contains("WSL")),
-            l if l.starts_with("Launch OpenCode") => self.launch_vibe_tool_env("opencode", l.contains("WSL")),
-            l if l.starts_with("Launch Aider")    => self.launch_vibe_tool_env("aider", l.contains("WSL")),
-            l if l.starts_with("Launch Gemini")   => self.launch_vibe_tool_env("gemini", l.contains("WSL")),
-            l if l.starts_with("Launch Copilot")  => self.launch_vibe_tool_env("copilot", l.contains("WSL")),
             _ => {}
         }
         self.context_menu = None;
@@ -2208,8 +2268,18 @@ impl Render for GpuiShellView {
                     this.renaming_tab = None;
                     cx.notify();
                 }
+
+                // Find which pane was clicked — use its bounds for cell coords.
+                // This fixes selection when clicking a non-active pane in a split layout.
+                let (clicked_pane_id, col, row) = match this.pixel_to_term_cell_at(event.position) {
+                    Some(result) => result,
+                    None => return, // Click outside any terminal — ignore.
+                };
+
+                // Activate the clicked pane so subsequent operations target it.
+                this.terminal_manager_mut().set_active_pane(&clicked_pane_id);
+
                 let (mouse_mode, _) = this.active_term_mouse_mode();
-                let (col, row) = this.pixel_to_term_cell(event.position);
 
                 // Ctrl+Click: try to preview file path under cursor.
                 // Always takes priority, even when mouse mode is on (e.g. Claude Code).
@@ -2282,17 +2352,19 @@ impl Render for GpuiShellView {
                     // Extend selection — use cell side based on direction relative
                     // to the mouse position within the cell. This ensures the leftmost
                     // character can be selected when dragging right-to-left.
+                    // Use pane-aware cell lookup so selection extends correctly
+                    // regardless of which pane the mouse is currently over.
                     use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Direction};
-                    let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
-                    let (cw, _ch) = this.cell_dims();
-                    let cw = cw.max(1.0);
+                    let (clicked_pid, col, row) = match this.pixel_to_term_cell_at(event.position) {
+                        Some(r) => r,
+                        None => { cx.notify(); return; },
+                    };
+                    let cw = this.cell_dims().0.max(1.0);
                     // Compute sub-cell position to determine which side of the cell the cursor is on
-                    let raw_x = if let Some(pid) = this.terminal_manager().active_pane_id() {
-                        this.pane_bounds.get(&pid.0)
-                            .map(|&(px_x, _, _, _)| event.position.x.as_f32() - px_x - pad)
-                            .unwrap_or(0.0)
-                    } else { 0.0 };
-                    let (col, row) = this.pixel_to_term_cell(event.position);
+                    let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
+                    let raw_x = this.pane_bounds.get(&clicked_pid.0)
+                        .map(|&(px_x, _, _, _)| event.position.x.as_f32() - px_x - pad)
+                        .unwrap_or(0.0);
                     let cell_offset = raw_x - col as f32 * cw;
                     let side = if cell_offset < cw * 0.5 { Direction::Left } else { Direction::Right };
                     if let Some(term) = this.terminal_manager_mut().active_terminal() {
@@ -2438,9 +2510,13 @@ impl Render for GpuiShellView {
                     let (col, row) = this.pixel_to_term_cell(event.position);
                     this.send_mouse_event(2, col, row, true); // button 2 = right press
                 } else {
+                    // Find which pane was right-clicked so context menu targets it.
+                    let source_pane = this.pixel_to_term_cell_at(event.position)
+                        .map(|(pid, _, _)| pid)
+                        .or_else(|| this.terminal_manager().active_pane_id().cloned());
                     this.context_menu = Some(ContextMenuState {
                         position: event.position,
-                        source_pane: this.terminal_manager().active_pane_id().cloned(),
+                        source_pane,
                     });
                 }
                 cx.notify();
@@ -2586,7 +2662,7 @@ impl Render for GpuiShellView {
                                     let mut col = div()
                                         .flex_col()
                                         .flex_1()
-                                        .overflow_hidden();
+                                        .overflow_y_hidden();
                                     if agent_items.is_empty() {
                                         col = col.child(
                                             div()
@@ -2647,7 +2723,7 @@ impl Render for GpuiShellView {
                                     let mut ws_col = div()
                                         .flex_col()
                                         .flex_1()
-                                        .overflow_hidden();
+                                        .overflow_y_hidden();
                                     for (ws_idx, item) in workspaces.iter().enumerate() {
                                             let is_active = item.is_active;
                                             let has_ws_activity = !is_active && self.workspace_terminals
@@ -3052,6 +3128,10 @@ impl Render for GpuiShellView {
             // Agent picker overlay (Launch Agent)
             .when_some(self.agent_picker.clone(), |this, picker| {
                 this.child(render_agent_picker(&picker, cx))
+            })
+            // New-tab dropdown picker (from +▾ button)
+            .when_some(self.new_tab_picker.clone(), |this, picker| {
+                this.child(render_new_tab_picker(&picker, cx))
             })
             // Template picker overlay (Apply Layout)
             .when_some(self.template_picker.clone(), |this, picker| {
@@ -3527,10 +3607,15 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                     });
                                 }).detach();
                             }
-                            // Poll terminal activity for all workspaces (~15fps)
+                            // Poll terminal activity — only for the active workspace.
+                            // Background workspaces keep their dirty flag set by the
+                            // PTY event proxy; the sidebar shows a green dot for those.
+                            // Full poll (agent status detection) runs only on the
+                            // workspace the user is actually looking at.
                             if this.cursor_blink_frame % 4 == 0 {
                                 let frame = this.cursor_blink_frame;
-                                for tm in this.workspace_terminals.values_mut() {
+                                let active_ws = this.active_workspace_id.clone();
+                                if let Some(tm) = this.workspace_terminals.get_mut(&active_ws) {
                                     let notifs = tm.poll_activity();
                                     for n in notifs {
                                         // Auto-expand sidebar when agent needs attention
@@ -3551,9 +3636,9 @@ pub fn run(app: &amux_ui::DesktopApp, config: crate::gpui_config::AmuxConfig) {
                                             tab_index: n.tab_index,
                                         });
                                     }
+                                    // Clear activity for the active tab since user is looking at it
+                                    this.terminal_manager_mut().clear_active_activity();
                                 }
-                                // Clear activity for the active tab since user is looking at it
-                                this.terminal_manager_mut().clear_active_activity();
                                 // Expire old toasts (after ~3 seconds = 180 frames at 60fps)
                                 this.toasts.retain(|t| {
                                     frame.wrapping_sub(t.frame_created) < 180

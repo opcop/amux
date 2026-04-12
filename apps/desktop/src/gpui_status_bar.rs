@@ -74,14 +74,14 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                         .items_center()
                         .child(
                             div().text_color(rgb(0x7f849c))
-                                .child(format!("{} panes", pane_count))
+                                .child(format!("{} {}", pane_count, if pane_count == 1 { "pane" } else { "panes" }))
                         )
                         .child(
                             div().text_color(rgb(0x585b70)).child("·")
                         )
                         .child(
                             div().text_color(rgb(0x7f849c))
-                                .child(format!("{} tabs", tab_count))
+                                .child(format!("{} {}", tab_count, if tab_count == 1 { "tab" } else { "tabs" }))
                         ),
                 ),
         )

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use amux_core::WorkspaceTarget;
 
+#[cfg(target_os = "windows")]
 use crate::windows::paths::wsl_unc_path;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,9 +57,13 @@ impl PathMapper for DefaultPathMapper {
             }),
             WorkspaceTarget::WslPath { distro, path } => {
                 let unix_path = join_unix_path(path, relative_path);
+                #[cfg(target_os = "windows")]
+                let native_path = PathBuf::from(wsl_unc_path(distro, &unix_path));
+                #[cfg(not(target_os = "windows"))]
+                let native_path = PathBuf::from(format!("/{distro}{unix_path}"));
                 Ok(MappedFile {
                     display_path: format!("{distro}:{unix_path}"),
-                    native_path: PathBuf::from(wsl_unc_path(distro, &unix_path)),
+                    native_path,
                 })
             }
         }
@@ -80,7 +85,7 @@ mod tests {
     use super::{DefaultPathMapper, PathMapper};
 
     #[test]
-    fn maps_wsl_file_to_unc_path() {
+    fn maps_wsl_file_to_native_path() {
         let mapper = DefaultPathMapper;
         let mapped = mapper
             .map_file_for_editor(
@@ -93,9 +98,15 @@ mod tests {
             .expect("mapping should succeed");
 
         assert_eq!(mapped.display_path, "Ubuntu:/home/user/amux/README.md");
+        #[cfg(target_os = "windows")]
         assert_eq!(
             mapped.native_path,
             PathBuf::from(r"\\wsl$\Ubuntu\home\user\amux\README.md")
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            mapped.native_path,
+            PathBuf::from("/Ubuntu/home/user/amux/README.md")
         );
     }
 }

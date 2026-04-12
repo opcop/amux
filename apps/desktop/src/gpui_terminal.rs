@@ -6,7 +6,7 @@
 
 #[cfg(feature = "gpui")]
 use gpui::{
-    canvas, px, rgb, point, size, Bounds, Font, FontStyle, FontWeight, Hsla, IntoElement, Pixels,
+    canvas, px, rgb, point, size, Bounds, Font, FontFeatures, FontStyle, FontWeight, Hsla, IntoElement, Pixels,
     Point, Rgba, SharedString, Size, Styled, Window,
 };
 
@@ -299,7 +299,13 @@ fn make_font_styled(font_family: &str, bold: bool, italic: bool) -> Font {
 
     Font {
         family: SharedString::from(font_family.to_string()),
-        features: gpui::FontFeatures::default(),
+        // Enable standard ligatures (liga) and contextual alternates (calt)
+        // so programming fonts like Fira Code, Cascadia Code, JetBrains Mono
+        // render their ligatures (=>, !=, ->, ===, etc.) correctly.
+        features: FontFeatures(std::sync::Arc::new(vec![
+            ("liga".into(), 1),
+            ("calt".into(), 1),
+        ])),
         fallbacks: Some(fallbacks.clone()),
         weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },
@@ -368,6 +374,14 @@ struct RenderData {
     selection_bg: Rgba,
     /// Scroll state: (display_offset, total_history, visible_rows)
     scroll_info: (usize, usize, usize),
+}
+
+/// Reusable render buffer pool — avoids per-frame Vec allocations.
+/// Each terminal keeps its own buffer sized to its last dimensions.
+#[cfg(feature = "gpui")]
+thread_local! {
+    static RENDER_BUF: std::cell::RefCell<Vec<Vec<RenderCell>>> =
+        std::cell::RefCell::new(Vec::new());
 }
 
 #[cfg(feature = "gpui")]
@@ -463,6 +477,7 @@ struct PaintText {
 // ─── Data Collection ────────────────────────────────────────────
 
 /// Collect render data from the alacritty terminal.
+/// Reuses a thread-local buffer to avoid per-frame Vec allocations.
 #[cfg(feature = "gpui")]
 fn collect_render_data(
     term: &amux_platform::terminal::alacritty_view::AlacrittyTerminal,
@@ -483,7 +498,23 @@ fn collect_render_data(
         let default_bg = rgb(theme.bg);
         let cursor_color = rgb(theme.cursor);
 
-        let mut grid: Vec<Vec<RenderCell>> = vec![vec![RenderCell::default(); cols]; rows];
+        // Reuse thread-local buffer to avoid per-frame allocations.
+        // Reallocate only when terminal dimensions change.
+        let mut grid = RENDER_BUF.with(|buf| {
+            let mut buf = buf.borrow_mut();
+            if buf.len() != rows || buf.first().map_or(true, |r| r.len() != cols) {
+                *buf = vec![vec![RenderCell::default(); cols]; rows];
+            } else {
+                // Reset cells to default — only populated cells get overwritten.
+                for row in buf.iter_mut() {
+                    for cell in row.iter_mut() {
+                        *cell = RenderCell::default();
+                    }
+                }
+            }
+            // Take ownership of the grid, leaving an empty Vec behind.
+            std::mem::take(&mut *buf)
+        });
 
         for indexed in content.display_iter {
             let point = indexed.point;
@@ -563,7 +594,6 @@ fn collect_render_data(
             }
         }
 
-        let cursor_row = cursor.point.line.0.max(0) as usize;
         let cursor_col = cursor.point.column.0;
         let cursor_hidden = matches!(
             cursor.shape,
@@ -578,15 +608,20 @@ fn collect_render_data(
         };
 
         // Extract selection ranges for highlighting
+        // Extract selection ranges for highlighting.
+        // Convert grid line numbers to viewport row indices, since the
+        // rendering pipeline addresses cells by viewport row (0..rows).
         let mut selection_ranges = Vec::new();
         if let Some(ref sel) = t.selection {
             if let Some(range) = sel.to_range(t) {
                 let sel_start = range.start;
                 let sel_end = range.end;
                 for line in sel_start.line.0..=sel_end.line.0 {
-                    if line < 0 { continue; }
-                    let r = line as usize;
-                    if r >= rows { continue; }
+                    // Convert absolute grid line → viewport row index
+                    let viewport_row = line + display_offset as i32;
+                    if viewport_row < 0 { continue; }
+                    if viewport_row >= rows as i32 { continue; }
+                    let r = viewport_row as usize;
                     let c_start = if line == sel_start.line.0 { sel_start.column.0 } else { 0 };
                     let c_end = if line == sel_end.line.0 { sel_end.column.0 } else { cols.saturating_sub(1) };
                     selection_ranges.push((r, c_start, c_end));
@@ -598,7 +633,13 @@ fn collect_render_data(
             grid,
             rows,
             cols,
-            cursor_row,
+            // Cursor viewport row: convert absolute grid line → viewport row index.
+            // Clamp to visible range — if the cursor is off-screen (e.g., in the
+            // resize buffer below the viewport), hide it by setting an out-of-range row.
+            cursor_row: {
+                let vr = cursor.point.line.0 + display_offset as i32;
+                vr.max(0).min(rows as i32 - 1) as usize
+            },
             cursor_col,
             cursor_visible,
             cursor_shape,

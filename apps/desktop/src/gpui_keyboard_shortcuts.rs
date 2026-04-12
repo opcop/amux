@@ -81,8 +81,8 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
             ShortcutCategory::Pane,
         ),
         Shortcut::new(
-            "ctrl+w",
-            "Ctrl+W",
+            "ctrl+shift+w",
+            "Ctrl+Shift+W",
             "Close focused pane",
             ShortcutCategory::Pane,
         ),
@@ -126,7 +126,7 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
         Shortcut::new(
             "ctrl+c",
             "Ctrl+C",
-            "Copy selection",
+            "Copy selection (or SIGINT if no selection)",
             ShortcutCategory::Terminal,
         ),
         Shortcut::new(

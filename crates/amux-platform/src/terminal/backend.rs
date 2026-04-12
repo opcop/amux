@@ -248,7 +248,7 @@ impl RealTerminalBackend {
         };
 
         let args = match &spec.shell {
-            ShellKind::Fish | ShellKind::Custom(_) => Vec::new(),
+            ShellKind::Fish | ShellKind::Custom(_) | ShellKind::PowerShell => Vec::new(),
             _ => vec!["-l".to_string()],
         };
 

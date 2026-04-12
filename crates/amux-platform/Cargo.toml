@@ -8,29 +8,33 @@ license.workspace = true
 amux-core = { path = "../amux-core" }
 
 # Terminal emulation (Alacritty's battle-tested backend)
-alacritty_terminal = "0.25"
+alacritty_terminal.workspace = true
 
 # Cross-platform PTY support
-portable-pty = "0.8"
+portable-pty.workspace = true
 
 # Async runtime for reading PTY output
-tokio = { version = "1", features = ["sync", "rt"] }
+tokio.workspace = true
 
 # For async Read/Write traits
-futures-lite = "2"
+futures-lite.workspace = true
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 
 # System information (CPU, memory, processes)
-sysinfo = "0.32"
+sysinfo.workspace = true
 
 # Cross-platform clipboard (text + image). Used by ArboardClipboardService.
-arboard = "3.6"
+arboard.workspace = true
 
 # Native file dialogs (folder picker). rfd 0.17's default features are
 # `xdg-portal + wayland` on Linux (no GTK3 C deps), and AppKit/Win32 on
 # macOS/Windows where the Linux backend choice has no effect.
-rfd = "0.17"
+rfd.workspace = true
+
+# Process group kill on Unix
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libc = "0.2"
 

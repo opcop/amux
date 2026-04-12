@@ -152,6 +152,7 @@ dependencies = [
  "amux-core",
  "arboard",
  "futures-lite 2.6.1",
+ "libc",
  "portable-pty",
  "rfd",
  "serde",

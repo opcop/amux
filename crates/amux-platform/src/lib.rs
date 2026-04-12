@@ -26,6 +26,7 @@ pub use terminal::*;
 pub use terminal_output::*;
 pub use linux::LinuxPlatform;
 pub use macos::MacosPlatform;
+pub use windows::WindowsPlatform;
 
 // Re-export WSL detection types on Windows
 #[cfg(target_os = "windows")]
@@ -42,6 +43,7 @@ pub use windows::wsl_fs::{
     WslFsError, WslMetadata,
 };
 
+#[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform;
 
 use std::sync::Arc;

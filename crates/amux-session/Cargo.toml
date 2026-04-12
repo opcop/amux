@@ -6,4 +6,4 @@ license.workspace = true
 
 [dependencies]
 amux-core = { path = "../amux-core" }
-serde_json = "1"
+serde_json.workspace = true

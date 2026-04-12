@@ -260,6 +260,12 @@ impl TerminalPane {
         if self.tabs.len() <= 1 || index >= self.tabs.len() {
             return false;
         }
+        // Kill the terminal process before dropping to prevent orphaned
+        // child processes. The AlacrittyTerminal::Drop impl also does this,
+        // but we do it explicitly here for safety.
+        if let Some(ref term) = self.tabs[index].terminal {
+            term.kill_child();
+        }
         self.tabs.remove(index);
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
@@ -790,11 +796,22 @@ impl TerminalManager {
         if let Some(ref ws) = self.workspace_name {
             extra_env.insert("AMUX_WORKSPACE".to_string(), ws.clone());
         }
-        let (term, actual_cwd) = Self::create_terminal_with_fallback(shell, args, cwd, self.scrollback_lines, &extra_env)?;
-        tab.terminal = Some(term);
-        tab.cwd = actual_cwd;
-        tab.shell_cmd = Some((shell.to_string(), args.to_vec()));
-        Ok(())
+        match Self::create_terminal_with_fallback(shell, args, cwd, self.scrollback_lines, &extra_env) {
+            Ok((term, actual_cwd)) => {
+                tab.terminal = Some(term);
+                tab.cwd = actual_cwd;
+                tab.shell_cmd = Some((shell.to_string(), args.to_vec()));
+                Ok(())
+            }
+            Err(e) => {
+                // Mark the tab with an error state so the render layer can show
+                // an error message instead of a silently blank tab.
+                tab.title = format!("Spawn failed: {}", e);
+                tab.custom_title = true;
+                tab.exited = true;
+                Err(e)
+            }
+        }
     }
 
     /// Spawn terminals for all tabs in a pane, using each tab's saved cwd if available.
@@ -825,6 +842,11 @@ impl TerminalManager {
             let (term, used_cwd) = match result {
                 Ok(pair) => pair,
                 Err(e) => {
+                    // Mark the tab as failed so the render layer can show
+                    // an error state instead of a silently blank tab.
+                    tab.title = format!("Spawn failed: {}", e);
+                    tab.custom_title = true;
+                    tab.exited = true;
                     eprintln!("[amux] spawn tab failed: {}", e);
                     continue;
                 }
@@ -927,6 +949,15 @@ impl TerminalManager {
             return false;
         }
         let closed = self.active_pane.clone();
+        // Kill all terminal processes in the pane being closed to prevent
+        // orphaned child processes.
+        if let Some(pane) = self.panes.get(&closed) {
+            for tab in &pane.tabs {
+                if let Some(ref term) = tab.terminal {
+                    term.kill_child();
+                }
+            }
+        }
         if Self::remove_from_layout(&mut self.layout, &closed) {
             self.panes.remove(&closed);
             self.active_pane = Self::first_pane(&self.layout)
@@ -1028,6 +1059,28 @@ impl TerminalManager {
 
         // Make target the active pane
         self.active_pane = target_pane.clone();
+        true
+    }
+
+    /// Reorder a tab within the same pane (drag to new position).
+    pub fn reorder_tab(&mut self, pane_id: &PaneId, from: usize, to: usize) -> bool {
+        let pane = match self.panes.get_mut(pane_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        if from >= pane.tabs.len() || to >= pane.tabs.len() || from == to {
+            return false;
+        }
+        let tab = pane.tabs.remove(from);
+        pane.tabs.insert(to, tab);
+        // Keep active_tab pointing at the same tab after the move
+        if pane.active_tab == from {
+            pane.active_tab = to;
+        } else if from < pane.active_tab && to >= pane.active_tab {
+            pane.active_tab -= 1;
+        } else if from > pane.active_tab && to <= pane.active_tab {
+            pane.active_tab += 1;
+        }
         true
     }
 
@@ -1452,5 +1505,137 @@ impl TerminalManager {
         term.send_input(text.as_bytes());
         term.send_input(b"\n");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_manager() -> TerminalManager {
+        TerminalManager::with_scrollback(10000)
+    }
+
+    fn pane_id(n: usize) -> PaneId {
+        PaneId(format!("pane-{}", n))
+    }
+
+    #[test]
+    fn test_single_pane_layout() {
+        let mgr = make_manager();
+        let layout = mgr.active_layout().unwrap();
+        let ids = layout.pane_ids();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], pane_id(1));
+    }
+
+    #[test]
+    fn test_split_horizontal() {
+        let mut mgr = make_manager();
+        mgr.split_active_pane(SplitDirection::Horizontal);
+        let ids = mgr.active_layout().unwrap().pane_ids();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn test_split_vertical() {
+        let mut mgr = make_manager();
+        mgr.split_active_pane(SplitDirection::Vertical);
+        let ids = mgr.active_layout().unwrap().pane_ids();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn test_close_pane_merges_layout() {
+        let mut mgr = make_manager();
+        mgr.split_active_pane(SplitDirection::Horizontal);
+        assert_eq!(mgr.active_layout().unwrap().pane_ids().len(), 2);
+        assert_eq!(mgr.panes.len(), 2);
+        let closed = mgr.close_active_pane();
+        assert!(closed);
+        assert_eq!(mgr.active_layout().unwrap().pane_ids().len(), 1);
+        assert_eq!(mgr.panes.len(), 1);
+    }
+
+    #[test]
+    fn test_close_last_pane_returns_false() {
+        let mut mgr = make_manager();
+        let closed = mgr.close_active_pane();
+        assert!(!closed);
+        assert_eq!(mgr.panes.len(), 1);
+    }
+
+    #[test]
+    fn test_add_tab_to_active_pane() {
+        let mut mgr = make_manager();
+        let idx = mgr.add_tab_to_active_pane("Test Tab".into());
+        assert!(idx.is_some());
+        let pane = mgr.get_pane(&pane_id(1)).unwrap();
+        assert_eq!(pane.tab_count(), 2);
+    }
+
+    #[test]
+    fn test_close_last_tab_returns_false() {
+        let mut mgr = make_manager();
+        let closed = mgr.close_active_tab();
+        assert!(!closed);
+    }
+
+    #[test]
+    fn test_close_tab_removes_correct_tab() {
+        let mut mgr = make_manager();
+        mgr.add_tab_to_active_pane("Tab 2".into());
+        mgr.add_tab_to_active_pane("Tab 3".into());
+        assert_eq!(mgr.panes[&pane_id(1)].tab_count(), 3);
+        let closed = mgr.close_active_tab();
+        assert!(closed);
+        assert_eq!(mgr.panes[&pane_id(1)].tab_count(), 2);
+    }
+
+    #[test]
+    fn test_move_tab_between_panes() {
+        let mut mgr = make_manager();
+        mgr.split_active_pane(SplitDirection::Horizontal);
+        // Add a tab to pane-1
+        mgr.set_active_pane(&pane_id(1));
+        mgr.add_tab_to_active_pane("Movable".into());
+        // Move tab from pane-1 to pane-2
+        let moved = mgr.move_tab_to_pane(&pane_id(1), 1, &pane_id(2));
+        assert!(moved);
+        assert_eq!(mgr.panes[&pane_id(1)].tab_count(), 1);
+        assert_eq!(mgr.panes[&pane_id(2)].tab_count(), 2);
+    }
+
+    #[test]
+    fn test_move_tab_removes_empty_source_pane() {
+        let mut mgr = make_manager();
+        mgr.split_active_pane(SplitDirection::Horizontal);
+        // pane-1 has 1 tab, pane-2 has 1 tab
+        assert_eq!(mgr.panes[&pane_id(1)].tab_count(), 1);
+        assert_eq!(mgr.panes[&pane_id(2)].tab_count(), 1);
+        // Move the only tab from pane-2 to pane-1
+        let moved = mgr.move_tab_to_pane(&pane_id(2), 0, &pane_id(1));
+        assert!(moved);
+        // pane-2 should be removed from layout
+        assert!(!mgr.panes.contains_key(&pane_id(2)));
+        assert_eq!(mgr.active_layout().unwrap().pane_ids().len(), 1);
+    }
+
+    #[test]
+    fn test_total_panes() {
+        let mut mgr = make_manager();
+        assert_eq!(mgr.total_panes(), 1);
+        mgr.split_active_pane(SplitDirection::Horizontal);
+        assert_eq!(mgr.total_panes(), 2);
+    }
+
+    #[test]
+    fn test_pane_list() {
+        let mut mgr = make_manager();
+        mgr.split_active_pane(SplitDirection::Horizontal);
+        let list = mgr.pane_list();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|p| p.pane_id == pane_id(1)));
+        assert!(list.iter().any(|p| p.pane_id == pane_id(2)));
     }
 }

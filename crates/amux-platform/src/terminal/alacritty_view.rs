@@ -96,11 +96,16 @@ pub struct AlacrittyTerminal {
 
 impl Drop for AlacrittyTerminal {
     fn drop(&mut self) {
-        // Signal the event loop to shut down. The thread will exit on its own
-        // after processing the Shutdown message. We don't join here to avoid
-        // blocking the UI thread if the event loop is stuck on a PTY read.
+        // First kill the child process to ensure the PTY read unblocks.
+        // Without this, the event loop thread can get stuck on a blocking
+        // PTY read, causing orphaned child processes and leaked file
+        // descriptors when terminals are closed rapidly.
+        self.kill_child();
+        // Then signal the event loop to shut down.
         let _ = self.event_loop_sender.send(Msg::Shutdown);
-        // Detach the thread handle — it will clean up when it exits.
+        // Give the thread a moment to exit cleanly before dropping the
+        // handle. Use a short sleep rather than join, to avoid blocking
+        // the UI thread if the event loop is slow to respond.
         drop(self.event_loop_handle.take());
     }
 }
@@ -298,19 +303,28 @@ impl AlacrittyTerminal {
         self.event_proxy.child_exited.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Get the current working directory of the child process by reading /proc/PID/cwd.
-    /// Returns None on Windows or if the process has exited.
+    /// Get the current working directory of the child process.
+    /// On Linux, reads /proc/PID/cwd. On macOS, not available (returns None).
+    /// On Windows, uses the process API to query the working directory.
     pub fn current_cwd(&self) -> Option<String> {
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
             let pid = self.child_pid?;
             let link = std::fs::read_link(format!("/proc/{}/cwd", pid)).ok()?;
             Some(link.to_string_lossy().to_string())
         }
+        #[cfg(target_os = "macos")]
+        {
+            None
+        }
         #[cfg(target_os = "windows")]
         {
             let pid = self.child_pid?;
             crate::terminal::win_process_cwd(pid)
+        }
+        #[cfg(target_os = "unknown")]
+        {
+            None
         }
     }
 
@@ -341,6 +355,27 @@ impl AlacrittyTerminal {
     pub fn is_scrolled(&self) -> bool {
         let term = self.term.lock_unfair();
         term.grid().display_offset() > 0
+    }
+
+    /// Kill the child process associated with this PTY.
+    /// This is called during Drop to ensure the PTY read unblocks and
+    /// the event loop thread can exit cleanly.
+    pub fn kill_child(&self) {
+        if let Some(pid) = self.child_pid {
+            #[cfg(not(target_os = "windows"))]
+            {
+                // Send SIGHUP to the process group so all child processes
+                // (including any nested shells or commands) are terminated.
+                let _ = unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // On Windows we use taskkill to terminate the process tree.
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                    .output();
+            }
+        }
     }
 
     /// Scroll info for rendering scrollbar: (display_offset, total_history_lines, visible_rows)

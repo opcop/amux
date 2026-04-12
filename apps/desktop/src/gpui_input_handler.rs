@@ -482,9 +482,39 @@ impl GpuiShellView {
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    if n <= self.agent_picker.as_ref().unwrap().agents.len() {
-                        self.agent_picker.as_mut().unwrap().selected_index = n - 1;
-                        self.execute_agent_picker();
+                    if let Some(ref picker) = self.agent_picker {
+                        if n <= picker.agents.len() {
+                            drop(picker);
+                            if let Some(ref mut picker) = self.agent_picker {
+                                picker.selected_index = n - 1;
+                            }
+                            self.execute_agent_picker();
+                        }
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
+
+        // New-tab picker handling (+▾ dropdown)
+        if self.new_tab_picker.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.new_tab_picker = None;
+                }
+                "enter" => {
+                    self.execute_new_tab_picker(window, cx);
+                }
+                "up" | "arrowup" => {
+                    if let Some(ref mut p) = self.new_tab_picker {
+                        if p.selected_index > 0 { p.selected_index -= 1; }
+                    }
+                }
+                "down" | "arrowdown" => {
+                    if let Some(ref mut p) = self.new_tab_picker {
+                        if p.selected_index + 1 < p.items.len() { p.selected_index += 1; }
                     }
                 }
                 _ => {}
@@ -517,9 +547,14 @@ impl GpuiShellView {
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    if n <= self.template_picker.as_ref().unwrap().templates.len() {
-                        self.template_picker.as_mut().unwrap().selected_index = n - 1;
-                        self.execute_template_picker();
+                    if let Some(ref picker) = self.template_picker {
+                        if n <= picker.templates.len() {
+                            drop(picker);
+                            if let Some(ref mut picker) = self.template_picker {
+                                picker.selected_index = n - 1;
+                            }
+                            self.execute_template_picker();
+                        }
                     }
                 }
                 _ => {}
@@ -549,9 +584,14 @@ impl GpuiShellView {
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    if n <= self.pane_picker.as_ref().unwrap().targets.len() {
-                        self.pane_picker.as_mut().unwrap().selected_index = n - 1;
-                        self.execute_pane_picker();
+                    if let Some(ref picker) = self.pane_picker {
+                        if n <= picker.targets.len() {
+                            drop(picker);
+                            if let Some(ref mut picker) = self.pane_picker {
+                                picker.selected_index = n - 1;
+                            }
+                            self.execute_pane_picker();
+                        }
                     }
                 }
                 _ => {}
@@ -684,6 +724,27 @@ impl GpuiShellView {
         // Ctrl shortcuts — only intercept keys that don't conflict with shell/readline
         if ctrl && !shift {
             match keystr.as_str() {
+                "ctrl+c" => {
+                    // If there's a non-empty text selection, copy it (like modern terminals).
+                    // Otherwise forward to PTY as SIGINT (readline interrupt).
+                    // Must check `selection_to_string()` not just `is_some()` —
+                    // clicking the terminal creates a zero-length Selection which
+                    // would otherwise block Ctrl+C from reaching the shell.
+                    let has_selection = self
+                        .terminal_manager()
+                        .active_terminal_ref()
+                        .map(|t| t.with_term(|term| {
+                            term.selection_to_string().map_or(false, |s| !s.is_empty())
+                        }))
+                        .unwrap_or(false);
+                    if has_selection {
+                        self.copy_selection(cx);
+                    } else {
+                        self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
+                    }
+                    cx.notify();
+                    return;
+                }
                 "ctrl+v" => {
                     self.paste_clipboard(cx);
                     cx.notify();
@@ -749,11 +810,12 @@ impl GpuiShellView {
                     return;
                 }
                 "ctrl+w" => {
-                    // Close active tab/pane (Cmd+W on macOS)
-                    self.cleanup_pane_tab_entries();
-                    if self.terminal_manager_mut().close_active_pane() {
-                        cx.notify();
-                    }
+                    // Forward to PTY for readline delete-previous-word.
+                    // bash/zsh/fish all use Ctrl+W to delete the previous word.
+                    // Closing panes/tabs is handled exclusively by Ctrl+Shift+W
+                    // above, which doesn't conflict with any shell readline.
+                    self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
+                    cx.notify();
                     return;
                 }
                 "ctrl+n" => {
@@ -817,6 +879,18 @@ impl GpuiShellView {
         // Alt+key → forward to PTY (readline word navigation: Alt+B/F/D, Alt+Backspace, etc.)
         if alt && !ctrl {
             self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
+            cx.notify();
+            return;
+        }
+
+        // On macOS, real Ctrl (not Cmd) must be forwarded to the PTY with
+        // the ctrl flag so that Ctrl+C → \x03 (SIGINT), Ctrl+D → \x04 (EOF),
+        // etc. The normalization above maps Cmd → ctrl for app shortcuts,
+        // but real Ctrl was being dropped entirely — causing Ctrl+C to be
+        // sent as a plain "c" character instead of the control byte.
+        #[cfg(target_os = "macos")]
+        if keystroke.modifiers.control && !keystroke.modifiers.platform {
+            self.handle_terminal_input(key, true, shift, alt, window, cx);
             cx.notify();
             return;
         }
