@@ -16,6 +16,10 @@ Thumbs.db
 .env
 .env.local
 
+# Claude Code local settings — machine-specific allowlists, may contain
+# tokens or dev-machine paths. Share-able settings live in settings.json.
+.claude/settings.local.json
+
 # Logs
 *.log
 
