@@ -35,7 +35,38 @@ use crate::gpui_config::AmuxConfig;
 #[cfg(feature = "gpui")]
 use crate::gpui_entry::GpuiShellView;
 
+/// Version tag for the squircle generation pipeline. Bump when
+/// the algorithm changes (radius, inner-square ratio, AA band,
+/// filter choice, ...) so stale on-disk caches are invalidated
+/// even when the source JPEG hasn't changed.
+#[cfg(all(feature = "gpui", target_os = "macos"))]
+const ICON_PIPELINE_VERSION: u32 = 1;
+
+/// Compute the cache path for a given source image. The filename
+/// encodes a hash over both `ICON_PIPELINE_VERSION` and the JPEG
+/// bytes, so swapping the source art OR the pipeline algorithm
+/// produces a new filename — the old cache becomes unreachable
+/// and the pipeline re-runs once on next launch.
+#[cfg(all(feature = "gpui", target_os = "macos"))]
+fn icon_cache_path(jpg_bytes: &[u8]) -> std::path::PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ICON_PIPELINE_VERSION.hash(&mut h);
+    jpg_bytes.hash(&mut h);
+    let key = h.finish();
+    amux_platform::amux_home_dir()
+        .join("cache")
+        .join(format!("dock-icon-{:016x}.png", key))
+}
+
 /// Set the macOS Dock icon at runtime.
+///
+/// On a warm cache (`~/.amux/cache/dock-icon-{hash}.png` exists
+/// and is non-empty), the squircle pipeline is skipped entirely
+/// — we just decode the cached PNG and hand it to AppKit. On a
+/// cold cache or on the first launch after a pipeline/source
+/// bump, the full pipeline runs and the result is written to
+/// disk for next time, fire-and-forget.
 ///
 /// SAFETY: must be called on the main thread, after `application().run`
 /// has bootstrapped NSApplication. The single call site in `run()` is
@@ -51,11 +82,37 @@ fn set_macos_dock_icon() {
     // in sync with the Windows .ico master.
     const ICON_JPG: &[u8] = include_bytes!("../../../assets/icons/amux.jpg");
 
-    let png_bytes = match build_squircle_icon_png(ICON_JPG) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            eprintln!("[amux-icon] failed to build squircle PNG: {err}");
-            return;
+    let cache_path = icon_cache_path(ICON_JPG);
+    let png_bytes = match std::fs::read(&cache_path) {
+        Ok(bytes) if !bytes.is_empty() => {
+            crate::metrics::startup_phase("dock_icon_cache_hit");
+            bytes
+        }
+        _ => {
+            crate::metrics::startup_phase("dock_icon_cache_miss");
+            let bytes = match build_squircle_icon_png(ICON_JPG) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!("[amux-icon] failed to build squircle PNG: {err}");
+                    return;
+                }
+            };
+            // Write cache for next run. Uses a temp file + rename
+            // so a crash mid-write doesn't leave a half-written
+            // PNG that the next launch would happily read as
+            // "cache hit" and hand to AppKit. Errors are logged
+            // but non-fatal — running without a cache hit is
+            // always a valid fallback.
+            if let Some(parent) = cache_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let tmp = cache_path.with_extension("png.tmp");
+            if let Err(err) = std::fs::write(&tmp, &bytes)
+                .and_then(|_| std::fs::rename(&tmp, &cache_path))
+            {
+                eprintln!("[amux-icon] failed to write icon cache: {err}");
+            }
+            bytes
         }
     };
 
@@ -210,6 +267,7 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
         gpui_component::init(cx);
         // Set dark theme to match Amux's Tomorrow Night palette
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
+        crate::metrics::startup_phase("gpui_component_init_done");
 
         // macOS Dock icon. NSApplication is now alive (gpui's application
         // bootstrap created it before invoking this closure), so we can
@@ -221,6 +279,7 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
         // bundle icon at runtime.
         #[cfg(target_os = "macos")]
         set_macos_dock_icon();
+        crate::metrics::startup_phase("dock_icon_done");
 
         // macOS native menubar. Provides the standard app menu with
         // About / Hide / Quit and an Edit menu with clipboard actions.
@@ -281,6 +340,7 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
             // show a modal with version / build info.
             cx.on_action(|_: &AboutAmux, _cx| {});
         }
+        crate::metrics::startup_phase("macos_menubar_done");
 
         let model = model.clone();
         let app = app.clone();
