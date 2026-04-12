@@ -97,6 +97,16 @@ pub const MODE_LITERAL_BG: u32 = 0x3a3a4a;
 pub const MODE_REGEX_BG:   u32 = 0x4a3a3a;
 pub const MODE_FUZZY_BG:   u32 = 0x3a4a3a;
 
+/// Background wash for *non-current* scrollback search matches.
+/// Drawn **under** the primary selection color so the current
+/// match (which is painted via the terminal's Selection) still
+/// visibly pops. Dim mustard was chosen because it reads
+/// differently from Tomorrow Night's blue selection
+/// (`theme::ACCENT`) and from the red `DANGER` and green
+/// `SUCCESS` semantic tints — zero risk of confusing a search
+/// hit for an error or "success" marker.
+pub const MATCH_HIGHLIGHT_BG: u32 = 0x5c4a20;
+
 // ─── Radii ──────────────────────────────────────────────────────
 
 pub const RADIUS_SM: f32 = 3.0;

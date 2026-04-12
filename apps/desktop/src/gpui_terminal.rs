@@ -335,8 +335,9 @@ pub fn render_alacritty_terminal(
     font_family: &str,
     font_size: f32,
     theme: &TerminalTheme,
+    search_matches: &[alacritty_terminal::term::search::Match],
 ) -> impl IntoElement {
-    let mut data = collect_render_data(term, cursor_blink_on, theme);
+    let mut data = collect_render_data(term, cursor_blink_on, theme, search_matches);
 
     // Active pane: respect the terminal's cursor visibility and shape.
     // Inactive pane: hide cursor so the user can identify which pane is active.
@@ -375,6 +376,12 @@ struct RenderData {
     /// Selection: vec of (row, start_col, end_col) for highlighted cells
     selection_ranges: Vec<(usize, usize, usize)>,
     selection_bg: Rgba,
+    /// Scrollback search matches (viewport-row indexed), drawn
+    /// under the selection so the `current` match still pops. Empty
+    /// when no search is active or when this terminal isn't the one
+    /// the search is currently scoped to.
+    match_ranges: Vec<(usize, usize, usize)>,
+    match_bg: Rgba,
     /// Scroll state: (display_offset, total_history, visible_rows)
     scroll_info: (usize, usize, usize),
 }
@@ -450,6 +457,9 @@ struct PrepaintData {
     bg_rects: Vec<PaintRect>,
     /// Block/box drawing character rectangles
     special_rects: Vec<PaintRect>,
+    /// Scrollback search match highlight rectangles (drawn under
+    /// `selection_rects` so the current match still pops).
+    match_rects: Vec<PaintRect>,
     /// Selection highlight rectangles
     selection_rects: Vec<PaintRect>,
     /// Shaped text lines with positions
@@ -486,6 +496,7 @@ fn collect_render_data(
     term: &amux_platform::terminal::alacritty_view::AlacrittyTerminal,
     cursor_blink_on: bool,
     theme: &TerminalTheme,
+    search_matches: &[alacritty_terminal::term::search::Match],
 ) -> RenderData {
     use alacritty_terminal::grid::Dimensions;
     use alacritty_terminal::term::cell::Flags as CellFlags;
@@ -610,7 +621,6 @@ fn collect_render_data(
             _ => 0,
         };
 
-        // Extract selection ranges for highlighting
         // Extract selection ranges for highlighting.
         // Convert grid line numbers to viewport row indices, since the
         // rendering pipeline addresses cells by viewport row (0..rows).
@@ -629,6 +639,26 @@ fn collect_render_data(
                     let c_end = if line == sel_end.line.0 { sel_end.column.0 } else { cols.saturating_sub(1) };
                     selection_ranges.push((r, c_start, c_end));
                 }
+            }
+        }
+
+        // Convert search matches to viewport rows the same way. The
+        // inclusive-range endpoints come straight from alacritty's
+        // `RegexSearch` / our fuzzy scan, so they address grid lines
+        // (scrollback lines are negative) — we shift by
+        // `display_offset` and drop anything outside the viewport.
+        let mut match_ranges = Vec::new();
+        for m in search_matches {
+            let m_start = *m.start();
+            let m_end = *m.end();
+            for line in m_start.line.0..=m_end.line.0 {
+                let viewport_row = line + display_offset as i32;
+                if viewport_row < 0 { continue; }
+                if viewport_row >= rows as i32 { continue; }
+                let r = viewport_row as usize;
+                let c_start = if line == m_start.line.0 { m_start.column.0 } else { 0 };
+                let c_end = if line == m_end.line.0 { m_end.column.0 } else { cols.saturating_sub(1) };
+                match_ranges.push((r, c_start, c_end));
             }
         }
 
@@ -655,6 +685,8 @@ fn collect_render_data(
                 (offset, history, visible)
             },
             selection_ranges,
+            match_ranges,
+            match_bg: rgb(crate::theme::MATCH_HIGHLIGHT_BG),
         }
     })
 }
@@ -731,6 +763,7 @@ fn prepaint_terminal(
 
     let mut bg_rects = Vec::with_capacity(data.rows * 4);
     let mut special_rects = Vec::with_capacity(64);
+    let mut match_rects: Vec<PaintRect> = Vec::with_capacity(data.match_ranges.len());
     let mut selection_rects = Vec::with_capacity(8);
     let mut text_lines = Vec::with_capacity(data.rows * 4);
     let mut underline_rects = Vec::with_capacity(32);
@@ -746,6 +779,22 @@ fn prepaint_terminal(
             origin: point(x, y),
             size: size(px(w), px(cell_h)),
             color: selection_bg,
+        });
+    }
+
+    // Build scrollback search match highlight rects. Identical
+    // geometry to selection rects, different color. Drawn before
+    // selection in the paint layer so the active match still
+    // appears in the brighter selection color.
+    let match_bg = data.match_bg;
+    for &(row, c_start, c_end) in &data.match_ranges {
+        let x = content_origin_x + px(c_start as f32 * cell_w);
+        let y = bounds.origin.y + px(row as f32 * cell_h);
+        let w = ((c_end + 1).saturating_sub(c_start)) as f32 * cell_w;
+        match_rects.push(PaintRect {
+            origin: point(x, y),
+            size: size(px(w), px(cell_h)),
+            color: match_bg,
         });
     }
 
@@ -1093,6 +1142,7 @@ fn prepaint_terminal(
     PrepaintData {
         bg_rects,
         special_rects,
+        match_rects,
         selection_rects,
         text_lines,
         underline_rects,
@@ -1110,6 +1160,15 @@ fn prepaint_terminal(
 fn paint_terminal(data: PrepaintData, window: &mut Window, cx: &mut gpui::App) {
     // Layer 1: Backgrounds
     for rect in &data.bg_rects {
+        paint_rect(rect, window);
+    }
+
+    // Layer 1.5: Scrollback search match highlights (dim mustard).
+    // Drawn BEFORE selection so the current match — which is the
+    // one exposed as `Term::selection` — still pops in the
+    // brighter selection color when both layers overlap on the
+    // same cells.
+    for rect in &data.match_rects {
         paint_rect(rect, window);
     }
 

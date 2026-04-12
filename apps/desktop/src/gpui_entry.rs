@@ -2266,11 +2266,20 @@ impl Render for GpuiShellView {
                                 let zoomed = self.zoomed_pane.clone();
                                 let layout_cloned = self.terminal_manager_mut().active_layout().cloned();
                                 let renaming_tab = self.renaming_tab.clone();
+                                // Grab the current search match list so
+                                // the terminal paint layer can highlight
+                                // every hit (not just the current one
+                                // that lives in `Term::selection`).
+                                // Empty slice when no search is active.
+                                let search_matches: Vec<alacritty_terminal::term::search::Match> =
+                                    self.search_state.as_ref()
+                                        .map(|s| s.matches.clone())
+                                        .unwrap_or_default();
                                 let result = if let Some(zpid) = zoomed {
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, cx)
                                 } else if let Some(layout) = layout_cloned {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, cx)
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, cx)
                                 } else {
                                     div().flex_1().bg(rgb(0x1d1f21)).child("No terminal").into_any_element()
                                 };
