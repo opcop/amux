@@ -5,6 +5,8 @@ mod app_bootstrap;
 #[cfg(feature = "gpui")]
 mod gpui_clipboard;
 mod crash;
+#[cfg(feature = "gpui")]
+mod drag;
 mod gpui_config;
 #[cfg(feature = "gpui")]
 mod menu;

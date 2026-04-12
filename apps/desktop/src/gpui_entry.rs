@@ -95,56 +95,12 @@ pub(crate) use crate::state::{
     ResizeDragState, SearchMode, SearchState, TemplatePickerState, ToastNotification,
 };
 
-/// Drag data for tab drag-and-drop between panes
+// Drag ghost views (`DragTab`, `DragWorkspace`) live in
+// `crate::drag`. Re-exported here so
+// `use crate::gpui_entry::DragTab` in gpui_layout_renderer.rs
+// keeps compiling unchanged.
 #[cfg(feature = "gpui")]
-#[derive(Clone)]
-pub(crate) struct DragTab {
-    pub(crate) source_pane: amux_platform::terminal::manager::PaneId,
-    pub(crate) tab_index: usize,
-    pub(crate) title: String,
-}
-
-#[cfg(feature = "gpui")]
-impl Render for DragTab {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_3()
-            .py(px(4.0))
-            .bg(rgb(0x282a2e))
-            .border_1()
-            .border_color(rgb(0x969896))
-            .rounded(px(4.0))
-            .text_xs()
-            .text_color(rgb(0xc5c8c6))
-            .shadow_md()
-            .child(self.title.clone())
-    }
-}
-
-/// Drag data for workspace reordering in sidebar
-#[cfg(feature = "gpui")]
-#[derive(Clone)]
-struct DragWorkspace {
-    name: String,
-    index: usize,
-}
-
-#[cfg(feature = "gpui")]
-impl Render for DragWorkspace {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_3()
-            .py(px(4.0))
-            .bg(rgb(0x252530))
-            .border_1()
-            .border_color(rgb(0x969896))
-            .rounded(px(4.0))
-            .text_sm()
-            .text_color(rgb(0xc5c8c6))
-            .shadow_md()
-            .child(self.name.clone())
-    }
-}
+pub(crate) use crate::drag::{DragTab, DragWorkspace};
 
 // `ContextMenuItem` lives in `crate::menu` along with the menu
 // builder and dispatch. Re-exported here so existing imports like
