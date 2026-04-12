@@ -3306,6 +3306,7 @@ impl Render for GpuiShellView {
             })
             // Search bar overlay (top-right)
             .when_some(self.search_state.clone(), |this, state| {
+                use crate::theme;
                 // Counter string: "3/17", "1/1000+", "0/0", or "err"
                 // when the regex didn't compile.
                 let counter = if state.error {
@@ -3317,16 +3318,21 @@ impl Render for GpuiShellView {
                     let suffix = if state.truncated { "+" } else { "" };
                     format!("{}/{}{}", state.current + 1, total, suffix)
                 };
-                let counter_color = if state.error || (!state.query.is_empty() && state.matches.is_empty()) {
-                    0xcc6666  // red for no-match / bad regex
+                // Red for bad regex or a non-empty query with zero
+                // matches; dim otherwise. Semantic tokens so palette
+                // edits propagate without a per-call-site diff.
+                let counter_color = if state.error
+                    || (!state.query.is_empty() && state.matches.is_empty())
+                {
+                    theme::DANGER
                 } else {
-                    0x969896  // muted grey otherwise
+                    theme::TEXT_DIM
                 };
                 let mode_label = state.mode.short_label();
                 let mode_bg = match state.mode {
-                    SearchMode::Literal => 0x3a3a4a,
-                    SearchMode::Regex => 0x4a3a3a,
-                    SearchMode::Fuzzy => 0x3a4a3a,
+                    SearchMode::Literal => theme::MODE_LITERAL_BG,
+                    SearchMode::Regex => theme::MODE_REGEX_BG,
+                    SearchMode::Fuzzy => theme::MODE_FUZZY_BG,
                 };
                 this.child(
                     div()
@@ -3336,10 +3342,10 @@ impl Render for GpuiShellView {
                         .w(px(380.0))
                         .px_3()
                         .py(px(6.0))
-                        .rounded(px(8.0))
-                        .bg(rgb(0x1d1f21))
+                        .rounded(px(theme::RADIUS_LG))
+                        .bg(rgb(theme::SURFACE))
                         .border_1()
-                        .border_color(rgb(0x45475a))
+                        .border_color(rgb(theme::BORDER))
                         .shadow_lg()
                         .flex()
                         .items_center()
@@ -3349,10 +3355,10 @@ impl Render for GpuiShellView {
                             div()
                                 .px(px(6.0))
                                 .py(px(1.0))
-                                .rounded(px(3.0))
+                                .rounded(px(theme::RADIUS_SM))
                                 .bg(rgb(mode_bg))
                                 .text_xs()
-                                .text_color(rgb(0xc5c8c6))
+                                .text_color(rgb(theme::TEXT))
                                 .child(mode_label)
                         )
                         // Query field
@@ -3361,15 +3367,15 @@ impl Render for GpuiShellView {
                                 .flex_1()
                                 .px_2()
                                 .py(px(2.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(0x11111b))
+                                .rounded(px(theme::RADIUS_SM))
+                                .bg(rgb(theme::SURFACE_DIM))
                                 .border_1()
-                                .border_color(rgb(0x282a2e))
+                                .border_color(rgb(theme::BORDER_DIM))
                                 .text_sm()
-                                .text_color(rgb(0xc5c8c6))
+                                .text_color(rgb(theme::TEXT))
                                 .min_h(px(20.0))
                                 .child(if state.query.is_empty() {
-                                    div().text_color(rgb(0x969896))
+                                    div().text_color(rgb(theme::TEXT_DIM))
                                         .child("Type to search…  Tab: cycle mode")
                                         .into_any_element()
                                 } else {
@@ -3385,7 +3391,7 @@ impl Render for GpuiShellView {
                                 .child(counter)
                         )
                         .child(
-                            div().text_xs().text_color(rgb(0x585b70)).child("Esc")
+                            div().text_xs().text_color(rgb(theme::TEXT_DIM)).child("Esc")
                         )
                 )
             })

@@ -7,6 +7,7 @@ mod crash;
 mod gpui_config;
 #[cfg(feature = "gpui")]
 mod metrics;
+mod theme;
 #[cfg(feature = "gpui")]
 mod gpui_entry;
 #[cfg(feature = "gpui")]

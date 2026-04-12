@@ -1,5 +1,7 @@
 #[cfg(feature = "gpui")]
 use gpui::{rgb, px, FontWeight, IntoElement, div, prelude::*};
+#[cfg(feature = "gpui")]
+use crate::theme;
 
 /// Summary of a single agent's status for the status bar
 #[cfg(feature = "gpui")]
@@ -106,9 +108,9 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                         div()
                             .px(px(6.0))
                             .py(px(2.0))
-                            .rounded(px(3.0))
-                            .bg(rgb(0x1a1b26))
-                            .text_color(rgb(0x89ddff))
+                            .rounded(px(theme::RADIUS_SM))
+                            .bg(rgb(theme::SURFACE_DIM))
+                            .text_color(rgb(theme::INFO))
                             .child(s.to_string())
                             .into_any_element(),
                         div().w_px().h(px(12.0)).bg(rgb(0x313244)).into_any_element(),
@@ -125,11 +127,11 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                             .items_center()
                             .px(px(6.0))
                             .py(px(2.0))
-                            .rounded(px(3.0))
-                            .bg(rgb(0x3a1e1e))
+                            .rounded(px(theme::RADIUS_SM))
+                            .bg(rgb(theme::DANGER_BG))
                             .border_1()
-                            .border_color(rgb(0xcc6666))
-                            .text_color(rgb(0xf2777a))
+                            .border_color(rgb(theme::DANGER))
+                            .text_color(rgb(theme::DANGER_BRIGHT))
                             .child(format!(
                                 "⚠ {} crash log{} — see ~/.amux/logs/crash",
                                 n,
