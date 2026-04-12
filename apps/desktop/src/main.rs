@@ -8,6 +8,8 @@ mod gpui_config;
 #[cfg(feature = "gpui")]
 mod metrics;
 #[cfg(feature = "gpui")]
+mod search;
+#[cfg(feature = "gpui")]
 mod state;
 mod theme;
 #[cfg(feature = "gpui")]
