@@ -1159,7 +1159,7 @@ pub fn render_file_picker(
                                         .child(icon.to_string())
                                         .child(path.clone())
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.open_preview_from_picker(i);
+                                            crate::preview_open::open_preview_from_picker(this, i);
                                             cx.notify();
                                         }))
                                         .into_any_element()

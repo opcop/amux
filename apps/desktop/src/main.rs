@@ -11,6 +11,8 @@ mod menu;
 #[cfg(feature = "gpui")]
 mod metrics;
 #[cfg(feature = "gpui")]
+mod preview_open;
+#[cfg(feature = "gpui")]
 mod search;
 #[cfg(feature = "gpui")]
 mod state;

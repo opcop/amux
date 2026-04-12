@@ -610,7 +610,7 @@ impl GpuiShellView {
             if let Some(prompt_line) = self.terminal_manager().active_terminal_ref()
                 .map(|t| t.cursor_line_text())
             {
-                if let Some(linux_path) = extract_cwd_from_prompt_line(&prompt_line) {
+                if let Some(linux_path) = crate::preview_open::extract_cwd_from_prompt_line(&prompt_line) {
                     if linux_path.starts_with('/') {
                         let (shell, args) = Self::default_shell();
                         let wsl_cmd = format!("wsl --cd {}", linux_path);
@@ -629,8 +629,8 @@ impl GpuiShellView {
         // sysinfo often returns the spawn-time CWD, not the live one after `cd`.
         let prompt_cwd = self.terminal_manager().active_terminal_ref()
             .map(|t| t.cursor_line_text())
-            .and_then(|line| extract_cwd_from_prompt_line(&line))
-            .map(|p| self.maybe_convert_wsl_path(&p));
+            .and_then(|line| crate::preview_open::extract_cwd_from_prompt_line(&line))
+            .map(|p| crate::preview_open::maybe_convert_wsl_path(self, &p));
         let process_cwd = self.terminal_manager().active_process_cwd();
         let saved_cwd = self.terminal_manager().active_saved_cwd();
 
@@ -885,7 +885,7 @@ impl GpuiShellView {
                 self.launch_wsl_shell();
             }
             "preview" => {
-                self.open_file_picker();
+                crate::preview_open::open_file_picker(self);
             }
             "browser" => {
                 self.open_browser("", window, cx);
@@ -1004,411 +1004,6 @@ impl GpuiShellView {
     // through `crate::menu::build_items(self)` and
     // `crate::menu::dispatch(self, label, window, cx)`.
 
-    // ─── File Preview ────────────────────────────────────────────
-
-    /// Open the file picker (Ctrl+P / right-click / amux preview)
-    pub(crate) fn open_file_picker(&mut self) {
-        let cwd = self.resolve_best_cwd();
-        self.file_picker = Some(crate::gpui_preview::FilePickerState::new(cwd));
-    }
-
-    fn open_file_picker_with_cwd(&mut self, cwd: Option<String>) {
-        let cwd = cwd.map(|p| self.maybe_convert_wsl_path(&p))
-            .filter(|p| std::path::Path::new(p).is_dir())
-            .or_else(|| self.resolve_best_cwd());
-        self.file_picker = Some(crate::gpui_preview::FilePickerState::new(cwd));
-    }
-
-    /// Resolve the best CWD using multiple strategies.
-    /// Tries: prompt parsing → process CWD → git root → GUI process CWD + git root.
-    /// This handles the WSL case where resolve_active_cwd returns the Windows
-    /// spawn directory instead of the actual WSL working directory.
-    fn resolve_best_cwd(&self) -> Option<String> {
-        // 1. Standard resolve chain (prompt → process → saved)
-        if let Some(cwd) = self.resolve_active_cwd() {
-            // Verify it looks reasonable — if it has a .git, it's likely correct
-            if std::path::Path::new(&cwd).join(".git").exists() {
-                return Some(cwd);
-            }
-            // Walk up to find git root (cwd might be a subdirectory)
-            let mut dir = std::path::PathBuf::from(&cwd);
-            for _ in 0..10 {
-                if dir.join(".git").exists() {
-                    return Some(dir.to_string_lossy().to_string());
-                }
-                if !dir.pop() { break; }
-            }
-        }
-
-        // 2. GUI process CWD — often set by the user's launch context
-        if let Ok(gui_cwd) = std::env::current_dir() {
-            if gui_cwd.join(".git").exists() {
-                return Some(gui_cwd.to_string_lossy().to_string());
-            }
-            let mut dir = gui_cwd.clone();
-            for _ in 0..10 {
-                if dir.join(".git").exists() {
-                    return Some(dir.to_string_lossy().to_string());
-                }
-                if !dir.pop() { break; }
-            }
-            // Fallback: return GUI CWD even without .git
-            return Some(gui_cwd.to_string_lossy().to_string());
-        }
-
-        self.resolve_active_cwd()
-    }
-
-    fn open_preview_file_with_cwd(&mut self, path: &str, cwd: Option<&str>) {
-        let full_path = if std::path::Path::new(path).is_absolute() {
-            self.maybe_convert_wsl_path(path)
-        } else {
-            let resolved_cwd = cwd.map(|p| self.maybe_convert_wsl_path(p))
-                .filter(|p| std::path::Path::new(p).is_dir())
-                .or_else(|| self.resolve_active_cwd());
-            resolved_cwd
-                .map(|cwd| std::path::PathBuf::from(cwd).join(path).to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string())
-        };
-        self.open_preview_file(&full_path);
-    }
-
-    /// Best-effort resolve the current working directory of the active pane.
-    /// Tries multiple sources in order:
-    /// 1. Live /proc/PID/cwd (Linux/WSL only)
-    /// 2. Parse cwd from the terminal prompt line (PowerShell: "PS C:\path>", Bash: "user@host:~/dir$")
-    /// 3. Saved spawn-time cwd from tab
-    /// 4. GUI process cwd (last resort)
-    fn resolve_active_cwd(&self) -> Option<String> {
-        // 1. Parse from terminal prompt line — most reliable, always shows live cwd
-        //    (sysinfo on Windows often returns stale spawn-time cwd)
-        if let Some(cwd) = self.extract_cwd_from_prompt() {
-            let resolved = self.maybe_convert_wsl_path(&cwd);
-            if std::path::Path::new(&resolved).is_dir() {
-                return Some(resolved);
-            }
-        }
-
-        // 2. Live process cwd (sysinfo on Windows, /proc on Linux)
-        if let Some(cwd) = self.terminal_manager().active_process_cwd() {
-            let resolved = self.maybe_convert_wsl_path(&cwd);
-            if std::path::Path::new(&resolved).is_dir() {
-                return Some(resolved);
-            }
-        }
-
-        // 3. Saved spawn-time cwd — last resort, may be stale after `cd`
-        if let Some(cwd) = self.terminal_manager().active_saved_cwd() {
-            let resolved = self.maybe_convert_wsl_path(&cwd);
-            if std::path::Path::new(&resolved).is_dir() {
-                return Some(resolved);
-            }
-        }
-
-        None
-    }
-
-    /// Convert a WSL Linux path to a Windows-accessible path.
-    /// Two cases:
-    ///   /mnt/d/repo/...  → D:\repo\...        (WSL drive mount → native Windows path)
-    ///   /home/user/...   → \\wsl$\Distro\...  (WSL-native → UNC path)
-    /// On Linux builds, this is a no-op.
-    fn maybe_convert_wsl_path(&self, path: &str) -> String {
-        #[cfg(target_os = "windows")]
-        {
-            if !path.starts_with('/') {
-                return path.to_string();
-            }
-
-            // Case 1: /mnt/X/... → X:\...  (drive mount)
-            if path.starts_with("/mnt/") && path.len() >= 6 {
-                let drive_letter = path.as_bytes()[5]; // the char after "/mnt/"
-                if drive_letter.is_ascii_alphabetic()
-                    && (path.len() == 6 || path.as_bytes()[6] == b'/')
-                {
-                    let rest = if path.len() > 6 { &path[6..] } else { "" };
-                    let drive = (drive_letter as char).to_uppercase().next().unwrap_or('C');
-                    let win_path = format!("{}:{}", drive, rest.replace('/', "\\"));
-                    return win_path;
-                }
-            }
-
-            // Case 2: /home/... or other WSL-native path → \\wsl$\Distro\...
-            let distro = self.detect_pane_wsl_distro()
-                .or_else(|| amux_platform::get_default_distro());
-            if let Some(distro) = distro {
-                return amux_platform::windows::paths::wsl_unc_path(&distro, path);
-            }
-        }
-        path.to_string()
-    }
-
-    /// Check if the active pane is running in WSL and return the distro name.
-    #[cfg(target_os = "windows")]
-    fn detect_pane_wsl_distro(&self) -> Option<String> {
-        let (shell, args) = self.terminal_manager().active_shell_cmd()?;
-        if !shell.to_lowercase().contains("wsl") {
-            return None;
-        }
-        for (i, arg) in args.iter().enumerate() {
-            if (arg == "-d" || arg == "--distribution") && i + 1 < args.len() {
-                return Some(args[i + 1].clone());
-            }
-        }
-        amux_platform::get_default_distro()
-    }
-
-    /// Extract the working directory from the terminal's current prompt line.
-    /// Supports:
-    ///   PowerShell: "PS C:\Users\foo\project> ..."  → "C:\Users\foo\project"
-    ///   Bash/Zsh:   "user@host:~/project$ ..."      → expand ~ to home
-    fn extract_cwd_from_prompt(&self) -> Option<String> {
-        let term = self.terminal_manager().active_terminal_ref()?;
-        let line = term.cursor_line_text();
-
-        // PowerShell: "PS C:\path> " or "PS D:\path>"
-        if let Some(ps_start) = line.find("PS ") {
-            let after_ps = &line[ps_start + 3..];
-            // Find the closing ">" which ends the path
-            if let Some(gt) = after_ps.find('>') {
-                let path = after_ps[..gt].trim();
-                if !path.is_empty() {
-                    return Some(path.to_string());
-                }
-            }
-        }
-
-        // Bash/Zsh: "user@host:~/dir$ " or "user@host:/path$ "
-        if let Some(colon) = line.find(':') {
-            // Check for @ before colon (indicates user@host:path pattern)
-            if line[..colon].contains('@') {
-                let after_colon = &line[colon + 1..];
-                if let Some(dollar) = after_colon.find("$ ") {
-                    let path = after_colon[..dollar].trim();
-                    if !path.is_empty() {
-                        // Expand ~ to home directory
-                        let expanded = if path.starts_with('~') {
-                            if let Some(home) = std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()) {
-                                path.replacen('~', &home, 1)
-                            } else {
-                                path.to_string()
-                            }
-                        } else {
-                            path.to_string()
-                        };
-                        return Some(expanded);
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Open a file for preview from the picker
-    pub(crate) fn open_preview_from_picker(&mut self, index: usize) {
-        let (path, base_dir) = if let Some(ref picker) = self.file_picker {
-            (picker.matches.get(index).cloned(), picker.base_dir.clone())
-        } else {
-            (None, None)
-        };
-        self.file_picker = None;
-        if let Some(path) = path {
-            // Use the picker's base_dir to resolve the relative path —
-            // this is the cwd that was captured when the picker opened,
-            // guaranteed to be consistent with the file list.
-            let full_path = if std::path::Path::new(&path).is_absolute() {
-                path
-            } else if let Some(ref base) = base_dir {
-                std::path::PathBuf::from(base).join(&path).to_string_lossy().to_string()
-            } else {
-                path
-            };
-            self.open_preview_file(&full_path);
-        }
-    }
-
-    /// Try to preview a file path at the given terminal cell position.
-    /// Extracts the path-like text around (col, row), checks if file exists.
-    /// Returns true if a preview was opened.
-    pub(crate) fn try_preview_path_at(&mut self, col: usize, row: usize) -> bool {
-        let path = match self.extract_path_at_cursor(col, row) {
-            Some(p) => p,
-            None => return false,
-        };
-
-        // Check if file exists. Try multiple base directories:
-        // 1. Absolute path (already resolved)
-        // 2. Pane CWD (from prompt parsing or process info)
-        // 3. Git repo root (Claude outputs paths relative to repo root)
-        // 4. AMUX_WORKSPACE env or saved workspace path
-        let converted = self.maybe_convert_wsl_path(&path);
-
-        let mut candidates: Vec<String> = Vec::new();
-
-        // Absolute path
-        if std::path::Path::new(&converted).is_absolute() {
-            candidates.push(converted.clone());
-        }
-
-        // Pane CWD
-        if let Some(cwd) = self.resolve_active_cwd() {
-            candidates.push(std::path::PathBuf::from(&cwd).join(&path).to_string_lossy().to_string());
-        }
-
-        // Git repo root detection: walk up from known paths to find .git
-        if let Some(cwd) = self.resolve_active_cwd() {
-            let mut dir = std::path::PathBuf::from(&cwd);
-            for _ in 0..10 {
-                if dir.join(".git").exists() {
-                    candidates.push(dir.join(&path).to_string_lossy().to_string());
-                    break;
-                }
-                if !dir.pop() { break; }
-            }
-        }
-
-        // Try GUI process CWD as fallback
-        if let Ok(gui_cwd) = std::env::current_dir() {
-            candidates.push(gui_cwd.join(&path).to_string_lossy().to_string());
-            // Also try git root from GUI CWD
-            let mut dir = gui_cwd;
-            for _ in 0..10 {
-                if dir.join(".git").exists() {
-                    candidates.push(dir.join(&path).to_string_lossy().to_string());
-                    break;
-                }
-                if !dir.pop() { break; }
-            }
-        }
-
-        let resolved = match candidates.iter().find(|p| std::path::Path::new(p).exists()) {
-            Some(p) => p.clone(),
-            None => return false,
-        };
-
-        // Check if it's a previewable file type
-        let ext = std::path::Path::new(&resolved).extension().and_then(|e| e.to_str());
-        let is_previewable = matches!(
-            ext,
-            Some("md" | "markdown" | "txt" | "rs" | "js" | "ts" | "py" | "toml"
-                | "json" | "yaml" | "yml" | "sh" | "bash" | "css" | "html"
-                | "tsx" | "jsx" | "go" | "c" | "cpp" | "h" | "hpp" | "java"
-                | "rb" | "php" | "swift" | "kt" | "lua" | "sql" | "xml"
-                | "ini" | "cfg" | "conf" | "log" | "vim")
-        );
-        if !is_previewable { return false; }
-
-        self.open_preview_file(&resolved);
-        true
-    }
-
-    /// Extract a file-path-like string from the terminal grid at the given position.
-    /// Scans left and right from (col, row) collecting path characters.
-    fn extract_path_at_cursor(&self, col: usize, row: usize) -> Option<String> {
-        let term = self.terminal_manager().active_terminal_ref()?;
-        term.with_term(|t| {
-            use alacritty_terminal::grid::Dimensions;
-            use alacritty_terminal::index::{Line, Column};
-
-            let grid = t.grid();
-            let cols = grid.columns();
-            let rows = grid.screen_lines();
-            if row >= rows || col >= cols { return None; }
-
-            let line = Line(row as i32);
-
-            // Check if the character at cursor is a path-like character
-            let ch = grid[line][Column(col)].c;
-            if ch == ' ' || ch == '\0' { return None; }
-
-            // Path characters: ASCII alphanumeric + path separators.
-            // Use is_ascii_alphanumeric (not is_alphanumeric) so CJK characters
-            // don't get included — "输出到docs/file.rs" should extract "docs/file.rs".
-            let is_path_char = |c: char| -> bool {
-                c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '.' | '-' | '_' | ':' | '~' | '(' | ')' | '`')
-            };
-
-            // Scan left
-            let mut start = col;
-            while start > 0 {
-                let c = grid[line][Column(start - 1)].c;
-                if !is_path_char(c) { break; }
-                start -= 1;
-            }
-
-            // Scan right
-            let mut end = col;
-            while end + 1 < cols {
-                let c = grid[line][Column(end + 1)].c;
-                if !is_path_char(c) { break; }
-                end += 1;
-            }
-
-            // Collect the text
-            let mut path = String::new();
-            for c in start..=end {
-                let ch = grid[line][Column(c)].c;
-                if ch != '\0' {
-                    path.push(ch);
-                }
-            }
-
-            let path = path.trim().to_string();
-            if path.len() < 3 { return None; } // too short to be a useful path
-
-            // Strip trailing `:line` or `:line:col` (e.g., "src/auth.rs:42:5")
-            let path = if let Some(idx) = path.rfind(':') {
-                let after = &path[idx + 1..];
-                if after.chars().all(|c| c.is_ascii_digit()) {
-                    let base = &path[..idx];
-                    // Handle :line:col pattern
-                    if let Some(idx2) = base.rfind(':') {
-                        let after2 = &base[idx2 + 1..];
-                        if after2.chars().all(|c| c.is_ascii_digit()) {
-                            base[..idx2].to_string()
-                        } else {
-                            base.to_string()
-                        }
-                    } else {
-                        base.to_string()
-                    }
-                } else {
-                    path
-                }
-            } else {
-                path
-            };
-
-            // Strip surrounding backticks (Claude often wraps paths in ``)
-            let path = path.trim_matches('`').to_string();
-            if path.len() < 3 { return None; }
-
-            Some(path)
-        })
-    }
-
-    /// Open a file for preview by path
-    pub(crate) fn open_preview_file(&mut self, path: &str) {
-        // Resolve relative paths against active pane's CWD
-        let full_path = if std::path::Path::new(path).is_absolute() {
-            path.to_string()
-        } else {
-            self.resolve_active_cwd()
-                .map(|cwd| std::path::PathBuf::from(cwd).join(path).to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string())
-        };
-        // Load preview and open as a tab in the active pane
-        if let Some(state) = crate::gpui_preview::PreviewState::load(&full_path) {
-            let active_pid = self.terminal_manager().active_pane_id().cloned();
-            if let Some(ref pid) = active_pid {
-                if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
-                    pane.add_preview_tab(&full_path);
-                }
-            }
-            self.preview_tabs.insert(full_path, state);
-        }
-    }
 
     // ─── Browser Pane ────────────────────────────────────────────
 
@@ -1575,7 +1170,7 @@ impl GpuiShellView {
         // Extract CWD from the prompt portion of the SAME line we just read.
         // This is the most reliable source — the prompt always shows the path,
         // and we read it before any state changes (Ctrl+C, etc.).
-        let prompt_cwd = extract_cwd_from_prompt_line(&last_line);
+        let prompt_cwd = crate::preview_open::extract_cwd_from_prompt_line(&last_line);
 
         let parts: Vec<&str> = cmd.splitn(3, ' ').collect();
         match parts.get(1).map(|s| *s) {
@@ -1583,12 +1178,12 @@ impl GpuiShellView {
                 if let Some(path) = parts.get(2) {
                     let path = path.trim();
                     if !path.is_empty() {
-                        self.open_preview_file_with_cwd(path, prompt_cwd.as_deref());
+                        crate::preview_open::open_preview_file_with_cwd(self, path, prompt_cwd.as_deref());
                         return Some(true);
                     }
                 }
                 // No file specified — open file picker
-                self.open_file_picker_with_cwd(prompt_cwd);
+                crate::preview_open::open_file_picker_with_cwd(self, prompt_cwd);
                 Some(true)
             }
             Some("browser") | Some("web") => {
@@ -1829,77 +1424,6 @@ fn extract_command_after_prompt(line: &str) -> &str {
     line
 }
 
-/// Extract the working directory from a terminal prompt line.
-/// This is a pure function that operates on a string — no terminal access needed.
-///
-/// Supports:
-///   PowerShell:  "PS C:\Users\foo\project> amux preview"  → "C:\Users\foo\project"
-///   Bash/Zsh:    "user@host:~/project$ amux preview"      → "/home/user/project"
-///   Zsh:         "~/project% amux preview"                 → "/home/user/project"
-#[cfg(feature = "gpui")]
-fn extract_cwd_from_prompt_line(line: &str) -> Option<String> {
-    // PowerShell: "PS C:\path> ..." or "PS D:\path>"
-    if let Some(ps_start) = line.find("PS ") {
-        let after_ps = &line[ps_start + 3..];
-        if let Some(gt) = after_ps.find('>') {
-            let path = after_ps[..gt].trim();
-            if !path.is_empty() {
-                return Some(path.to_string());
-            }
-        }
-    }
-
-    // Bash/Zsh: "user@host:~/dir$ cmd" or "user@host:/path$" (no command typed)
-    if let Some(colon) = line.find(':') {
-        if line[..colon].contains('@') {
-            let after_colon = &line[colon + 1..];
-            // Find $ or % that ends the path — with or without trailing space
-            let end = after_colon.find("$ ")
-                .or_else(|| after_colon.find("% "))
-                .or_else(|| {
-                    // No space after $ — prompt with nothing typed, or $ at end of line
-                    let trimmed = after_colon.trim_end();
-                    if trimmed.ends_with('$') {
-                        Some(trimmed.len() - 1)
-                    } else if trimmed.ends_with('%') {
-                        Some(trimmed.len() - 1)
-                    } else {
-                        None
-                    }
-                });
-            if let Some(pos) = end {
-                let path = after_colon[..pos].trim();
-                if !path.is_empty() {
-                    return Some(expand_tilde(path));
-                }
-            }
-        }
-    }
-
-    // Simple zsh: "~/project% cmd" or "/path%" (no command)
-    if let Some(pct) = line.find('%') {
-        if pct < 120 {
-            let path = line[..pct].trim();
-            if !path.is_empty() && (path.starts_with('/') || path.starts_with('~') || path.starts_with('\\')) {
-                return Some(expand_tilde(path));
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(feature = "gpui")]
-fn expand_tilde(path: &str) -> String {
-    if path.starts_with('~') {
-        if let Some(home) = std::env::var("HOME").ok()
-            .or_else(|| std::env::var("USERPROFILE").ok())
-        {
-            return path.replacen('~', &home, 1);
-        }
-    }
-    path.to_string()
-}
 
 #[cfg(feature = "gpui")]
 impl Render for GpuiShellView {
@@ -2099,7 +1623,7 @@ impl Render for GpuiShellView {
                 // Ctrl+Click: try to preview file path under cursor.
                 // Always takes priority, even when mouse mode is on (e.g. Claude Code).
                 if event.modifiers.control {
-                    if this.try_preview_path_at(col, row) {
+                    if crate::preview_open::try_preview_path_at(this, col, row) {
                         cx.notify();
                         return;
                     }

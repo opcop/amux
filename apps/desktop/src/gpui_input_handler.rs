@@ -442,7 +442,7 @@ impl GpuiShellView {
                 }
                 "enter" => {
                     let idx = self.file_picker.as_ref().map(|p| p.selected_index).unwrap_or(0);
-                    self.open_preview_from_picker(idx);
+                    crate::preview_open::open_preview_from_picker(self, idx);
                 }
                 "up" | "arrowup" => {
                     if let Some(ref mut p) = self.file_picker {
