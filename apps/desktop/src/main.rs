@@ -1,6 +1,7 @@
 // Hide the console window on Windows when running as a GUI app
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_bootstrap;
 #[cfg(feature = "gpui")]
 mod gpui_clipboard;
 mod crash;
@@ -105,7 +106,7 @@ fn main() {
     #[cfg(feature = "gpui")]
     {
         let config = gpui_config::AmuxConfig::load();
-        gpui_entry::run(&app, config);
+        app_bootstrap::run(&app, config);
     }
 
     #[cfg(not(feature = "gpui"))]
