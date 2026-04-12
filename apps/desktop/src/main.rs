@@ -60,7 +60,17 @@ fn main() {
         amux_ui::DesktopApp::with_platform("AMUX", amux_platform::current_host_platform())
     };
 
+    // `startup` is only read by the debug banner block below.
+    // In release we still need the call for its side effects
+    // (restore session, open explicit workspace) but the return
+    // value goes unused — split the binding so release doesn't
+    // get an `unused variable` warning.
+    #[cfg(debug_assertions)]
     let startup = app.startup(amux_ui::StartupOptions {
+        workspace: parsed.workspace.clone(),
+    });
+    #[cfg(not(debug_assertions))]
+    let _ = app.startup(amux_ui::StartupOptions {
         workspace: parsed.workspace.clone(),
     });
 

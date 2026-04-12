@@ -106,6 +106,20 @@ pub(crate) fn dispatch(
             close_palette(view);
             view.prompt_open_local_workspace(cx);
         }
+        "workspace edit-startup" => {
+            close_palette(view);
+            view.edit_startup_file();
+        }
+
+        // ─── Agent ────────────────────────────────────────────────
+        // Note: "agent <id>" (e.g. "agent claude") is handled by
+        // parse_command as a real provider-launch. We use
+        // "launch agent" here so the generic picker never
+        // collides with the `["agent", <id>]` parse pattern.
+        "launch agent" => {
+            close_palette(view);
+            view.open_agent_picker();
+        }
 
         // ─── Pane ─────────────────────────────────────────────────
         "pane new-tab" => {

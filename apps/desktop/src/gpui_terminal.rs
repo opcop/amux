@@ -13,10 +13,6 @@ use gpui::{
 /// Left padding (in pixels) so terminal content doesn't hug the pane edge.
 /// Applied in both rendering and mouse hit-testing.
 pub const TERMINAL_LEFT_PADDING: f32 = 4.0;
-/// Bottom padding between the last terminal row and the status bar.
-/// Without this, the last line of output sits flush against the
-/// status bar divider and feels cramped compared to macOS Terminal.app.
-pub const TERMINAL_BOTTOM_PADDING: f32 = 14.0;
 
 // ─── Glyph Cache ───────────────────────────────────────────────
 
@@ -386,8 +382,10 @@ struct RenderData {
     scroll_info: (usize, usize, usize),
 }
 
-/// Reusable render buffer pool — avoids per-frame Vec allocations.
-/// Each terminal keeps its own buffer sized to its last dimensions.
+// Reusable render buffer pool — avoids per-frame Vec allocations.
+// Each terminal keeps its own buffer sized to its last dimensions.
+// (Block comment, not doc comment — rustdoc can't attach docs to
+// macro invocations.)
 #[cfg(feature = "gpui")]
 thread_local! {
     static RENDER_BUF: std::cell::RefCell<Vec<Vec<RenderCell>>> =

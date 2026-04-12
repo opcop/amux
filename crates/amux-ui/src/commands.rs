@@ -422,6 +422,13 @@ pub fn palette_command_catalog() -> Vec<PaletteCommand> {
             Some(primary_shift!("N")),
         ),
         PaletteCommand::new(
+            "workspace edit-startup",
+            "Edit Workspace Startup Config",
+            "Open the .startup file that auto-runs commands when this workspace opens",
+            PaletteCategory::Workspace,
+            None,
+        ),
+        PaletteCommand::new(
             "workspace open D:/repo/amux",
             "Open Workspace by Path",
             "Open a directory as workspace by typing its path",
@@ -664,6 +671,13 @@ pub fn palette_command_catalog() -> Vec<PaletteCommand> {
             None,
         ),
         // Agent
+        PaletteCommand::new(
+            "launch agent",
+            "Launch Agent…",
+            "Open the agent launcher picker for installed AI tools",
+            PaletteCategory::Agent,
+            None,
+        ),
         PaletteCommand::new(
             "agent codex",
             "Launch Codex",
