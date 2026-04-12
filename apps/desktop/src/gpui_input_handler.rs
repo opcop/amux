@@ -52,6 +52,10 @@ impl gpui::EntityInputHandler for GpuiShellView {
         _window: &mut Window, cx: &mut Context<Self>,
     ) {
         if text.is_empty() { return; }
+        // Start the input-latency stopwatch. Paired with
+        // `metrics::consume_input_latency()` at the top of
+        // `Render::render`.
+        crate::metrics::mark_input();
 
         // If browser URL Input is focused, don't intercept text
         if let Some((_, entry)) = self.active_browser_entry() {
@@ -172,6 +176,10 @@ impl GpuiShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Start the input-latency stopwatch for keys handled here
+        // (shortcuts + special keys). Text input from IME composition
+        // is timed in `replace_text_in_range` instead.
+        crate::metrics::mark_input();
         // IME composition guard: when the user is in the middle of
         // composing a CJK character (Chinese pinyin, Japanese romaji,
         // Korean hangul), do NOT forward keystrokes to the PTY.

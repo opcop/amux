@@ -194,6 +194,8 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
     use amux_ui::GpuiRenderer;
     use smol::Timer;
 
+    crate::metrics::startup_phase("bootstrap_run_entry");
+
     // Required for WebView2 to render correctly inside GPUI's DirectComposition window.
     // SAFETY: called once at startup before any threads are spawned.
     #[cfg(target_os = "windows")]
@@ -203,6 +205,7 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
     let model = app.render_with(&GpuiRenderer);
 
     application().run(move |cx: &mut App| {
+        crate::metrics::startup_phase("gpui_app_run");
         // Initialize gpui-component (registers Input keybindings, theme, etc.)
         gpui_component::init(cx);
         // Set dark theme to match Amux's Tomorrow Night palette
@@ -319,6 +322,7 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
             window_min_size: Some(gpui::Size { width: px(480.0), height: px(320.0) }),
             ..Default::default()
         };
+        crate::metrics::startup_phase("window_open_requested");
         let window_result = cx.open_window(window_opts, |window, cx| {
             let view = cx.new(|cx| {
                 // Start a ~60fps polling timer to drain PTY output into the emulator

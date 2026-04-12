@@ -1390,6 +1390,23 @@ impl Render for GpuiShellView {
         // AMUX_DEBUG_STATS=1.
         let _frame_guard = crate::metrics::FrameGuard::start();
 
+        // Input latency: if a keystroke arrived since the last
+        // frame, compute its latency so the HUD can display it.
+        crate::metrics::consume_input_latency();
+
+        // First-frame startup instrumentation: record the phase
+        // and (if AMUX_BENCH_STARTUP=1) dump the full phase
+        // report to stderr. Both are behind a `Once` so calling
+        // them every frame is a no-op after the first.
+        {
+            use std::sync::Once;
+            static FIRST_RENDER: Once = Once::new();
+            FIRST_RENDER.call_once(|| {
+                crate::metrics::startup_phase("first_render");
+                crate::metrics::dump_startup_report();
+            });
+        }
+
         // Focus management.
         // When the browser is open, trust GPUI's own focus system:
         // - Input's track_focus + prevent_default handles URL bar focus correctly

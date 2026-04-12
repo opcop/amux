@@ -10,7 +10,6 @@ mod drag;
 mod gpui_config;
 #[cfg(feature = "gpui")]
 mod menu;
-#[cfg(feature = "gpui")]
 mod metrics;
 #[cfg(feature = "gpui")]
 mod preview_open;
@@ -42,9 +41,11 @@ mod gpui_browser;
 mod text_entry;
 
 fn main() {
+    metrics::startup_phase("main_entry");
     // Install panic hook first so any subsequent panic — including
     // during startup — lands in ~/.amux/logs/crash for post-mortem.
     crash::install(crash::crash_log_dir());
+    metrics::startup_phase("crash_hook_installed");
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let parsed = parse_cli(&raw_args);
@@ -109,7 +110,9 @@ fn main() {
 
     #[cfg(feature = "gpui")]
     {
+        metrics::startup_phase("cli_parsed");
         let config = gpui_config::AmuxConfig::load();
+        metrics::startup_phase("config_loaded");
         app_bootstrap::run(&app, config);
     }
 
