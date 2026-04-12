@@ -356,6 +356,19 @@ pub fn palette_filter_help() -> &'static [&'static str] {
 }
 
 pub fn palette_command_catalog() -> Vec<PaletteCommand> {
+    // Per-platform shortcut string helper. macOS shows ⌘ and uses
+    // it as the primary modifier; Windows/Linux use Ctrl. Kept
+    // as string literals rather than pulling in a key-formatting
+    // crate — the palette is a text label, not a key binding.
+    #[cfg(target_os = "macos")]
+    macro_rules! primary { ($k:literal) => { concat!("⌘", $k) }; }
+    #[cfg(not(target_os = "macos"))]
+    macro_rules! primary { ($k:literal) => { concat!("Ctrl+", $k) }; }
+    #[cfg(target_os = "macos")]
+    macro_rules! primary_shift { ($k:literal) => { concat!("⌘⇧", $k) }; }
+    #[cfg(not(target_os = "macos"))]
+    macro_rules! primary_shift { ($k:literal) => { concat!("Ctrl+Shift+", $k) }; }
+
     vec![
         // General
         PaletteCommand::new(
@@ -370,34 +383,48 @@ pub fn palette_command_catalog() -> Vec<PaletteCommand> {
             "Save Session",
             "Persist current session to disk",
             PaletteCategory::General,
-            Some("Ctrl+S"),
+            None,
         ),
         PaletteCommand::new(
             "palette",
             "Toggle Palette",
             "Open or close command palette",
             PaletteCategory::General,
-            Some("Ctrl+Shift+P"),
-        ),
-        PaletteCommand::new(
-            "settings",
-            "Open Settings",
-            "Open settings panel",
-            PaletteCategory::General,
-            Some("Ctrl+,"),
+            Some(primary_shift!("P")),
         ),
         PaletteCommand::new(
             "browser",
             "Open Browser",
             "Open an embedded browser tab",
             PaletteCategory::General,
-            Some("Ctrl+Shift+B"),
+            Some(primary_shift!("B")),
+        ),
+        PaletteCommand::new(
+            "find",
+            "Find in Terminal",
+            "Search scrollback with literal, regex, or fuzzy mode",
+            PaletteCategory::General,
+            Some(primary_shift!("S")),
+        ),
+        PaletteCommand::new(
+            "quit",
+            "Quit Amux",
+            "Close the application",
+            PaletteCategory::General,
+            Some(primary!("Q")),
         ),
         // Workspace
         PaletteCommand::new(
+            "workspace new",
+            "New Workspace",
+            "Open a folder as a new workspace (native folder picker)",
+            PaletteCategory::Workspace,
+            Some(primary_shift!("N")),
+        ),
+        PaletteCommand::new(
             "workspace open D:/repo/amux",
-            "Open Workspace",
-            "Open a directory as workspace",
+            "Open Workspace by Path",
+            "Open a directory as workspace by typing its path",
             PaletteCategory::Workspace,
             None,
         ),
@@ -428,28 +455,63 @@ pub fn palette_command_catalog() -> Vec<PaletteCommand> {
             "Split Right",
             "Split current pane horizontally",
             PaletteCategory::Pane,
-            Some("Ctrl+\\"),
+            Some(primary_shift!("\\")),
         ),
         PaletteCommand::new(
             "pane split-down",
             "Split Down",
             "Split current pane vertically",
             PaletteCategory::Pane,
-            Some("Ctrl+Shift+\\"),
+            Some(primary_shift!("D")),
+        ),
+        PaletteCommand::new(
+            "pane new-tab",
+            "New Tab",
+            "Add a new terminal tab to the active pane",
+            PaletteCategory::Pane,
+            Some(primary_shift!("T")),
+        ),
+        PaletteCommand::new(
+            "pane close",
+            "Close Pane",
+            "Close the active pane (or its last tab)",
+            PaletteCategory::Pane,
+            Some(primary_shift!("W")),
+        ),
+        PaletteCommand::new(
+            "pane zoom",
+            "Toggle Zoom",
+            "Maximize the active pane to full content area",
+            PaletteCategory::Pane,
+            Some(primary_shift!("F")),
+        ),
+        PaletteCommand::new(
+            "pane equalize",
+            "Equalize Splits",
+            "Reset all split ratios to equal size",
+            PaletteCategory::Pane,
+            Some(primary_shift!("E")),
+        ),
+        PaletteCommand::new(
+            "pane send",
+            "Send Selection to Pane",
+            "Open the pane picker to route selected text elsewhere",
+            PaletteCategory::Pane,
+            Some(primary_shift!("Enter")),
         ),
         PaletteCommand::new(
             "pane resize-left",
             "Resize Left",
             "Shrink split ratio",
             PaletteCategory::Pane,
-            None,
+            Some(primary_shift!("Left")),
         ),
         PaletteCommand::new(
             "pane resize-right",
             "Resize Right",
             "Grow split ratio",
             PaletteCategory::Pane,
-            None,
+            Some(primary_shift!("Right")),
         ),
         PaletteCommand::new(
             "pane resize-reset",
@@ -464,28 +526,28 @@ pub fn palette_command_catalog() -> Vec<PaletteCommand> {
             "Next Workspace",
             "Switch to next workspace",
             PaletteCategory::Navigation,
-            Some("Ctrl+Tab"),
+            None,
         ),
         PaletteCommand::new(
             "switch workspace prev",
             "Previous Workspace",
             "Switch to previous workspace",
             PaletteCategory::Navigation,
-            Some("Ctrl+Shift+Tab"),
+            None,
         ),
         PaletteCommand::new(
             "switch pane next",
             "Next Pane",
             "Focus next pane",
             PaletteCategory::Navigation,
-            Some("Ctrl+]"),
+            Some(primary!("Right")),
         ),
         PaletteCommand::new(
             "switch pane prev",
             "Previous Pane",
             "Focus previous pane",
             PaletteCategory::Navigation,
-            Some("Ctrl+["),
+            Some(primary!("Left")),
         ),
         PaletteCommand::new(
             "switch tab next",
@@ -499,21 +561,71 @@ pub fn palette_command_catalog() -> Vec<PaletteCommand> {
             "Previous Tab",
             "Switch to previous tab in pane",
             PaletteCategory::Navigation,
-            Some("Ctrl+PageUp"),
+            Some(primary!("PageUp")),
+        ),
+        PaletteCommand::new(
+            "switch tab next",
+            "Next Tab",
+            "Switch to next tab in pane",
+            PaletteCategory::Navigation,
+            Some(primary!("PageDown")),
         ),
         PaletteCommand::new(
             "switch workspace 1",
             "Workspace 1",
             "Switch to workspace 1",
             PaletteCategory::Navigation,
-            Some("Ctrl+1"),
+            Some(primary!("1")),
         ),
         PaletteCommand::new(
             "switch workspace 2",
             "Workspace 2",
             "Switch to workspace 2",
             PaletteCategory::Navigation,
-            Some("Ctrl+2"),
+            Some(primary!("2")),
+        ),
+        // View
+        PaletteCommand::new(
+            "sidebar toggle",
+            "Toggle Sidebar",
+            "Collapse or expand the workspace sidebar",
+            PaletteCategory::General,
+            Some(primary_shift!("M")),
+        ),
+        PaletteCommand::new(
+            "sidebar mode",
+            "Switch Sidebar Mode",
+            "Flip between Workspaces list and Agents list",
+            PaletteCategory::General,
+            Some(primary_shift!("A")),
+        ),
+        PaletteCommand::new(
+            "scrollback clear",
+            "Clear Scrollback",
+            "Erase the current terminal's scrollback history",
+            PaletteCategory::General,
+            Some(primary!("K")),
+        ),
+        PaletteCommand::new(
+            "font increase",
+            "Font: Increase",
+            "Make terminal text one size larger",
+            PaletteCategory::General,
+            Some(primary!("+")),
+        ),
+        PaletteCommand::new(
+            "font decrease",
+            "Font: Decrease",
+            "Make terminal text one size smaller",
+            PaletteCategory::General,
+            Some(primary!("-")),
+        ),
+        PaletteCommand::new(
+            "font reset",
+            "Font: Reset",
+            "Restore the default terminal font size",
+            PaletteCategory::General,
+            Some(primary!("0")),
         ),
         // Layout Templates
         PaletteCommand::new(

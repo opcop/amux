@@ -401,22 +401,16 @@ impl GpuiShellView {
                     return;
                 }
                 "enter" => {
-                    // Intercept layout commands — they need gpui-layer side effects
-                    let cmd = self.app.selected_palette_command_str();
-                    if let Some(ref c) = cmd {
-                        if c.starts_with("layout template ") {
-                            let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
-                            self.open_template_picker();
-                            self.refresh_model();
-                            cx.notify();
-                            return;
-                        }
-                        if c == "layout save-as-template" {
-                            let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
-                            let ws_name = self.model.active_workspace_name
-                                .clone().unwrap_or_else(|| self.active_workspace_id.clone());
-                            self.save_current_as_template(&ws_name);
-                            self.refresh_model();
+                    // First try the gpui-layer dispatch. Handlers
+                    // for actions that can't round-trip through
+                    // amux_core::Command (e.g. open the template
+                    // picker, start in-terminal search, toggle
+                    // zoom) live in `crate::palette_dispatch`.
+                    // Returns true when handled — in that case we
+                    // must NOT also call execute_selected_palette
+                    // _command or the action would fire twice.
+                    if let Some(cmd) = self.app.selected_palette_command_str() {
+                        if crate::palette_dispatch::dispatch(self, &cmd, window, cx) {
                             cx.notify();
                             return;
                         }

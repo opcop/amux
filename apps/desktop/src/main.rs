@@ -12,6 +12,8 @@ mod gpui_config;
 mod menu;
 mod metrics;
 #[cfg(feature = "gpui")]
+mod palette_dispatch;
+#[cfg(feature = "gpui")]
 mod preview_open;
 #[cfg(feature = "gpui")]
 mod search;
