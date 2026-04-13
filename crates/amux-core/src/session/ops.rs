@@ -153,6 +153,12 @@ fn build_workspace(id: WorkspaceId, name: String, target: WorkspaceTarget) -> Wo
         env_profile_id: None,
         default_agent_provider_id: None,
         recent_files: Vec::new(),
+        // New workspaces go into the default / ungrouped bucket.
+        // Phase 3 of the group rollout will add UI / commands to
+        // move workspaces between groups; until then, the sidebar
+        // renders this group without a header so the layout is
+        // indistinguishable from the pre-group one.
+        group_id: crate::WorkspaceGroupId::new(crate::DEFAULT_WORKSPACE_GROUP_ID),
     }
 }
 
@@ -258,6 +264,7 @@ mod tests {
         Command, PreviewKind, PreviewSurfaceState, SplitAxis, SurfaceId, SurfaceState,
         WorkspaceId,
     };
+    use super::build_workspace;
 
     use super::{SessionOpError, SessionState, WorkspaceTarget};
 
@@ -398,6 +405,81 @@ mod tests {
             .expect_err("should fail without workspace");
 
         assert_eq!(err, SessionOpError::NoActiveWorkspace);
+    }
+
+    #[test]
+    fn default_session_has_default_group() {
+        // Freshly-constructed sessions must always have at least
+        // the default group present, so the rest of the code can
+        // assume `groups` is non-empty without null-checking.
+        let session = SessionState::default();
+        assert!(!session.groups.is_empty(), "default session must seed the default group");
+        assert_eq!(session.groups[0].id.0, crate::DEFAULT_WORKSPACE_GROUP_ID);
+        assert_eq!(session.groups[0].name, "", "default group name must be empty");
+    }
+
+    #[test]
+    fn new_workspace_lands_in_default_group() {
+        // Every workspace created via `OpenWorkspace` gets the
+        // default group id — the sidebar picks members by group_id,
+        // so a missing assignment would make new workspaces invisible
+        // under the new group-aware rendering.
+        let mut session = SessionState::default();
+        session
+            .apply(Command::OpenWorkspace(WorkspaceTarget::LocalPath {
+                path: PathBuf::from("/tmp/project"),
+            }))
+            .expect("open");
+        assert_eq!(session.workspaces.len(), 1);
+        assert_eq!(
+            session.workspaces[0].group_id.0,
+            crate::DEFAULT_WORKSPACE_GROUP_ID
+        );
+    }
+
+    #[test]
+    fn migrate_groups_is_idempotent() {
+        // Running migration twice must be a no-op. The session
+        // loader calls it on every `restore_session`, so a non-
+        // idempotent migration would keep growing the groups list.
+        let mut session = SessionState::default();
+        session
+            .apply(Command::OpenWorkspace(WorkspaceTarget::LocalPath {
+                path: PathBuf::from("/tmp/a"),
+            }))
+            .expect("open");
+        session.migrate_groups();
+        let first = session.clone();
+        session.migrate_groups();
+        assert_eq!(session, first);
+    }
+
+    #[test]
+    fn migrate_groups_rehomes_orphan_workspaces() {
+        // Simulate loading a pre-group session by hand: empty
+        // `groups`, and a workspace whose `group_id` points at a
+        // group that doesn't exist. Migration must put the default
+        // group back and re-home the orphan under it.
+        let mut session = SessionState::default();
+        session.groups.clear();
+        session.workspaces.push(build_workspace(
+            WorkspaceId::new("workspace-1"),
+            "legacy".into(),
+            WorkspaceTarget::LocalPath { path: PathBuf::from("/tmp/legacy") },
+        ));
+        // Point at a group that doesn't exist to simulate an orphan.
+        session.workspaces[0].group_id =
+            crate::WorkspaceGroupId::new("group-ghost");
+
+        session.migrate_groups();
+
+        assert_eq!(session.groups.len(), 1);
+        assert_eq!(session.groups[0].id.0, crate::DEFAULT_WORKSPACE_GROUP_ID);
+        assert_eq!(
+            session.workspaces[0].group_id.0,
+            crate::DEFAULT_WORKSPACE_GROUP_ID,
+            "orphan workspace must be re-homed into the default group"
+        );
     }
 
     #[test]

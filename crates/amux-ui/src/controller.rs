@@ -1480,6 +1480,11 @@ impl AppController {
         state.session = self.session_store.load()?;
         normalize_session_tabs(&mut state.session);
         heal_duplicate_workspace_ids(&mut state.session);
+        // Migrate the new group layer onto sessions that predate it.
+        // Must run AFTER `heal_duplicate_workspace_ids` so the id
+        // rewrites have already settled before we look at group
+        // membership.
+        state.session.migrate_groups();
         state.dirty = false;
         state.save_status = crate::SaveStatus::Saved("just now".to_string());
         state.push_activity("session: loaded from store");

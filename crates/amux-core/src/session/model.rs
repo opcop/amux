@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{WorkspaceId, WorkspaceState};
+use crate::{WorkspaceGroup, WorkspaceGroupId, WorkspaceId, WorkspaceState, DEFAULT_WORKSPACE_GROUP_ID};
 
 /// Represents a recent workspace entry with metadata
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -84,6 +84,18 @@ pub struct SessionState {
     pub recent_workspaces: Vec<RecentWorkspace>,
     pub ui_preferences: UiPreferences,
     pub last_saved: Option<u64>, // Unix timestamp
+    /// Organizational containers above the workspace list. Empty
+    /// on old sessions loaded from disk — [`SessionState::migrate`]
+    /// fills in the default group and re-homes any ungrouped
+    /// workspace under it so the rest of the code never has to
+    /// special-case "no groups yet".
+    #[serde(default)]
+    pub groups: Vec<WorkspaceGroup>,
+    /// Which group the sidebar should scroll to on launch. `None`
+    /// means "whichever group the active workspace belongs to", or
+    /// the default group if no active workspace.
+    #[serde(default)]
+    pub active_group_id: Option<WorkspaceGroupId>,
 }
 
 impl Default for SessionState {
@@ -95,6 +107,46 @@ impl Default for SessionState {
             recent_workspaces: Vec::new(),
             ui_preferences: UiPreferences::default(),
             last_saved: None,
+            groups: vec![WorkspaceGroup::default_group()],
+            active_group_id: None,
+        }
+    }
+}
+
+impl SessionState {
+    /// Run schema migrations on a freshly-deserialized session so
+    /// the rest of the code can assume the invariants every group-
+    /// aware path depends on:
+    ///
+    /// 1. `groups` is non-empty; the default group always exists.
+    /// 2. Every workspace's `group_id` points at a group that
+    ///    actually exists in `groups`. Orphaned workspaces (from
+    ///    pre-group sessions or from sessions where a group was
+    ///    removed by hand) get re-homed into the default group.
+    ///
+    /// Idempotent — running it twice on the same session is a
+    /// no-op. Called from the ui crate's `restore_session` right
+    /// after `session_store.load()`.
+    pub fn migrate_groups(&mut self) {
+        use std::collections::HashSet;
+
+        if self.groups.is_empty() {
+            self.groups.push(WorkspaceGroup::default_group());
+        } else if !self
+            .groups
+            .iter()
+            .any(|g| g.id.0 == DEFAULT_WORKSPACE_GROUP_ID)
+        {
+            self.groups.insert(0, WorkspaceGroup::default_group());
+        }
+
+        let valid: HashSet<String> =
+            self.groups.iter().map(|g| g.id.0.clone()).collect();
+        let default_id = WorkspaceGroupId::new(DEFAULT_WORKSPACE_GROUP_ID);
+        for ws in &mut self.workspaces {
+            if !valid.contains(&ws.group_id.0) {
+                ws.group_id = default_id.clone();
+            }
         }
     }
 }

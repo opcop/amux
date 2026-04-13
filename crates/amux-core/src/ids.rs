@@ -19,6 +19,7 @@ macro_rules! id_type {
     };
 }
 
+id_type!(WorkspaceGroupId);
 id_type!(WorkspaceId);
 id_type!(PaneId);
 id_type!(TabId);
