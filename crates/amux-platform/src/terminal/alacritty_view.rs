@@ -304,8 +304,17 @@ impl AlacrittyTerminal {
     }
 
     /// Get the current working directory of the child process.
-    /// On Linux, reads /proc/PID/cwd. On macOS, not available (returns None).
-    /// On Windows, uses the process API to query the working directory.
+    ///
+    /// Per-platform implementations:
+    /// * **Linux** — read `/proc/<pid>/cwd` symlink.
+    /// * **macOS** — call `proc_pidinfo(PROC_PIDVNODEPATHINFO)`. This is
+    ///   the native equivalent of `/proc/<pid>/cwd`; macOS doesn't
+    ///   expose `/proc`, so prior versions returned `None` here and
+    ///   every cwd-dependent feature (Launch Claude from current dir,
+    ///   new tab inheriting cwd, split pane inheriting cwd, file
+    ///   picker cwd) silently fell back to amux's launch directory.
+    /// * **Windows** — delegates to `win_process_cwd`, a NtQueryInformation
+    ///   call.
     pub fn current_cwd(&self) -> Option<String> {
         #[cfg(target_os = "linux")]
         {
@@ -315,7 +324,37 @@ impl AlacrittyTerminal {
         }
         #[cfg(target_os = "macos")]
         {
-            None
+            // SAFETY: `proc_pidinfo` writes at most `size_of::<proc_vnodepathinfo>()`
+            // bytes into a freshly-zeroed local struct. The buffer is
+            // valid for the duration of the call and we read from it
+            // only after a non-negative return value confirms the kernel
+            // populated it.
+            let pid = self.child_pid? as libc::c_int;
+            let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+            let n = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDVNODEPATHINFO,
+                    0,
+                    &mut info as *mut _ as *mut libc::c_void,
+                    size,
+                )
+            };
+            if n <= 0 {
+                return None;
+            }
+            // `vip_path` is declared in the libc crate as `[[c_char; 32]; 32]`
+            // for historical rustc-version-compat reasons, but its runtime
+            // layout is a flat NUL-terminated 1024-byte path buffer
+            // (MAXPATHLEN on Darwin). Read it as bytes up to the first NUL.
+            let path_ptr = info.pvi_cdir.vip_path.as_ptr() as *const u8;
+            let path_bytes: &[u8] = unsafe { std::slice::from_raw_parts(path_ptr, 1024) };
+            let end = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+            if end == 0 {
+                return None;
+            }
+            std::str::from_utf8(&path_bytes[..end]).ok().map(str::to_string)
         }
         #[cfg(target_os = "windows")]
         {
