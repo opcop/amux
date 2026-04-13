@@ -345,6 +345,56 @@ impl GpuiShellView {
 
     /// Check if the active terminal has mouse reporting enabled.
     /// Returns (mouse_mode, sgr_mode).
+    /// Same as [`Self::active_term_mouse_mode`] but for an
+    /// arbitrary pane id. Used by the scroll handler so wheel
+    /// events can target the pane **under the cursor**, not
+    /// just the keyboard-active one.
+    fn term_mouse_mode_for_pane(
+        &self,
+        pid: &amux_platform::terminal::manager::PaneId,
+    ) -> (bool, bool) {
+        let mgr = self.terminal_manager();
+        let pane = match mgr.get_pane(pid) {
+            Some(p) => p,
+            None => return (false, false),
+        };
+        let term = match pane.active_terminal_ref() {
+            Some(t) => t,
+            None => return (false, false),
+        };
+        term.with_term(|t| {
+            let mode = t.mode();
+            (
+                mode.intersects(alacritty_terminal::term::TermMode::MOUSE_MODE),
+                mode.contains(alacritty_terminal::term::TermMode::SGR_MOUSE),
+            )
+        })
+    }
+
+    /// Per-pane check for alternate-screen + alternate-scroll mode.
+    /// When true, scroll wheel should send arrow keys to the
+    /// application in that pane instead of scrolling the (empty)
+    /// scrollback buffer.
+    fn term_alt_screen_scroll_for_pane(
+        &self,
+        pid: &amux_platform::terminal::manager::PaneId,
+    ) -> bool {
+        let mgr = self.terminal_manager();
+        let pane = match mgr.get_pane(pid) {
+            Some(p) => p,
+            None => return false,
+        };
+        let term = match pane.active_terminal_ref() {
+            Some(t) => t,
+            None => return false,
+        };
+        term.with_term(|t| {
+            let mode = t.mode();
+            mode.contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+                && mode.contains(alacritty_terminal::term::TermMode::ALTERNATE_SCROLL)
+        })
+    }
+
     fn active_term_mouse_mode(&self) -> (bool, bool) {
         let mgr = self.terminal_manager();
         let pid = match mgr.active_pane_id() {
@@ -365,30 +415,6 @@ impl GpuiShellView {
                 mode.intersects(alacritty_terminal::term::TermMode::MOUSE_MODE),
                 mode.contains(alacritty_terminal::term::TermMode::SGR_MOUSE),
             )
-        })
-    }
-
-    /// Check if the active terminal is in alternate screen with alternate scroll mode.
-    /// When true, scroll wheel should send arrow keys to the application instead of
-    /// scrolling the (empty) scrollback buffer.
-    fn active_term_alt_screen_scroll(&self) -> bool {
-        let mgr = self.terminal_manager();
-        let pid = match mgr.active_pane_id() {
-            Some(id) => id,
-            None => return false,
-        };
-        let pane = match mgr.get_pane(pid) {
-            Some(p) => p,
-            None => return false,
-        };
-        let term = match pane.active_terminal_ref() {
-            Some(t) => t,
-            None => return false,
-        };
-        term.with_term(|t| {
-            let mode = t.mode();
-            mode.contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
-                && mode.contains(alacritty_terminal::term::TermMode::ALTERNATE_SCROLL)
         })
     }
 
@@ -2096,11 +2122,48 @@ impl Render for GpuiShellView {
             // For alt screen apps without mouse mode (less with ALTERNATE_SCROLL),
             // convert scroll to arrow keys.
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                // Smooth scrolling: trackpads send many small pixel-delta
-                // events (including momentum). We accumulate fractional
-                // pixels and only scroll by integer lines when a full
-                // cell_h has been reached. Mouse wheels send Lines deltas
-                // which are used directly (1 notch = 3 lines typically).
+                // Hover-follows-scroll: the scroll event targets the
+                // pane the mouse is currently over, NOT the keyboard-
+                // active pane. This matches Chrome / VS Code / every
+                // modern multi-pane tool and lets the user compare
+                // two panes side-by-side without click-focusing the
+                // one they want to scroll. Keyboard focus is *not*
+                // affected — that still requires an explicit click,
+                // because focus-follows-hover misroutes keystrokes
+                // into the wrong terminal and is a well-known
+                // footgun.
+                //
+                // Mouse mode / alt-scroll detection and the col/row
+                // used for forwarded mouse events all come from the
+                // hover pane so the downstream PTY sees a coherent
+                // picture — we never mix "mouse mode from active,
+                // cursor position from hover".
+                let (hover_pid, col, row) =
+                    match this.pixel_to_term_cell_at(event.position) {
+                        Some(r) => r,
+                        None => {
+                            // Mouse isn't over any terminal pane
+                            // (sidebar / tab bar / non-terminal tab).
+                            // Fall back to the active pane so wheel
+                            // still does *something* reasonable —
+                            // same as pre-hover-follows behavior for
+                            // that edge case.
+                            match this.terminal_manager().active_pane_id().cloned() {
+                                Some(pid) => {
+                                    let (c, r) = this.pixel_to_term_cell(event.position);
+                                    (pid, c, r)
+                                }
+                                None => return,
+                            }
+                        }
+                    };
+
+                // Smooth scrolling: trackpads send many small pixel-
+                // delta events (including momentum). We accumulate
+                // fractional pixels and only scroll by integer lines
+                // when a full cell_h has been reached. Mouse wheels
+                // send Lines deltas which are used directly (1 notch
+                // = 3 lines typically).
                 let cell_h = this.cell_dims().1;
                 let raw_delta = match event.delta {
                     gpui::ScrollDelta::Lines(pt) => pt.y * cell_h,  // convert to pixels
@@ -2108,12 +2171,16 @@ impl Render for GpuiShellView {
                 };
                 if raw_delta == 0.0 { return; }
 
-                // If active tab is NOT a terminal, don't forward scroll.
+                // If the hover pane's active tab isn't a terminal
+                // (preview / browser tab), don't scroll the
+                // terminal scrollback — those tabs handle their
+                // own wheel events.
                 {
-                    let active_kind = this.terminal_manager().active_pane_id()
-                        .and_then(|pid| this.terminal_manager().get_pane(pid))
+                    let kind = this
+                        .terminal_manager()
+                        .get_pane(&hover_pid)
                         .and_then(|p| p.active_tab_kind().cloned());
-                    if let Some(ref k) = active_kind {
+                    if let Some(ref k) = kind {
                         if !k.is_terminal() {
                             return;
                         }
@@ -2141,31 +2208,70 @@ impl Render for GpuiShellView {
                 let lines_abs = line_count.unsigned_abs() as usize;
                 let scrolling_up = line_count > 0;
 
-                let (mouse_mode, _sgr) = this.active_term_mouse_mode();
-                let alt_scroll = this.active_term_alt_screen_scroll();
+                let (mouse_mode, _sgr) = this.term_mouse_mode_for_pane(&hover_pid);
+                let alt_scroll = this.term_alt_screen_scroll_for_pane(&hover_pid);
                 let shift = event.modifiers.shift;
 
+                // Resolve the hover pane's active terminal for the
+                // scrollback branches. We don't use `active_terminal*`
+                // here because that would target the click-focused
+                // pane, not the one under the cursor.
                 if mouse_mode && !shift {
-                    // Mouse mode ON: forward scroll events to the app.
-                    let (col, row) = this.pixel_to_term_cell(event.position);
+                    // Mouse mode ON: forward scroll events to the app
+                    // running in the hover pane.
                     let button: u8 = if scrolling_up { 64 } else { 65 };
-                    for _ in 0..lines_abs {
-                        this.send_mouse_event(button, col, row, true);
-                    }
-                } else if alt_scroll && !mouse_mode && !shift {
-                    // Alt screen + ALTERNATE_SCROLL: send arrow keys.
-                    let arrow: &[u8] = if scrolling_up { b"\x1b[A" } else { b"\x1b[B" };
-                    if let Some(term) = this.terminal_manager().active_terminal_ref() {
-                        for _ in 0..lines_abs {
-                            term.send_input(arrow);
+                    // Build the wire bytes directly and push them
+                    // into the hover pane's terminal. We can't reuse
+                    // `send_mouse_event` because that one targets
+                    // active.
+                    let col_clamped = col.min(223);
+                    let row_clamped = row.min(223);
+                    let cx_1 = col_clamped + 1;
+                    let cy_1 = row_clamped + 1;
+                    if let Some(pane) =
+                        this.terminal_manager_mut().get_pane_mut(&hover_pid)
+                    {
+                        if let Some(term) = pane.active_terminal() {
+                            for _ in 0..lines_abs {
+                                if _sgr {
+                                    let seq = format!(
+                                        "\x1b[<{};{};{}M",
+                                        button, cx_1, cy_1
+                                    );
+                                    term.send_input(seq.as_bytes());
+                                } else {
+                                    let b = button + 32;
+                                    let x = (col_clamped.min(222) as u8) + 33;
+                                    let y = (row_clamped.min(222) as u8) + 33;
+                                    let seq = [b'\x1b', b'[', b'M', b, x, y];
+                                    term.send_input(&seq);
+                                }
+                            }
                         }
                     }
-                } else if let Some(term) = this.terminal_manager_mut().active_terminal() {
-                    // Scroll scrollback buffer.
-                    if scrolling_up {
-                        term.scroll_up(lines_abs);
-                    } else {
-                        term.scroll_down(lines_abs);
+                } else if alt_scroll && !mouse_mode && !shift {
+                    // Alt screen + ALTERNATE_SCROLL: send arrow keys
+                    // to the hover pane.
+                    let arrow: &[u8] = if scrolling_up { b"\x1b[A" } else { b"\x1b[B" };
+                    if let Some(pane) =
+                        this.terminal_manager().get_pane(&hover_pid)
+                    {
+                        if let Some(term) = pane.active_terminal_ref() {
+                            for _ in 0..lines_abs {
+                                term.send_input(arrow);
+                            }
+                        }
+                    }
+                } else if let Some(pane) =
+                    this.terminal_manager_mut().get_pane_mut(&hover_pid)
+                {
+                    // Scroll the hover pane's scrollback buffer.
+                    if let Some(term) = pane.active_terminal() {
+                        if scrolling_up {
+                            term.scroll_up(lines_abs);
+                        } else {
+                            term.scroll_down(lines_abs);
+                        }
                     }
                 }
                 cx.notify();
