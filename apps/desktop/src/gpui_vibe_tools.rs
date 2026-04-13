@@ -210,9 +210,37 @@ impl GpuiShellView {
         };
         let env = if use_wsl { "wsl" } else { "native" };
 
+        // Capture the active tab's live cwd BEFORE splitting. After the
+        // split, "active" points at the newly created empty pane, so any
+        // cwd lookup there would return nothing useful and fall back to
+        // the amux launch directory — which is exactly the bug: the user
+        // `cd`'d into a subdirectory and then clicked "Launch Claude",
+        // only to have Claude start from the workspace root.
+        //
+        // `capture_active_env` already owns the robust resolve chain
+        // (shell prompt extraction → sysinfo process cwd → saved
+        // spawn-time cwd). Prompt extraction is the one that actually
+        // works on macOS where `/proc/<pid>/cwd` isn't available and
+        // sysinfo often returns the stale spawn-time cwd.
+        //
+        // We ignore `initial_input` here on purpose: that field is the
+        // "send `wsl --cd …` into the new shell" hack used by the
+        // generic terminal spawn path. Vibe tools supply their own
+        // command line, and on Windows+WSL-detected the captured cwd
+        // is a Linux path that the native launch branches below cannot
+        // feed to ConPTY — so in that specific case we drop it and fall
+        // back to the workspace default, which is at worst no worse
+        // than the pre-fix behavior.
+        let captured = self.capture_active_env();
+        let live_cwd = if captured.initial_input.is_none() {
+            captured.cwd
+        } else {
+            None
+        };
+
         // Split right
         self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-        let cwd = Self::default_cwd();
+        let cwd = live_cwd.or_else(Self::default_cwd);
 
         let tool_cmd = if extra_args.is_empty() {
             linux_bin.to_string()
@@ -268,12 +296,32 @@ impl GpuiShellView {
 
     /// Open a WSL bash shell in a new tab in the current pane.
     pub(crate) fn launch_wsl_shell(&mut self) {
+        // Capture the active tab's live cwd BEFORE adding the new tab
+        // — same reason as `launch_vibe_tool_env`: after `add_tab_to_
+        // active_pane` the active tab is the newly created empty one
+        // and any cwd lookup there is useless.
+        //
+        // WSL has an extra wrinkle vs. the vibe-tool path: the captured
+        // cwd can already be a Linux path when the source tab is itself
+        // inside WSL (signaled by `initial_input` being Some). In that
+        // case we must feed it to `wsl --cd` verbatim — running it
+        // through `windows_path_to_wsl` would mangle a path that's
+        // already Linux-shaped. Windows-path cwds still go through the
+        // converter as before.
+        let captured = self.capture_active_env();
+        let wsl_cd_path: Option<String> = match (captured.initial_input.is_some(), captured.cwd) {
+            // WSL detected in source tab → cwd is already a Linux path.
+            (true, Some(linux)) => Some(linux),
+            // Native Windows tab → convert to /mnt/<drive>/...
+            (false, Some(win)) => Some(Self::windows_path_to_wsl(&win)),
+            // Nothing capturable → fall back to the amux launch dir.
+            _ => Self::default_cwd().as_deref().map(Self::windows_path_to_wsl),
+        };
+
         self.terminal_manager_mut().add_tab_to_active_pane("WSL".into());
-        let cwd = Self::default_cwd();
         let mut wsl_args = vec![];
-        if let Some(ref cwd_str) = cwd {
-            let wsl_path = Self::windows_path_to_wsl(cwd_str);
-            wsl_args.extend(["--cd".to_string(), wsl_path]);
+        if let Some(ref linux_path) = wsl_cd_path {
+            wsl_args.extend(["--cd".to_string(), linux_path.clone()]);
         }
         let _ = self.terminal_manager_mut().spawn_in_active("wsl.exe", &wsl_args, None);
         // Rename the tab
