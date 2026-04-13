@@ -858,6 +858,34 @@ fn collect_render_data(
             _ => 0,
         };
 
+        // Block cursor: invert the fg of the cell(s) under the cursor
+        // to the cell's original bg, so the glyph stays legible against
+        // the cursor-colored background. Without this, a low-contrast
+        // theme like Tomorrow Night (cursor #f5f5f5, fg #c5c8c6) makes
+        // the glyph nearly invisible on the cursor block — and on a
+        // wide CJK char where the cursor block only covers the left
+        // cell, the user sees exactly half the character. The right
+        // half still renders with normal fg on normal bg, so the
+        // symptom is "only half the Chinese character is visible".
+        //
+        // Wide chars extend across two cells (start + wide_continuation),
+        // so we flip both halves in lockstep. Narrow chars only need
+        // the one cell.
+        if cursor_visible && cursor_shape == 0 {
+            let cursor_viewport_row = (cursor.point.line.0 + display_offset as i32)
+                .max(0)
+                .min(rows as i32 - 1) as usize;
+            if cursor_viewport_row < rows && cursor_col < cols {
+                let original_bg = grid[cursor_viewport_row][cursor_col].bg;
+                grid[cursor_viewport_row][cursor_col].fg = original_bg;
+                if cursor_col + 1 < cols
+                    && grid[cursor_viewport_row][cursor_col + 1].wide_continuation
+                {
+                    grid[cursor_viewport_row][cursor_col + 1].fg = original_bg;
+                }
+            }
+        }
+
         // Extract selection ranges for highlighting.
         // Convert grid line numbers to viewport row indices, since the
         // rendering pipeline addresses cells by viewport row (0..rows).
@@ -1062,11 +1090,29 @@ fn prepaint_terminal(
 
         // ── Phase 1: Background quads ──
         // Group consecutive cells with same bg color into single quads.
-        // Skip wide_continuation cells — the wide character's start cell
-        // already covers the visual width via text shaping.
+        //
+        // **Wide chars (CJK / emoji)**: alacritty stores the second
+        // cell of a wide char as a `wide_continuation` placeholder
+        // with the same background as the start cell. The merge loop
+        // below MUST treat those continuation cells as regular
+        // members of the bg run, otherwise the continuation cell
+        // silently gets no quad and the pane-default bg leaks through
+        // the right half of the wide char.
+        //
+        // This bites hard when a TUI (Claude's `/` menu cursor,
+        // fzf's selection, vim's visual block) paints a wide char
+        // with a custom background: we'd render only the LEFT half
+        // of the highlight and the user sees "only half the Chinese
+        // character is highlighted" — even though the terminal
+        // cursor itself may be nowhere near that row, so our own
+        // block-cursor split logic doesn't get a chance to fix it.
         let mut col = 0;
         while col < data.cols {
             let cell = &data.grid[row][col];
+            // A leading wide_continuation (no preceding start cell
+            // this row — rare, but possible when the viewport scrolls
+            // mid-wide-char) has no meaningful bg of its own; just
+            // skip it so we don't start a run from a placeholder.
             if cell.wide_continuation {
                 col += 1;
                 continue;
@@ -1074,8 +1120,11 @@ fn prepaint_terminal(
             let bg = cell.bg;
             let start_col = col;
             col += 1;
-            while col < data.cols && data.grid[row][col].bg == bg
-                && !data.grid[row][col].wide_continuation {
+            // Merge across continuation cells with matching bg. We
+            // intentionally do NOT break on wide_continuation here —
+            // that was the historical bug that clipped wide-char
+            // backgrounds to their left half.
+            while col < data.cols && data.grid[row][col].bg == bg {
                 col += 1;
             }
             let x = content_origin_x + px(start_col as f32 * cell_w);
@@ -1100,17 +1149,30 @@ fn prepaint_terminal(
                         color: bg,
                     });
                 }
-                // Cursor cell — always 1 cell wide even on wide characters,
-                // so the cursor doesn't look abnormally large on CJK text.
+                // Cursor cell: 2 cells wide on wide chars (CJK/emoji),
+                // 1 cell otherwise. A wide char is **visually** 2 cells
+                // already, so a 1-cell cursor covers only its left half
+                // and leaves the right half on the canvas default. The
+                // user sees "half a Chinese character" because the
+                // right half's glyph ink renders on top of an
+                // un-painted wide_continuation cell (Phase 1 skips
+                // those) and blends into whatever's behind.
+                let cursor_is_wide = cc + 1 < data.cols
+                    && data.grid[row][cc + 1].wide_continuation;
+                let cursor_cells = if cursor_is_wide { 2 } else { 1 };
+                let cursor_visual_w = px(cell_w * cursor_cells as f32);
                 bg_rects.push(PaintRect {
                     origin: point(cx, y),
-                    size: size(px(cell_w), px(cell_h)),
+                    size: size(cursor_visual_w, px(cell_h)),
                     color: data.cursor_color,
                 });
-                // Part after cursor
-                let after_col = cc + 1;
+                // Part after cursor — skip past the cursor's full
+                // visual width (which is 2 cells on wide chars) so we
+                // don't accidentally re-paint the right half with the
+                // surrounding bg color.
+                let after_col = cc + cursor_cells;
                 if after_col < col {
-                    let x_after = cx + px(cell_w);
+                    let x_after = cx + cursor_visual_w;
                     let w_after = content_origin_x + px(col as f32 * cell_w) - x_after;
                     bg_rects.push(PaintRect {
                         origin: point(x_after, y),
