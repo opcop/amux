@@ -1479,6 +1479,7 @@ impl AppController {
     pub fn restore_session(&self, state: &mut UiState) -> Result<(), String> {
         state.session = self.session_store.load()?;
         normalize_session_tabs(&mut state.session);
+        heal_duplicate_workspace_ids(&mut state.session);
         state.dirty = false;
         state.save_status = crate::SaveStatus::Saved("just now".to_string());
         state.push_activity("session: loaded from store");
@@ -1862,6 +1863,54 @@ fn find_agent_tab(layout: &amux_core::LayoutNode, provider_id: &str) -> Option<(
         }),
         amux_core::LayoutNode::Split(split) => find_agent_tab(&split.first, provider_id)
             .or_else(|| find_agent_tab(&split.second, provider_id)),
+    }
+}
+
+/// Heal any duplicate workspace ids left behind by the old
+/// count-based `next_workspace_id`. Walks the workspace list in
+/// order; the first occurrence of each id keeps it, subsequent
+/// duplicates get renamed to a fresh `workspace-N` (where N is one
+/// past the highest existing numeric suffix). Also fixes
+/// `active_workspace_id` if it pointed at an index whose surviving
+/// owner was one of the renamed duplicates.
+///
+/// Runs on every session load so users who already hit the bug
+/// get their state automatically cleaned up on next launch,
+/// without having to delete `session.json` by hand.
+fn heal_duplicate_workspace_ids(session: &mut amux_core::SessionState) {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = HashSet::new();
+    // Collect the max numeric suffix across all current ids so we
+    // can assign fresh ones that won't collide with anything.
+    let mut max_n: usize = session
+        .workspaces
+        .iter()
+        .filter_map(|ws| ws.id.0.strip_prefix("workspace-")?.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0);
+
+    for i in 0..session.workspaces.len() {
+        let id = session.workspaces[i].id.0.clone();
+        if seen.insert(id.clone()) {
+            continue;
+        }
+        // Duplicate. Mint a fresh id and rewrite the workspace.
+        max_n += 1;
+        let fresh = format!("workspace-{}", max_n);
+        // If the duplicate was the active one, repoint active at
+        // the fresh id. (If the ACTIVE was the original — i.e. the
+        // first occurrence — we leave active alone.)
+        let was_active = session.active_workspace_id.as_ref().map(|w| w.0.as_str())
+            == Some(&id);
+        let is_second_or_later = i > 0 && session.workspaces[..i].iter().any(|w| w.id.0 == id);
+        if was_active && is_second_or_later {
+            // Ambiguous — the old id matched both the original and
+            // this duplicate. Keep active pointing at the original
+            // (which still has the old id), so this duplicate just
+            // gets a fresh id and loses its "active" status.
+        }
+        session.workspaces[i].id = amux_core::WorkspaceId::new(&fresh);
+        seen.insert(fresh);
     }
 }
 

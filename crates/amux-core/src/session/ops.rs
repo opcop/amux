@@ -52,7 +52,7 @@ impl SessionState {
                     return Ok(vec![Event::WorkspaceOpened(workspace_id)]);
                 }
                 let workspace = build_workspace(
-                    WorkspaceId::new(next_workspace_id(self.workspaces.len())),
+                    WorkspaceId::new(next_workspace_id(&self.workspaces)),
                     derive_workspace_name(&target),
                     target,
                 );
@@ -191,8 +191,22 @@ fn split_axis_label(axis: SplitAxis) -> &'static str {
     }
 }
 
-fn next_workspace_id(count: usize) -> String {
-    format!("workspace-{}", count + 1)
+/// Pick the next `workspace-N` id by scanning **existing** ids for
+/// the highest N and returning N+1. A naive `count + 1` collides the
+/// moment the user closes any workspace that isn't the most recent
+/// one: e.g. with `[workspace-1, workspace-2]`, closing `workspace-1`
+/// leaves `[workspace-2]` at `count == 1`, and the next open would
+/// produce `workspace-2` again — the sidebar then renders two rows
+/// that share one id, both highlight as active, and the group_hover
+/// effect double-fires across them. Scanning for the max dodges the
+/// whole class by never reusing an id while any peer still holds it.
+fn next_workspace_id(workspaces: &[WorkspaceState]) -> String {
+    let max_n = workspaces
+        .iter()
+        .filter_map(|ws| ws.id.0.strip_prefix("workspace-")?.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("workspace-{}", max_n + 1)
 }
 
 fn next_split_id(workspace: &WorkspaceState) -> String {
@@ -240,7 +254,10 @@ fn count_tabs(layout: &crate::LayoutNode) -> usize {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::{Command, PreviewKind, PreviewSurfaceState, SplitAxis, SurfaceId, SurfaceState};
+    use crate::{
+        Command, PreviewKind, PreviewSurfaceState, SplitAxis, SurfaceId, SurfaceState,
+        WorkspaceId,
+    };
 
     use super::{SessionOpError, SessionState, WorkspaceTarget};
 
@@ -381,5 +398,56 @@ mod tests {
             .expect_err("should fail without workspace");
 
         assert_eq!(err, SessionOpError::NoActiveWorkspace);
+    }
+
+    #[test]
+    fn open_workspace_after_delete_assigns_fresh_id() {
+        // Regression for the sidebar "two rows both highlighted" bug:
+        // `next_workspace_id` used to derive from `workspaces.len()`,
+        // so closing a non-last workspace and then opening a new one
+        // would hand the new entry an id that's already taken. Both
+        // rows then matched `active_workspace_id == ws.id` and both
+        // rendered as selected, and the group_hover effect double-
+        // fired across them because they shared the same `ws-group-*`
+        // key. The fix scans existing ids for the maximum N and
+        // returns N+1, which can never collide with a live peer.
+        let mut session = SessionState::default();
+        session
+            .apply(Command::OpenWorkspace(WorkspaceTarget::LocalPath {
+                path: PathBuf::from("/tmp/a"),
+            }))
+            .expect("open a");
+        session
+            .apply(Command::OpenWorkspace(WorkspaceTarget::LocalPath {
+                path: PathBuf::from("/tmp/b"),
+            }))
+            .expect("open b");
+        assert_eq!(session.workspaces[0].id.0, "workspace-1");
+        assert_eq!(session.workspaces[1].id.0, "workspace-2");
+
+        // Close the *first* one (not the most recent) so len drops
+        // back to 1 while the surviving id is workspace-2.
+        session
+            .apply(Command::CloseWorkspace(WorkspaceId::new("workspace-1")))
+            .expect("close a");
+        assert_eq!(session.workspaces.len(), 1);
+        assert_eq!(session.workspaces[0].id.0, "workspace-2");
+
+        // Opening a fresh workspace must get a brand new id, NOT
+        // collide with the surviving workspace-2.
+        session
+            .apply(Command::OpenWorkspace(WorkspaceTarget::LocalPath {
+                path: PathBuf::from("/tmp/c"),
+            }))
+            .expect("open c");
+        assert_eq!(session.workspaces.len(), 2);
+        assert_eq!(session.workspaces[0].id.0, "workspace-2");
+        assert_eq!(
+            session.workspaces[1].id.0, "workspace-3",
+            "new workspace must get a fresh id, not reuse workspace-2"
+        );
+        let ids: std::collections::HashSet<_> =
+            session.workspaces.iter().map(|ws| ws.id.0.as_str()).collect();
+        assert_eq!(ids.len(), 2, "all ids must be unique");
     }
 }
