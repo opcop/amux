@@ -124,7 +124,11 @@ pub(crate) fn render_layout(
     cursor_blink_on: bool,
     metrics: &crate::gpui_terminal::CellMetrics,
     is_zoomed: bool,
-    renaming_tab: &Option<(String, usize, String)>,
+    renaming_tab: &Option<(
+        String,
+        usize,
+        gpui::Entity<gpui_component::input::InputState>,
+    )>,
     origin_x: f32,
     origin_y: f32,
     pane_bounds: &mut std::collections::HashMap<String, (f32, f32, f32, f32)>,
@@ -171,6 +175,16 @@ pub(crate) fn render_layout(
                         let pid_tab_drop = pid_for_tabs.clone();
                         let can_close_tab = tab_count > 1;
                         let drag_title = title.clone();
+                        // Compute rename state up front — we skip the
+                        // `max_w(180)` / `flex_shrink` / `overflow_hidden`
+                        // clamps while this tab is in rename mode so the
+                        // row can grow naturally with whatever the user
+                        // types, instead of locking the Input to a
+                        // fixed 180px regardless of content length.
+                        let tab_in_rename = renaming_tab
+                            .as_ref()
+                            .map(|(p, i, _)| p == &pid_for_tabs.0 && *i == idx)
+                            .unwrap_or(false);
                         div()
                             .id(gpui::ElementId::Name(
                                 format!("{}-tab-{}", pid_for_tabs.0, idx).into(),
@@ -180,9 +194,9 @@ pub(crate) fn render_layout(
                             .items_center()
                             .gap(px(4.0))
                             .min_w(px(60.0))
-                            .max_w(px(180.0))
-                            .flex_shrink()
-                            .overflow_hidden()
+                            .when(!tab_in_rename, |d| {
+                                d.max_w(px(180.0)).flex_shrink().overflow_hidden()
+                            })
                             .px_3()
                             .py(px(4.0))
                             .text_xs()
@@ -229,10 +243,19 @@ pub(crate) fn render_layout(
                             }))
                             .on_click({
                                 let pid_rename = pid_click.clone();
-                                cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
+                                let current_title = title.clone();
+                                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                                     if event.click_count() >= 2 {
                                         // Double-click: start inline rename
-                                        this.renaming_tab = Some((pid_rename.0.clone(), idx, String::new()));
+                                        // using a real InputState so arrow
+                                        // keys, selection, IME etc. all work.
+                                        this.start_tab_rename(
+                                            pid_rename.0.clone(),
+                                            idx,
+                                            current_title.clone(),
+                                            window,
+                                            cx,
+                                        );
                                     } else {
                                         // Single click: switch tab
                                         this.terminal_manager_mut().set_active_pane(&pid_click);
@@ -254,24 +277,72 @@ pub(crate) fn render_layout(
                             })
                             .child({
                                 let is_tab_renaming = renaming_tab.as_ref()
-                                    .map(|(p, i, _): &(String, usize, String)| p == &pid_for_tabs.0 && *i == idx)
+                                    .map(|(p, i, _)| p == &pid_for_tabs.0 && *i == idx)
                                     .unwrap_or(false);
                                 if is_tab_renaming {
-                                    let rename_text = renaming_tab.as_ref()
-                                        .map(|(_, _, t): &(String, usize, String)| t.clone())
-                                        .unwrap_or_default();
-                                    div()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .text_sm()
-                                        .text_color(rgb(crate::theme::TEXT))
-                                        .bg(rgb(crate::theme::SURFACE_RAISED))
-                                        .rounded(px(2.0))
-                                        .border_1()
-                                        .border_color(rgb(crate::theme::ACCENT))
-                                        .px_1()
-                                        .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
-                                        .into_any_element()
+                                    let input_state = renaming_tab.as_ref().map(|(_, _, s)| s.clone());
+                                    if let Some(state) = input_state {
+                                        // Rename wrapper. Design:
+                                        //
+                                        // * `w(160)` gives the Input a
+                                        //   fixed, visible width. The old
+                                        //   `flex_none()` without an
+                                        //   explicit width collapsed to
+                                        //   0px because the Input's own
+                                        //   `size_full()` resolved against
+                                        //   a parent that had no intrinsic
+                                        //   size — text landed in a zero-
+                                        //   width rect and was invisible.
+                                        //
+                                        // * `Input::small()` sets the
+                                        //   widget's internal padding to
+                                        //   py(2), height to h_6 (24px),
+                                        //   and text size to text_sm.
+                                        //   That's slightly taller than
+                                        //   the tab's native text_xs row
+                                        //   but the smallest size where
+                                        //   the caret + glyphs actually
+                                        //   have room to render
+                                        //   comfortably — xsmall collapses
+                                        //   the padding to py(0) which
+                                        //   made the caret visible but the
+                                        //   text clipped at the top edge.
+                                        //
+                                        // * Explicit `text_color` + `bg`
+                                        //   because `appearance(false)`
+                                        //   strips the Input's own chrome
+                                        //   and the tab's default text
+                                        //   styling isn't reliably
+                                        //   inherited through the Input
+                                        //   widget boundary.
+                                        //
+                                        // * `stop_propagation` on the
+                                        //   mouse-down keeps clicks into
+                                        //   the field from bubbling up to
+                                        //   the parent tab's drag /
+                                        //   single-click-switch handlers.
+                                        use gpui_component::Sizable;
+                                        div()
+                                            .w(px(160.0))
+                                            .text_color(rgb(crate::theme::TEXT))
+                                            .bg(rgb(crate::theme::SURFACE_RAISED))
+                                            .rounded(px(2.0))
+                                            .on_mouse_down(
+                                                gpui::MouseButton::Left,
+                                                |_, _, cx| {
+                                                    cx.stop_propagation();
+                                                },
+                                            )
+                                            .child(
+                                                gpui_component::input::Input::new(&state)
+                                                    .small()
+                                                    .cleanable(false)
+                                                    .appearance(false),
+                                            )
+                                            .into_any_element()
+                                    } else {
+                                        div().into_any_element()
+                                    }
                                 } else {
                                     let mut tab_content = div()
                                         .flex()

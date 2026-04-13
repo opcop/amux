@@ -65,17 +65,27 @@ impl gpui::EntityInputHandler for GpuiShellView {
             }
         }
 
-        // If renaming workspace, send text to rename field
-        if let Some((_, ref mut rename_text)) = self.renaming_workspace {
-            rename_text.push_str(text);
-            cx.notify();
-            return;
+        // Workspace / tab rename fields are now real
+        // `gpui_component::input::InputState` entities that own
+        // their own focus and keystroke handling (see the entity
+        // construction in the render path). When one of them has
+        // focus, GPUI routes keys into the Input directly and
+        // `replace_text_in_range` never fires on `GpuiShellView`
+        // — so there's nothing for us to intercept here. The old
+        // `rename_text.push_str(text)` path was the symptom of a
+        // toy-input implementation that ignored arrow keys,
+        // selection, and IME; it's gone.
+        if let Some((_, ref input)) = self.renaming_workspace {
+            use gpui::Focusable;
+            if input.read(cx).focus_handle(cx).is_focused(_window) {
+                return;
+            }
         }
-        // If renaming tab, send text to rename field
-        if let Some((_, _, ref mut rename_text)) = self.renaming_tab {
-            rename_text.push_str(text);
-            cx.notify();
-            return;
+        if let Some((_, _, ref input)) = self.renaming_tab {
+            use gpui::Focusable;
+            if input.read(cx).focus_handle(cx).is_focused(_window) {
+                return;
+            }
         }
         // If file picker is open, send text to search query
         if let Some(ref mut picker) = self.file_picker {
@@ -281,66 +291,23 @@ impl GpuiShellView {
 
         // (Legacy standalone preview_state removed — preview is now tab-based)
 
-        // Workspace rename handling
-        if let Some((ref ws_id, ref mut text)) = self.renaming_workspace {
-            match keystr.as_str() {
-                "enter" => {
-                    let ws_id = ws_id.clone();
-                    let new_name = text.clone();
-                    if !new_name.is_empty() {
-                        let _ = self.app.rename_workspace(&ws_id, &new_name);
-                        self.refresh_model();
-                    }
-                    self.renaming_workspace = None;
-                    cx.notify();
-                    return;
-                }
-                "escape" => {
-                    self.renaming_workspace = None;
-                    cx.notify();
-                    return;
-                }
-                "backspace" => {
-                    text.pop();
-                    cx.notify();
-                    return;
-                }
-                _ => {
-                    // Character input handled by replace_text_in_range (IME handler)
-                    return;
-                }
+        // Workspace / tab rename: when an InputState owns focus,
+        // GPUI routes keys into the Input itself (arrow nav,
+        // selection, Cmd+A, etc). We still need to swallow keys
+        // *at this level* so the rename doesn't also leak them
+        // to the terminal underneath. Enter (commit) and Escape
+        // (cancel) are handled via the Input's `InputEvent`
+        // subscription set up at construction time, not here.
+        if let Some((_, ref input)) = self.renaming_workspace {
+            use gpui::Focusable;
+            if input.read(cx).focus_handle(cx).is_focused(window) {
+                return;
             }
         }
-
-        // Tab rename handling
-        if let Some((ref pane_id, tab_idx, ref mut text)) = self.renaming_tab {
-            match keystr.as_str() {
-                "enter" => {
-                    let pid = amux_platform::terminal::manager::PaneId(pane_id.clone());
-                    let new_name = text.clone();
-                    if !new_name.is_empty() {
-                        if let Some(pane) = self.terminal_manager_mut().get_pane_mut(&pid) {
-                            if let Some(tab) = pane.tabs.get_mut(tab_idx) {
-                                tab.title = new_name;
-                                tab.custom_title = true;
-                            }
-                        }
-                    }
-                    self.renaming_tab = None;
-                    cx.notify();
-                    return;
-                }
-                "escape" => {
-                    self.renaming_tab = None;
-                    cx.notify();
-                    return;
-                }
-                "backspace" => {
-                    text.pop();
-                    cx.notify();
-                    return;
-                }
-                _ => return,
+        if let Some((_, _, ref input)) = self.renaming_tab {
+            use gpui::Focusable;
+            if input.read(cx).focus_handle(cx).is_focused(window) {
+                return;
             }
         }
 

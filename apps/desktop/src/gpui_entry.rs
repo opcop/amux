@@ -38,8 +38,21 @@ pub(crate) struct GpuiShellView {
     /// Drives the hover-to-expand visual on the scrollbar.
     pub(crate) scrollbar_hover_pane: Option<amux_platform::terminal::manager::PaneId>,
     pub(crate) cursor_blink_frame: u32,
-    pub(crate) renaming_workspace: Option<(String, String)>,
-    pub(crate) renaming_tab: Option<(String, usize, String)>,
+    /// Active workspace rename. Holds the `workspace_id` being
+    /// renamed and a real `gpui_component::input::InputState` entity
+    /// for text editing — so arrow keys, double-click word select,
+    /// Home/End, Cmd+A, IME, clipboard, and all the other things
+    /// users expect from a text field Just Work. The old version
+    /// stored a bare `String` and handled only enter/escape/backspace,
+    /// which made arrow keys and selection silently no-op.
+    pub(crate) renaming_workspace:
+        Option<(String, gpui::Entity<gpui_component::input::InputState>)>,
+    /// Same treatment for tab rename: `(pane_id, tab_index, input)`.
+    pub(crate) renaming_tab: Option<(
+        String,
+        usize,
+        gpui::Entity<gpui_component::input::InputState>,
+    )>,
     pub(crate) search_state: Option<SearchState>,
     pub(crate) detected_vibe_tools: Vec<(&'static str, &'static str, &'static str)>,
     pub(crate) wsl_detected: bool,
@@ -196,6 +209,165 @@ impl GpuiShellView {
             .app
             .dispatch(amux_ui::UiAction::SetCommandPaletteQuery("workspace open ".into()));
         self.refresh_model();
+    }
+
+    /// Begin renaming a workspace. Creates a
+    /// `gpui_component::input::InputState` entity pre-loaded with
+    /// the current name, subscribes to `PressEnter` (commit) and
+    /// `Blur` (commit) so the rename auto-finishes whenever the
+    /// input loses focus, and stores the resulting entity in
+    /// `renaming_workspace`.
+    ///
+    /// All text editing behavior — arrow keys, word-wise
+    /// Alt+arrow, Home/End, Cmd+A, double-click word select,
+    /// triple-click line select, IME composition, clipboard —
+    /// is delegated to the underlying `Input` widget, which is
+    /// the same battle-tested one used by the browser URL bar.
+    pub(crate) fn start_workspace_rename(
+        &mut self,
+        ws_id: String,
+        current_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_component::input::{InputEvent, InputState};
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(current_name)
+                .placeholder("workspace name")
+        });
+
+        // Focus has to wait one render tick. At this point the
+        // `Input` element has not yet been mounted into the
+        // element tree (that happens on the next render pass,
+        // which is triggered by `cx.notify()` below). Calling
+        // `.focus()` *now* targets a focus handle that no
+        // paintable element claims yet, so GPUI silently drops
+        // subsequent keystrokes. `window.on_next_frame` defers
+        // the focus call to the frame *after* the Input is in
+        // the tree, which is exactly when it can receive keys.
+        let input_for_focus = input.clone();
+        window.on_next_frame(move |window, cx| {
+            // Go through `InputState::focus` instead of calling
+            // `focus_handle.focus(...)` directly: the helper also
+            // starts the cursor blink animation, without which the
+            // field renders with no visible caret and users can't
+            // tell the input is editable.
+            input_for_focus.update(cx, |state, cx| {
+                state.focus(window, cx);
+            });
+        });
+
+        let ws_id_for_sub = ws_id.clone();
+        cx.subscribe(
+            &input,
+            move |this: &mut GpuiShellView, input_entity, event: &InputEvent, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let new_name = input_entity.read(cx).value().to_string();
+                    let trimmed = new_name.trim();
+                    if !trimmed.is_empty() {
+                        let _ = this.app.rename_workspace(&ws_id_for_sub, trimmed);
+                        this.refresh_model();
+                    }
+                    this.renaming_workspace = None;
+                    cx.notify();
+                }
+                InputEvent::Blur => {
+                    if let Some((ref id, ref state)) = this.renaming_workspace {
+                        if id == &ws_id_for_sub {
+                            let new_name = state.read(cx).value().to_string();
+                            let trimmed = new_name.trim();
+                            if !trimmed.is_empty() {
+                                let _ = this.app.rename_workspace(&ws_id_for_sub, trimmed);
+                                this.refresh_model();
+                            }
+                            this.renaming_workspace = None;
+                            cx.notify();
+                        }
+                    }
+                }
+                _ => {}
+            },
+        )
+        .detach();
+
+        self.renaming_workspace = Some((ws_id, input));
+        cx.notify();
+    }
+
+    /// Begin renaming a tab. Same pattern as
+    /// `start_workspace_rename` — creates an `InputState` entity,
+    /// subscribes to `PressEnter` / `Blur` for save, and stores
+    /// it in `renaming_tab`.
+    pub(crate) fn start_tab_rename(
+        &mut self,
+        pane_id: String,
+        tab_idx: usize,
+        current_title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_component::input::{InputEvent, InputState};
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(current_title)
+                .placeholder("tab title")
+        });
+        // Same deferred-focus trick as `start_workspace_rename`.
+        let input_for_focus = input.clone();
+        window.on_next_frame(move |window, cx| {
+            // Go through `InputState::focus` instead of calling
+            // `focus_handle.focus(...)` directly: the helper also
+            // starts the cursor blink animation, without which the
+            // field renders with no visible caret and users can't
+            // tell the input is editable.
+            input_for_focus.update(cx, |state, cx| {
+                state.focus(window, cx);
+            });
+        });
+
+        let pane_id_for_sub = pane_id.clone();
+        cx.subscribe(
+            &input,
+            move |this: &mut GpuiShellView, input_entity, event: &InputEvent, cx| {
+                let commit_value = |this: &mut GpuiShellView,
+                                    new_name: String,
+                                    cx: &mut Context<GpuiShellView>| {
+                    let trimmed = new_name.trim();
+                    if !trimmed.is_empty() {
+                        let pid =
+                            amux_platform::terminal::manager::PaneId(pane_id_for_sub.clone());
+                        if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pid) {
+                            if let Some(tab) = pane.tabs.get_mut(tab_idx) {
+                                tab.title = trimmed.to_string();
+                                tab.custom_title = true;
+                            }
+                        }
+                    }
+                    this.renaming_tab = None;
+                    cx.notify();
+                };
+                match event {
+                    InputEvent::PressEnter { .. } => {
+                        let v = input_entity.read(cx).value().to_string();
+                        commit_value(this, v, cx);
+                    }
+                    InputEvent::Blur => {
+                        if let Some((ref pid, _, ref state)) = this.renaming_tab {
+                            if pid == &pane_id_for_sub {
+                                let v = state.read(cx).value().to_string();
+                                commit_value(this, v, cx);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            },
+        )
+        .detach();
+
+        self.renaming_tab = Some((pane_id, tab_idx, input));
+        cx.notify();
     }
 
     /// Create a fresh workspace rooted at the user's home
@@ -1692,8 +1864,20 @@ impl Render for GpuiShellView {
             //   - Click terminal  → root's track_focus + focus_parent()
             //   - Click URL Input → Input's track_focus (with prevent_default)
             //   - Click WebView2  → WebView2 gets OS focus, GPUI does nothing
+        } else if self.renaming_workspace.is_some() || self.renaming_tab.is_some() {
+            // Inline rename is active — leave focus alone. The
+            // rename `Input` was deliberately given focus in
+            // `start_workspace_rename` / `start_tab_rename`, and
+            // grabbing it back here every frame silently
+            // invalidates that: the field appears, but no
+            // keystroke ever lands in it because the root
+            // view's focus handle keeps stealing focus on the
+            // very next paint. Treat active rename as a
+            // browser-like exception: trust GPUI's focus system
+            // for the duration of the edit.
         } else {
-            // No browser — safe to ensure terminal always has focus.
+            // No browser, no rename — safe to ensure terminal
+            // always has focus.
             if !self.focus_handle.is_focused(window) {
                 self.focus_handle.focus(window, cx);
             }
@@ -1836,15 +2020,19 @@ impl Render for GpuiShellView {
                         break; // one call is enough
                     }
                 }
-                // Click outside sidebar: dismiss any active rename/search
-                if this.renaming_workspace.is_some() {
-                    this.renaming_workspace = None;
-                    cx.notify();
-                }
-                if this.renaming_tab.is_some() {
-                    this.renaming_tab = None;
-                    cx.notify();
-                }
+                // Note: we no longer dismiss `renaming_workspace` /
+                // `renaming_tab` here on every click. The active
+                // rename now owns a real `gpui_component::input::
+                // InputState` widget that handles its own focus
+                // lifecycle: losing focus fires `InputEvent::Blur`
+                // (wired in `start_workspace_rename` /
+                // `start_tab_rename`), which is the single
+                // commit-and-dismiss path. Clearing the rename
+                // state from under it here would race with the
+                // Blur handler and wipe out the input mid-edit —
+                // which is exactly how the tab-rename Input
+                // looked like it was swallowing keystrokes when
+                // the user tried to type after double-clicking.
 
                 // Scrollbar hit-test runs BEFORE selection so a click on the
                 // thumb/track doesn't also start a text selection underneath.
@@ -2635,10 +2823,14 @@ impl Render for GpuiShellView {
                                                     cx.notify();
                                                 }))
                                                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(
-                                                    move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                                                    move |this, event: &gpui::MouseDownEvent, window, cx| {
                                                         if event.click_count >= 2 {
-                                                            this.renaming_workspace = Some((ws_id_dbl.clone(), ws_name.clone()));
-                                                            cx.notify();
+                                                            this.start_workspace_rename(
+                                                                ws_id_dbl.clone(),
+                                                                ws_name.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
                                                         } else if this.renaming_workspace.is_none() {
                                                             let _ = this.app.activate_workspace(&ws_id);
                                                             this.switch_workspace_terminal(&ws_id);
@@ -2648,19 +2840,46 @@ impl Render for GpuiShellView {
                                                     }
                                                 ))
                                                 .child(if is_renaming {
-                                                    let rename_text = self.renaming_workspace.as_ref()
-                                                        .map(|(_, t)| t.clone())
-                                                        .unwrap_or_default();
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(rgb(crate::theme::TEXT))
-                                                        .px_1()
-                                                        .bg(rgb(crate::theme::SURFACE_RAISED))
-                                                        .rounded(px(2.0))
-                                                        .border_1()
-                                                        .border_color(rgb(crate::theme::ACCENT))
-                                                        .child(if rename_text.is_empty() { "▎".to_string() } else { format!("{}▎", rename_text) })
-                                                        .into_any_element()
+                                                    let input_state = self.renaming_workspace
+                                                        .as_ref()
+                                                        .map(|(_, s)| s.clone());
+                                                    if let Some(state) = input_state {
+                                                        // Wrap the Input in a visible
+                                                        // chrome so the edit affordance
+                                                        // is obvious. `appearance(false)`
+                                                        // suppresses the Input's own
+                                                        // border/bg; the wrapper div
+                                                        // supplies both. `stop_propagation`
+                                                        // on the wrapper's own mousedown
+                                                        // keeps the parent workspace row
+                                                        // from treating a click-in-field
+                                                        // as "single click = activate
+                                                        // workspace" or "double click =
+                                                        // re-enter rename".
+                                                        div()
+                                                            .flex_1()
+                                                            .px_1()
+                                                            .text_sm()
+                                                            .text_color(rgb(crate::theme::TEXT))
+                                                            .bg(rgb(crate::theme::SURFACE_RAISED))
+                                                            .rounded(px(2.0))
+                                                            .border_1()
+                                                            .border_color(rgb(crate::theme::ACCENT))
+                                                            .on_mouse_down(
+                                                                gpui::MouseButton::Left,
+                                                                |_, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            )
+                                                            .child(
+                                                                gpui_component::input::Input::new(&state)
+                                                                    .cleanable(false)
+                                                                    .appearance(false),
+                                                            )
+                                                            .into_any_element()
+                                                    } else {
+                                                        div().into_any_element()
+                                                    }
                                                 } else {
                                                     let group_name = format!("ws-group-{}", item.id);
                                                     div()
