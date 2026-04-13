@@ -79,7 +79,9 @@ mod tests {
                 name: "demo".into(),
                 is_active: true,
                 target_path: None,
+                group_id: amux_core::DEFAULT_WORKSPACE_GROUP_ID.into(),
             }],
+            workspace_groups: vec![],
             agents: vec![AgentListItem {
                 id: "codex".into(),
                 name: "Codex".into(),

@@ -21,6 +21,15 @@ pub struct GpuiWorkspaceItem {
     pub name: String,
     pub is_active: bool,
     pub target_path: Option<String>,
+    pub group_id: String,
+}
+
+/// Mirror of [`crate::WorkspaceGroupListItem`] for the desktop
+/// window model. Drives the sidebar's grouped rendering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuiWorkspaceGroupItem {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +119,7 @@ pub struct GpuiWindowModel {
     pub palette_commands: Vec<GpuiPaletteCommandItem>,
     pub selected_palette_command: Option<String>,
     pub workspace_items: Vec<GpuiWorkspaceItem>,
+    pub workspace_groups: Vec<GpuiWorkspaceGroupItem>,
     pub agent_items: Vec<GpuiAgentItem>,
     pub file_items: Vec<GpuiFileItem>,
     pub open_file_items: Vec<GpuiOpenFileItem>,
@@ -209,6 +219,15 @@ impl AppRenderer for GpuiRenderer {
                     name: workspace.name.clone(),
                     is_active: workspace.is_active,
                     target_path: workspace.target_path.clone(),
+                    group_id: workspace.group_id.clone(),
+                })
+                .collect(),
+            workspace_groups: snapshot
+                .workspace_groups
+                .iter()
+                .map(|group| GpuiWorkspaceGroupItem {
+                    id: group.id.clone(),
+                    name: group.name.clone(),
                 })
                 .collect(),
             agent_items: snapshot
@@ -423,7 +442,9 @@ mod tests {
                 name: "demo".into(),
                 is_active: true,
                 target_path: None,
+                group_id: amux_core::DEFAULT_WORKSPACE_GROUP_ID.into(),
             }],
+            workspace_groups: vec![],
             recent_workspaces: vec![],
             agents: vec![AgentListItem {
                 id: "codex".into(),

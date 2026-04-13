@@ -49,6 +49,24 @@ pub struct WorkspaceListItem {
     /// from a macOS .app bundle and produces a `PWD=/` shell that
     /// prompt themes flag with a lock icon).
     pub target_path: Option<String>,
+    /// Which [`WorkspaceGroupListItem`] this workspace belongs to.
+    /// Pre-group sessions (or the single-default-group case) route
+    /// everything through the default group id and the sidebar
+    /// collapses it to a flat render.
+    pub group_id: String,
+}
+
+/// Mirror of `amux_core::WorkspaceGroup` in the snapshot. The
+/// sidebar iterates these to decide which group headers to draw
+/// and in which order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceGroupListItem {
+    pub id: String,
+    /// Display name. Empty string is meaningful: the sidebar
+    /// treats the default / migration group's empty name as "do
+    /// not render a group header", which is how upgrading users
+    /// keep the pre-group flat layout.
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +139,7 @@ pub struct WorkspaceSnapshot {
 #[derive(Clone, Debug)]
 pub struct AppSnapshot {
     pub workspaces: Vec<WorkspaceListItem>,
+    pub workspace_groups: Vec<WorkspaceGroupListItem>,
     pub recent_workspaces: Vec<RecentWorkspaceItem>,
     pub agents: Vec<AgentListItem>,
     pub files: Vec<FileListItem>,
@@ -333,6 +352,16 @@ impl UiState {
                     name: workspace.name.clone(),
                     is_active: self.session.active_workspace_id.as_ref() == Some(&workspace.id),
                     target_path: workspace_target_path_string(&workspace.target),
+                    group_id: workspace.group_id.0.clone(),
+                })
+                .collect(),
+            workspace_groups: self
+                .session
+                .groups
+                .iter()
+                .map(|group| WorkspaceGroupListItem {
+                    id: group.id.0.clone(),
+                    name: group.name.clone(),
                 })
                 .collect(),
             recent_workspaces,

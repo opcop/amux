@@ -102,6 +102,12 @@ fn main() {
                     startup.workspace_count
                 );
             }
+            amux_ui::StartupMode::DefaultHome { path } => {
+                println!(
+                    "startup: auto-opened default workspace at {}",
+                    path.display()
+                );
+            }
             amux_ui::StartupMode::Empty => {
                 println!(
                     "startup: empty session — use Ctrl+Shift+N or the command palette \

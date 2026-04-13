@@ -44,9 +44,18 @@ pub enum StartupMode {
     OpenedWorkspace { path: PathBuf },
     /// No explicit workspace; we restored an existing session from disk.
     Restored,
-    /// No explicit workspace and no restorable session: app boots into the
-    /// empty / welcome state. The user is expected to use Ctrl+Shift+N or
-    /// the command palette `workspace open <path>` flow to get going.
+    /// No explicit workspace and no restorable session, but we auto-
+    /// opened a default workspace rooted at `$HOME` so the user gets a
+    /// working terminal on launch instead of a blank window. Opt-in
+    /// "empty/welcome" is still available via [`StartupMode::Empty`]
+    /// when `HOME` / `USERPROFILE` resolves to something that isn't a
+    /// real directory.
+    DefaultHome { path: PathBuf },
+    /// Truly empty startup — no session, no `$HOME` resolved. The
+    /// user is expected to use Ctrl+Shift+N or the command palette
+    /// `workspace open <path>` flow to get going. This path is now
+    /// rare in practice (HOME is nearly always set) and mostly a
+    /// safety valve for broken test environments.
     Empty,
 }
 
@@ -127,9 +136,43 @@ impl DesktopApp {
             };
         }
 
+        // No explicit workspace, no restorable session — fall back to
+        // auto-opening a default workspace at `$HOME` so amux comes up
+        // as a usable terminal instead of a blank window. This is the
+        // UX unblock that replaces the old "click Open Workspace to
+        // use amux" friction; group-aware sidebar puts the default
+        // workspace under the unnamed default group so the visual
+        // result is a single flat row, just like the pre-group
+        // behavior of an open workspace.
+        if let Some(home) = Self::resolve_home_dir() {
+            self.controller
+                .open_local_workspace(&mut self.state, home.clone());
+            return StartupResult {
+                mode: StartupMode::DefaultHome { path: home },
+                workspace_count: self.state.session.workspaces.len(),
+            };
+        }
+
         StartupResult {
             mode: StartupMode::Empty,
             workspace_count: 0,
+        }
+    }
+
+    /// Resolve the user's home directory as a `PathBuf`. Tries
+    /// `HOME` first (Unix), then `USERPROFILE` (Windows), and
+    /// finally returns `None` if neither resolves to an actual
+    /// directory — in which case the caller falls back to
+    /// [`StartupMode::Empty`] rather than guessing `/`.
+    fn resolve_home_dir() -> Option<PathBuf> {
+        let raw = std::env::var("HOME")
+            .ok()
+            .or_else(|| std::env::var("USERPROFILE").ok())?;
+        let path = PathBuf::from(raw);
+        if path.is_dir() {
+            Some(path)
+        } else {
+            None
         }
     }
 
@@ -284,34 +327,59 @@ impl DesktopApp {
 mod tests {
     use super::{DesktopApp, StartupMode, StartupOptions};
 
-    /// Create a test app with a unique session path to avoid cross-test interference
+    /// Create a test app with a unique session path to avoid
+    /// cross-test interference. The controller writes its session
+    /// to `~/.<slug>` (via `default_session_dir`), not
+    /// `std::env::temp_dir()/<slug>-session` as the old cleanup
+    /// here assumed. Clean both for safety — any test that persists
+    /// a session needs the first path gone, and the second path is
+    /// cheap to unlink even if it never existed.
     fn test_app(suffix: &str) -> DesktopApp {
         let name = format!("amux-test-{}", suffix);
-        // Clean up any leftover session
-        let session_dir = std::env::temp_dir().join(format!("{}-session", name));
-        let _ = std::fs::remove_dir_all(&session_dir);
+        let slug = name.to_ascii_lowercase().replace(' ', "-");
+        if let Some(home) = amux_platform::real_user_home() {
+            let _ = std::fs::remove_dir_all(home.join(format!(".{slug}")));
+        }
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("{}-session", name)),
+        );
         DesktopApp::new(name)
     }
 
     #[test]
-    fn startup_with_no_session_lands_in_empty_state() {
-        // CP6 regression: a fresh launch with no persisted session and no
-        // explicit workspace path must NOT auto-open the current working
-        // directory, must NOT mock-seed README.md, and must NOT launch
-        // codex. The historical `bootstrap_demo` did all of those.
+    fn startup_with_no_session_opens_default_home() {
+        // Supersedes the original CP6 `Empty` assertion: amux now
+        // auto-opens a workspace at `$HOME` on empty launches so the
+        // user gets a working terminal instead of a blank window.
+        // The original CP6 anti-regressions that still matter are:
+        //   * No mock README.md seeded (open_files stays empty).
+        //   * No opinionated demo surface (no codex auto-launch,
+        //     no vertical split seeded).
+        // The "don't auto-open cwd" clause has been *deliberately
+        // relaxed*: we still don't touch `current_dir()` (which is
+        // `/` for macOS .app launches), we open the user's home
+        // directory instead, and the new `StartupMode::DefaultHome`
+        // variant exists precisely to make that transition audible
+        // in telemetry / banners.
         let mut app = test_app("startup-empty");
         let result = app.startup(StartupOptions::default());
-        assert_eq!(result.mode, StartupMode::Empty);
-        assert_eq!(result.workspace_count, 0);
+        match &result.mode {
+            StartupMode::DefaultHome { path } => {
+                assert!(path.is_dir(), "resolved home must be a real dir");
+            }
+            StartupMode::Empty => {
+                // Acceptable only in environments where neither
+                // HOME nor USERPROFILE resolves to a directory —
+                // extremely rare in practice but we keep the path
+                // open so CI runners with a broken env don't panic.
+            }
+            other => panic!("unexpected mode: {other:?}"),
+        }
 
         let snapshot = app.snapshot();
         assert!(
-            snapshot.active_workspace.is_none(),
-            "empty startup should leave active_workspace unset"
-        );
-        assert!(
             snapshot.open_files.is_empty(),
-            "empty startup should not auto-open any files"
+            "default-home startup must not auto-open any files"
         );
     }
 

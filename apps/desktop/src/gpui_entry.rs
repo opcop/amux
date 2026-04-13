@@ -1674,6 +1674,7 @@ impl Render for GpuiShellView {
 
         let sidebar_visible = !self.sidebar_state.collapsed;
         let workspaces = self.model.workspace_items.clone();
+        let workspace_groups = self.model.workspace_groups.clone();
 
         // Measure font metrics on first render
         let metrics = self.cell_metrics.get_or_insert_with(|| {
@@ -2354,12 +2355,100 @@ impl Render for GpuiShellView {
                                     }
                                     col.into_any_element()
                                 } else {
-                                    // Workspaces mode (original)
+                                    // Workspaces mode — group-aware render.
+                                    //
+                                    // Iterate groups in their declared
+                                    // order, and inside each group render
+                                    // the workspaces that belong to it.
+                                    // Rules:
+                                    //   * A group whose `name` is empty
+                                    //     (the default / migration group)
+                                    //     renders its members flat with
+                                    //     no header, so legacy users see
+                                    //     the pre-group layout unchanged.
+                                    //   * A group whose `name` is
+                                    //     non-empty gets a header row.
+                                    //   * Workspaces whose `group_id`
+                                    //     doesn't match any known group
+                                    //     (shouldn't happen after
+                                    //     migration, but defensive) fall
+                                    //     into a trailing "orphans"
+                                    //     bucket rendered flat after all
+                                    //     groups.
                                     let mut ws_col = div()
                                         .flex_col()
                                         .flex_1()
                                         .overflow_y_hidden();
+
+                                    // Build an iteration plan: for each
+                                    // group, collect its members (with
+                                    // original `ws_idx` preserved — the
+                                    // existing per-item render captures
+                                    // that index for drag-reorder).
+                                    let mut grouped: Vec<(
+                                        String, // group id (unused below but kept for debuggability)
+                                        String, // group name (empty => flat)
+                                        Vec<(usize, amux_ui::GpuiWorkspaceItem)>,
+                                    )> = workspace_groups
+                                        .iter()
+                                        .map(|g| (g.id.clone(), g.name.clone(), Vec::new()))
+                                        .collect();
+                                    let mut orphans: Vec<(usize, amux_ui::GpuiWorkspaceItem)> =
+                                        Vec::new();
                                     for (ws_idx, item) in workspaces.iter().enumerate() {
+                                        if let Some((_, _, bucket)) =
+                                            grouped.iter_mut().find(|(id, _, _)| id == &item.group_id)
+                                        {
+                                            bucket.push((ws_idx, item.clone()));
+                                        } else {
+                                            orphans.push((ws_idx, item.clone()));
+                                        }
+                                    }
+
+                                    // Flatten plan into a single vec of
+                                    // (optional header, members) so the
+                                    // rendering loop stays linear.
+                                    let mut plan: Vec<(
+                                        Option<String>,
+                                        Vec<(usize, amux_ui::GpuiWorkspaceItem)>,
+                                    )> = Vec::new();
+                                    for (_, name, members) in grouped {
+                                        if members.is_empty() {
+                                            continue;
+                                        }
+                                        let header = if name.is_empty() {
+                                            None
+                                        } else {
+                                            Some(name)
+                                        };
+                                        plan.push((header, members));
+                                    }
+                                    if !orphans.is_empty() {
+                                        plan.push((None, orphans));
+                                    }
+
+                                    for (header, members) in plan {
+                                        if let Some(header_name) = header {
+                                            // Render group header: small
+                                            // all-caps label + top/bottom
+                                            // spacing, no click affordance
+                                            // yet (Phase 3 will add
+                                            // collapse + rename).
+                                            ws_col = ws_col.child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .px_3()
+                                                    .pt(px(8.0))
+                                                    .pb(px(4.0))
+                                                    .text_xs()
+                                                    .text_color(rgb(crate::theme::TEXT_DIM))
+                                                    .child(header_name),
+                                            );
+                                        }
+                                        for (ws_idx, item) in members.iter() {
+                                            let ws_idx = *ws_idx;
+                                            let item = item;
                                             let is_active = item.is_active;
                                             let has_ws_activity = !is_active && self.workspace_terminals
                                                 .get(&item.id)
@@ -2490,6 +2579,7 @@ impl Render for GpuiShellView {
                                                         .into_any_element()
                                                 })
                                             );
+                                        }
                                     }
                                     // Bottom: + Open Workspace
                                     ws_col = ws_col.child(
