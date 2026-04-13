@@ -32,6 +32,11 @@ pub(crate) struct GpuiShellView {
     pub(crate) selecting: bool,
     pub(crate) context_menu: Option<ContextMenuState>,
     pub(crate) resize_drag: Option<ResizeDragState>,
+    pub(crate) scrollbar_drag: Option<ScrollbarDragState>,
+    pub(crate) selection_autoscroll: Option<SelectionAutoScrollState>,
+    /// Pane whose scrollbar the cursor is currently hovering over.
+    /// Drives the hover-to-expand visual on the scrollbar.
+    pub(crate) scrollbar_hover_pane: Option<amux_platform::terminal::manager::PaneId>,
     pub(crate) cursor_blink_frame: u32,
     pub(crate) renaming_workspace: Option<(String, String)>,
     pub(crate) renaming_tab: Option<(String, usize, String)>,
@@ -92,7 +97,8 @@ pub(crate) struct GpuiShellView {
 #[cfg(feature = "gpui")]
 pub(crate) use crate::state::{
     AgentPickerState, ContextMenuState, NewTabPickerItem, NewTabPickerState, PanePickerState,
-    ResizeDragState, SearchMode, SearchState, TemplatePickerState, ToastNotification,
+    ResizeDragState, ScrollbarDragState, ScrollbarHit, SearchMode, SearchState,
+    SelectionAutoScrollState, TemplatePickerState, ToastNotification,
 };
 
 // Drag ghost views (`DragTab`, `DragWorkspace`) live in
@@ -249,6 +255,9 @@ impl GpuiShellView {
             selecting: false,
             context_menu: None,
             resize_drag: None,
+            scrollbar_drag: None,
+            selection_autoscroll: None,
+            scrollbar_hover_pane: None,
             cursor_blink_frame: 0,
             renaming_workspace: None,
             renaming_tab: None,
@@ -398,6 +407,88 @@ impl GpuiShellView {
         let x = (pos.x.as_f32() - sidebar_w - pad).max(0.0);
         let y = (pos.y.as_f32() - tab_strip_h).max(0.0);
         ((x / cw) as usize, (y / ch) as usize)
+    }
+
+    /// Hit-test the scrollbar of every visible pane against a window-space
+    /// pixel position. Returns `(pane_id, hit, snapshot)` where `hit` says
+    /// whether the click landed on the thumb itself or on the empty track
+    /// above/below it, and `snapshot` carries the geometry needed to drive
+    /// a subsequent drag.
+    ///
+    /// Geometry mirrors `gpui_terminal.rs` Phase 4 so visual ↔ hit area
+    /// stay in lockstep. The clickable x-range is widened to ~12px (real
+    /// thumb is 4px) so the bar is actually grabbable with a mouse.
+    fn scrollbar_hit_test(
+        &self,
+        pos: gpui::Point<gpui::Pixels>,
+    ) -> Option<(amux_platform::terminal::manager::PaneId, ScrollbarHit, ScrollbarDragState)> {
+        use amux_platform::terminal::manager::PaneId;
+        let (cw, ch) = self.cell_dims();
+        let cw = cw.max(1.0);
+        let ch = ch.max(1.0);
+        let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
+        // Hit area uses the *hover* width plus a couple px of slop so
+        // the cursor catches the bar before the bar visually expands.
+        // The renderer right-aligns the bar to `cols*cw`, so we test
+        // against that right edge regardless of current visual width.
+        let bar_w = crate::gpui_terminal::SCROLLBAR_WIDTH_HOVER;
+        let hit_pad = 2.0_f32;
+        let mx = pos.x.as_f32();
+        let my = pos.y.as_f32();
+
+        for (pid_str, &(px_x, px_y, pw, ph)) in &self.pane_bounds {
+            // Only fire for the pane currently under the cursor.
+            if !(mx >= px_x && mx < px_x + pw && my >= px_y && my < px_y + ph) {
+                continue;
+            }
+            let pid = PaneId(pid_str.clone());
+            let pane = self.terminal_manager().get_pane(&pid)?;
+            let term = pane.active_terminal_ref()?;
+            let (offset, history, visible) = term.with_term(|t| {
+                use alacritty_terminal::grid::Dimensions;
+                (
+                    t.grid().display_offset(),
+                    t.grid().history_size(),
+                    t.grid().screen_lines(),
+                )
+            });
+            if history == 0 || offset == 0 {
+                return None; // bar not drawn
+            }
+            let cols = ((pw - pad).max(0.0) / cw) as usize;
+            let track_h = visible as f32 * ch;
+            let track_x = px_x + pad + cols as f32 * cw - bar_w;
+            let track_y = px_y;
+            let total = history + visible;
+            let thumb_ratio = (visible as f32 / total as f32).clamp(0.05, 1.0);
+            let thumb_h = (track_h * thumb_ratio).max(8.0);
+            let scroll_frac = (offset as f32 / history as f32).clamp(0.0, 1.0);
+            let thumb_y = track_y + (track_h - thumb_h) * (1.0 - scroll_frac);
+
+            // x hit area widened symmetrically around the bar.
+            let x_min = track_x - hit_pad;
+            let x_max = track_x + bar_w + hit_pad;
+            if !(mx >= x_min && mx <= x_max && my >= track_y && my <= track_y + track_h) {
+                return None;
+            }
+            let hit = if my >= thumb_y && my <= thumb_y + thumb_h {
+                ScrollbarHit::Thumb
+            } else if my < thumb_y {
+                ScrollbarHit::TrackAbove
+            } else {
+                ScrollbarHit::TrackBelow
+            };
+            let snapshot = ScrollbarDragState {
+                pane_id: pid.clone(),
+                start_mouse_y: my,
+                start_offset: offset,
+                history,
+                track_h,
+                thumb_h,
+            };
+            return Some((pid, hit, snapshot));
+        }
+        None
     }
 
     /// Send a mouse event to the active terminal PTY.
@@ -1381,6 +1472,96 @@ fn extract_command_after_prompt(line: &str) -> &str {
 }
 
 
+/// Spawn the selection edge auto-scroll loop. The loop ticks every
+/// 40ms while `selection_autoscroll` is `Some`, scrolls the
+/// scrollback by a progressive line count (1 line near the edge, up
+/// to ~8 lines further out), and extends the active selection to
+/// the row that just rolled into view at the top/bottom edge. The
+/// loop exits as soon as the cursor returns to the viewport, the
+/// mouse is released, or the selection is canceled — all of which
+/// clear `selection_autoscroll` from the regular event handlers.
+#[cfg(feature = "gpui")]
+fn spawn_selection_autoscroll_loop(cx: &mut gpui::Context<GpuiShellView>) {
+    cx.spawn(async move |this, cx| {
+        loop {
+            smol::Timer::after(std::time::Duration::from_millis(40)).await;
+            let cont = this
+                .update(cx, |this, cx| {
+                    if !this.selecting {
+                        this.selection_autoscroll = None;
+                        return false;
+                    }
+                    let Some(state) = this.selection_autoscroll.clone() else {
+                        return false;
+                    };
+                    tick_selection_autoscroll(this, state);
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !cont {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// One step of the selection auto-scroll: scroll the active pane's
+/// scrollback by a progressive number of lines and slide the
+/// selection endpoint to the freshly revealed top/bottom row.
+#[cfg(feature = "gpui")]
+fn tick_selection_autoscroll(this: &mut GpuiShellView, state: SelectionAutoScrollState) {
+    use alacritty_terminal::grid::{Dimensions, Scroll};
+    use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Side as AlacSide};
+
+    let dist = state.edge_pixels.abs();
+    // Progressive: ~1 line right at the edge, ramping up to ~8 lines
+    // when the cursor is far outside. Matches macOS Terminal feel.
+    let lines = ((1.0 + dist / 25.0).min(8.0)) as usize;
+    let lines = lines.max(1);
+    let scrolling_up = state.edge_pixels > 0.0;
+
+    let (cw, _ch) = this.cell_dims();
+    let cw = cw.max(1.0);
+    let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
+    let Some(&(px_x, _, _, _)) = this.pane_bounds.get(&state.pane_id.0) else {
+        return;
+    };
+    let col_hint = ((state.last_mouse_x - px_x - pad).max(0.0) / cw) as usize;
+
+    let pane_id = state.pane_id.clone();
+    let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pane_id) else {
+        return;
+    };
+    let Some(term) = pane.active_terminal() else {
+        return;
+    };
+    term.with_term_mut(|t| {
+        let delta = if scrolling_up {
+            lines as i32
+        } else {
+            -(lines as i32)
+        };
+        t.scroll_display(Scroll::Delta(delta));
+
+        let display_offset = t.grid().display_offset() as i32;
+        let screen_lines = t.grid().screen_lines();
+        let viewport_row = if scrolling_up {
+            0i32
+        } else {
+            screen_lines as i32 - 1
+        };
+        let grid_line = viewport_row - display_offset;
+        let cols_total = t.grid().columns();
+        let col_clamped = col_hint.min(cols_total.saturating_sub(1));
+        let point = AlacPoint::new(Line(grid_line), Column(col_clamped));
+        if let Some(ref mut sel) = t.selection {
+            sel.update(point, AlacSide::Right);
+        }
+    });
+}
+
 #[cfg(feature = "gpui")]
 impl Render for GpuiShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1581,6 +1762,36 @@ impl Render for GpuiShellView {
                     cx.notify();
                 }
 
+                // Scrollbar hit-test runs BEFORE selection so a click on the
+                // thumb/track doesn't also start a text selection underneath.
+                if let Some((sb_pane, hit, snapshot)) = this.scrollbar_hit_test(event.position) {
+                    this.terminal_manager_mut().set_active_pane(&sb_pane);
+                    match hit {
+                        ScrollbarHit::Thumb => {
+                            this.scrollbar_drag = Some(snapshot);
+                        }
+                        ScrollbarHit::TrackAbove => {
+                            // Page up by `visible` lines.
+                            let page = (snapshot.track_h
+                                / this.cell_dims().1.max(1.0))
+                                as usize;
+                            if let Some(term) = this.terminal_manager_mut().active_terminal() {
+                                term.scroll_up(page.max(1));
+                            }
+                        }
+                        ScrollbarHit::TrackBelow => {
+                            let page = (snapshot.track_h
+                                / this.cell_dims().1.max(1.0))
+                                as usize;
+                            if let Some(term) = this.terminal_manager_mut().active_terminal() {
+                                term.scroll_down(page.max(1));
+                            }
+                        }
+                    }
+                    cx.notify();
+                    return;
+                }
+
                 // Find which pane was clicked — use its bounds for cell coords.
                 // This fixes selection when clicking a non-active pane in a split layout.
                 let (clicked_pane_id, col, row) = match this.pixel_to_term_cell_at(event.position) {
@@ -1635,6 +1846,49 @@ impl Render for GpuiShellView {
             }))
             // Mouse: move — forward to PTY or extend selection
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+                // Handle scrollbar thumb drag — recompute display_offset from
+                // mouse delta against the snapshot taken at mousedown.
+                if let Some(drag) = this.scrollbar_drag.clone() {
+                    let dy = event.position.y.as_f32() - drag.start_mouse_y;
+                    let usable = (drag.track_h - drag.thumb_h).max(1.0);
+                    let frac_delta = dy / usable; // +down = scroll forward = lower offset
+                    let new_offset_f =
+                        drag.start_offset as f32 - frac_delta * drag.history as f32;
+                    let new_offset = new_offset_f.round().clamp(0.0, drag.history as f32) as usize;
+                    if new_offset != drag.start_offset
+                        || dy != 0.0
+                    {
+                        let pane_id = drag.pane_id.clone();
+                        if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pane_id) {
+                            if let Some(term) = pane.active_terminal() {
+                                term.with_term_mut(|t| {
+                                    let cur = t.grid().display_offset() as i32;
+                                    let delta = new_offset as i32 - cur;
+                                    if delta != 0 {
+                                        t.scroll_display(
+                                            alacritty_terminal::grid::Scroll::Delta(delta),
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    cx.notify();
+                    return;
+                }
+                // Track scrollbar hover for the expand-on-hover visual.
+                // Cheap: only re-runs the hit test against the pane the
+                // cursor is currently inside; everything else is hashmap
+                // lookups + a small math block.
+                {
+                    let new_hover = this
+                        .scrollbar_hit_test(event.position)
+                        .map(|(pid, _, _)| pid);
+                    if new_hover != this.scrollbar_hover_pane {
+                        this.scrollbar_hover_pane = new_hover;
+                        cx.notify();
+                    }
+                }
                 // Handle sidebar resize drag
                 if let Some((start_x, start_w)) = this.sidebar_drag_start {
                     let delta = event.position.x.as_f32() - start_x;
@@ -1661,6 +1915,47 @@ impl Render for GpuiShellView {
                     let (col, row) = this.pixel_to_term_cell(event.position);
                     this.send_mouse_event(32, col, row, true);
                 } else if this.selecting {
+                    // Edge auto-scroll: when the cursor leaves the active pane
+                    // vertically, kick off (or refresh) a tick loop that
+                    // scrolls the scrollback and extends the selection while
+                    // the cursor stays out of bounds. This matches macOS
+                    // Terminal / iTerm2 behavior.
+                    let active_pid_opt = this
+                        .terminal_manager()
+                        .active_pane_id()
+                        .cloned();
+                    if let Some(ref active_pid) = active_pid_opt {
+                        if let Some(&(px_x, px_y, pw, ph)) =
+                            this.pane_bounds.get(&active_pid.0)
+                        {
+                            let mx = event.position.x.as_f32();
+                            let my = event.position.y.as_f32();
+                            let in_x = mx >= px_x && mx < px_x + pw;
+                            let edge = if in_x && my < px_y {
+                                Some(px_y - my) // above top → positive
+                            } else if in_x && my >= px_y + ph {
+                                Some(-(my - (px_y + ph))) // below bottom → negative
+                            } else {
+                                None
+                            };
+                            if let Some(edge_px) = edge {
+                                let was_none = this.selection_autoscroll.is_none();
+                                this.selection_autoscroll = Some(SelectionAutoScrollState {
+                                    pane_id: active_pid.clone(),
+                                    edge_pixels: edge_px,
+                                    last_mouse_x: mx,
+                                });
+                                if was_none {
+                                    spawn_selection_autoscroll_loop(cx);
+                                }
+                                cx.notify();
+                                return;
+                            } else {
+                                this.selection_autoscroll = None;
+                            }
+                        }
+                    }
+
                     // Extend selection — use cell side based on direction relative
                     // to the mouse position within the cell. This ensures the leftmost
                     // character can be selected when dragging right-to-left.
@@ -1716,6 +2011,8 @@ impl Render for GpuiShellView {
                 this.selecting = false;
                 this.resize_drag = None;
                 this.sidebar_drag_start = None;
+                this.scrollbar_drag = None;
+                this.selection_autoscroll = None;
                 cx.notify();
             }))
             // Mouse: right button up — forward release to PTY
@@ -2292,11 +2589,19 @@ impl Render for GpuiShellView {
                                     self.search_state.as_ref()
                                         .map(|s| s.matches.clone())
                                         .unwrap_or_default();
+                                // Pane whose scrollbar should render in the
+                                // expanded (hover/drag) style. Drag wins over
+                                // hover so the bar stays big while the user
+                                // is actively dragging the thumb.
+                                let sb_expanded_pane = self.scrollbar_drag.as_ref()
+                                    .map(|d| d.pane_id.clone())
+                                    .or_else(|| self.scrollbar_hover_pane.clone());
+                                let sb_expanded_pane_ref = sb_expanded_pane.as_ref();
                                 let result = if let Some(zpid) = zoomed {
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, sb_expanded_pane_ref, cx)
                                 } else if let Some(layout) = layout_cloned {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, cx)
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, sb_expanded_pane_ref, cx)
                                 } else {
                                     div().flex_1().bg(rgb(crate::theme::SURFACE)).child("No terminal").into_any_element()
                                 };

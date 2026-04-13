@@ -14,6 +14,12 @@ use gpui::{
 /// Applied in both rendering and mouse hit-testing.
 pub const TERMINAL_LEFT_PADDING: f32 = 4.0;
 
+/// Visible scrollbar widths. macOS Terminal's scrollbar pattern:
+/// always-visible thin bar, expands and brightens when the cursor
+/// enters the bar region. We mirror that here.
+pub const SCROLLBAR_WIDTH_BASE: f32 = 8.0;
+pub const SCROLLBAR_WIDTH_HOVER: f32 = 12.0;
+
 // ─── Glyph Cache ───────────────────────────────────────────────
 
 /// Thread-local shaped text cache to avoid re-shaping unchanged text runs.
@@ -332,8 +338,10 @@ pub fn render_alacritty_terminal(
     font_size: f32,
     theme: &TerminalTheme,
     search_matches: &[alacritty_terminal::term::search::Match],
+    scrollbar_expanded: bool,
 ) -> impl IntoElement {
     let mut data = collect_render_data(term, cursor_blink_on, theme, search_matches);
+    data.scrollbar_expanded = scrollbar_expanded;
 
     // Active pane: respect the terminal's cursor visibility and shape.
     // Inactive pane: hide cursor so the user can identify which pane is active.
@@ -380,6 +388,10 @@ struct RenderData {
     match_bg: Rgba,
     /// Scroll state: (display_offset, total_history, visible_rows)
     scroll_info: (usize, usize, usize),
+    /// True when the cursor is hovering the scrollbar of this pane
+    /// (or actively dragging its thumb). Drives the wider/brighter
+    /// rendering in Phase 4.
+    scrollbar_expanded: bool,
 }
 
 // Reusable render buffer pool — avoids per-frame Vec allocations.
@@ -685,6 +697,7 @@ fn collect_render_data(
             selection_ranges,
             match_ranges,
             match_bg: rgb(crate::theme::MATCH_HIGHLIGHT_BG),
+            scrollbar_expanded: false,
         }
     })
 }
@@ -1111,7 +1124,11 @@ fn prepaint_terminal(
         if history > 0 && offset > 0 {
             let total = history + visible;
             let track_h = data.rows as f32 * cell_h;
-            let bar_w = 4.0_f32;
+            let (bar_w, track_alpha, thumb_alpha) = if data.scrollbar_expanded {
+                (SCROLLBAR_WIDTH_HOVER, 0.10_f32, 0.55_f32)
+            } else {
+                (SCROLLBAR_WIDTH_BASE, 0.06_f32, 0.35_f32)
+            };
             let track_x = content_origin_x + px(data.cols as f32 * cell_w - bar_w);
             let track_y = bounds.origin.y;
 
@@ -1126,13 +1143,13 @@ fn prepaint_terminal(
             scrollbar_rects.push(PaintRect {
                 origin: point(track_x, track_y),
                 size: size(px(bar_w), px(track_h)),
-                color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.05 },
+                color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: track_alpha },
             });
             // Thumb
             scrollbar_rects.push(PaintRect {
                 origin: point(track_x, thumb_y),
                 size: size(px(bar_w), px(thumb_h)),
-                color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.3 },
+                color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: thumb_alpha },
             });
         }
     }

@@ -134,6 +134,7 @@ pub(crate) fn render_layout(
     browser_tabs: &std::collections::HashMap<u64, crate::gpui_browser::BrowserTabEntry>,
     preview_tabs: &std::collections::HashMap<String, crate::gpui_preview::PreviewState>,
     search_matches: &[alacritty_terminal::term::search::Match],
+    scrollbar_expanded_pane: Option<&amux_platform::terminal::manager::PaneId>,
     cx: &mut Context<GpuiShellView>,
 ) -> gpui::AnyElement {
     use amux_platform::terminal::manager::TabLayout;
@@ -596,10 +597,11 @@ pub(crate) fn render_layout(
                         let term_matches: &[alacritty_terminal::term::search::Match] =
                             if is_active { search_matches } else { &[] };
                         if let Some(term) = pane.active_terminal_ref() {
+                            let sb_expanded = scrollbar_expanded_pane == Some(pane_id);
                             if active_tab_exited {
-                                render_exited_overlay(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, pane_id, term_matches, cx)
+                                render_exited_overlay(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, pane_id, term_matches, sb_expanded, cx)
                             } else {
-                                crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, term_matches).into_any_element()
+                                crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, term_matches, sb_expanded).into_any_element()
                             }
                         } else {
                             div().flex_1().flex().items_center().justify_center()
@@ -681,7 +683,7 @@ pub(crate) fn render_layout(
                 .w(px(left_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, cx));
+                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, scrollbar_expanded_pane, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-h-{}", split_id).into()))
@@ -712,7 +714,7 @@ pub(crate) fn render_layout(
                 .w(px(right_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, cx));
+                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, scrollbar_expanded_pane, cx));
 
             div()
                 .w(px(avail_w))
@@ -742,7 +744,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(top_h))
                 .overflow_hidden()
-                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, cx));
+                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, scrollbar_expanded_pane, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-v-{}", split_id).into()))
@@ -773,7 +775,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(bottom_h))
                 .overflow_hidden()
-                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, cx));
+                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, scrollbar_expanded_pane, cx));
 
             div()
                 .w(px(avail_w))
@@ -1151,10 +1153,12 @@ fn render_exited_overlay(
     theme: &crate::gpui_terminal::TerminalTheme,
     pane_id: &amux_platform::terminal::manager::PaneId,
     search_matches: &[alacritty_terminal::term::search::Match],
+    scrollbar_expanded: bool,
     cx: &mut Context<GpuiShellView>,
 ) -> gpui::AnyElement {
     let terminal_content = crate::gpui_terminal::render_alacritty_terminal(
         term, cursor_blink_on, metrics, is_active, font_family, font_size, theme, search_matches,
+        scrollbar_expanded,
     );
     let pid_restart = pane_id.clone();
     let pid_close = pane_id.clone();

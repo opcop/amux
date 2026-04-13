@@ -123,6 +123,48 @@ pub(crate) struct ResizeDragState {
     pub(crate) container_length: f32,
 }
 
+/// Auto-scroll state while the user is dragging a selection past the
+/// edge of a terminal pane. The mouse_move handler updates this every
+/// time the cursor leaves the pane vertically; a single spawned tick
+/// loop reads it on a timer and scrolls the scrollback while
+/// extending the selection to the freshly revealed rows. The loop
+/// exits on its own as soon as this becomes `None` (cursor returned
+/// to the viewport, mouse released, or selection canceled).
+#[derive(Clone, Debug)]
+pub(crate) struct SelectionAutoScrollState {
+    pub(crate) pane_id: amux_platform::terminal::manager::PaneId,
+    /// Pixels the cursor is past the pane edge. Positive = past the
+    /// top edge (need older history), negative = past the bottom edge
+    /// (need to rewind toward the live screen).
+    pub(crate) edge_pixels: f32,
+    /// Last known mouse x (window space) — used to compute which
+    /// column the auto-extended selection endpoint should land on.
+    pub(crate) last_mouse_x: f32,
+}
+
+/// Where on the scrollbar a click landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollbarHit {
+    Thumb,
+    TrackAbove,
+    TrackBelow,
+}
+
+/// Drag state for the scrollback scrollbar thumb.
+///
+/// Snapshotted at mousedown so the drag stays consistent even if
+/// new PTY output grows the history mid-drag — the thumb tracks the
+/// mouse against the geometry the user clicked on, not a moving target.
+#[derive(Clone, Debug)]
+pub(crate) struct ScrollbarDragState {
+    pub(crate) pane_id: amux_platform::terminal::manager::PaneId,
+    pub(crate) start_mouse_y: f32,
+    pub(crate) start_offset: usize,
+    pub(crate) history: usize,
+    pub(crate) track_h: f32,
+    pub(crate) thumb_h: f32,
+}
+
 /// Toast notification for agent status changes.
 #[derive(Clone, Debug)]
 pub(crate) struct ToastNotification {
