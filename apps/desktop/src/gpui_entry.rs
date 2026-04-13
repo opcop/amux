@@ -198,6 +198,37 @@ impl GpuiShellView {
         self.refresh_model();
     }
 
+    /// Create a fresh workspace rooted at the user's home
+    /// directory. Each click produces a new, distinct workspace —
+    /// unlike `prompt_open_local_workspace`, this path skips the
+    /// target-equality dedup so clicking "+ New" ten times gives
+    /// the user ten separate organizational buckets they can
+    /// rename into meaningful labels (e.g. "client work", "side
+    /// project", "scratch"). The auto-assigned names are
+    /// disambiguated ("arden", "arden 2", "arden 3", …) so the
+    /// sidebar rows stay visually distinct until the user takes
+    /// over naming.
+    ///
+    /// If `HOME` / `USERPROFILE` don't resolve to a real directory,
+    /// silently no-ops — the picker path ("+ Open") is still
+    /// available as a manual escape hatch.
+    pub(crate) fn new_home_workspace(&mut self, cx: &mut Context<Self>) {
+        let home = match std::env::var("HOME")
+            .ok()
+            .or_else(|| std::env::var("USERPROFILE").ok())
+        {
+            Some(raw) => std::path::PathBuf::from(raw),
+            None => return,
+        };
+        if !home.is_dir() {
+            return;
+        }
+        self.app.create_local_workspace(home);
+        self.refresh_model();
+        self.activate_new_active_workspace();
+        cx.notify();
+    }
+
     /// Returns the display name for the active workspace, falling back to the workspace ID.
     fn workspace_name(&self) -> String {
         self.model.active_workspace_name.clone()
@@ -2581,29 +2612,98 @@ impl Render for GpuiShellView {
                                             );
                                         }
                                     }
-                                    // Bottom: + Open Workspace
-                                    ws_col = ws_col.child(
-                                        div()
-                                            .id("sidebar-new-ws")
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .px_3()
-                                            .py_2()
-                                            .mx_1()
-                                            .mb_1()
-                                            .rounded(px(4.0))
-                                            .text_xs()
-                                            .text_color(rgb(crate::theme::TEXT_DIM))
-                                            .cursor_pointer()
-                                            .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
-                                            .child("+  Open Workspace")
-                                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.prompt_open_local_workspace(cx);
-                                                cx.notify();
-                                            })),
-                                    );
-                                    ws_col.into_any_element()
+                                    // "+ New" / "+ Open" bottom bar.
+                                    //
+                                    // Lives in its own flex child so it's
+                                    // **pinned** to the sidebar's bottom
+                                    // edge. The workspace list above gets
+                                    // `flex_1` and can grow/shrink; this
+                                    // row is `flex_shrink_0` so it always
+                                    // occupies its natural height and
+                                    // never scrolls out of view no matter
+                                    // how many workspaces the user has
+                                    // (up to the point where the list
+                                    // region stops showing all items —
+                                    // at that scale we'd add proper
+                                    // scrolling, but the pinned buttons
+                                    // still stay visible).
+                                    //
+                                    // Two entry points sit side-by-side
+                                    // because they solve different
+                                    // problems:
+                                    //   * "+ New" creates a fresh
+                                    //     workspace at `$HOME` via
+                                    //     `Command::CreateWorkspace` —
+                                    //     skips dedup so each click
+                                    //     gives a distinct bucket the
+                                    //     user can rename. Shares `$HOME`
+                                    //     resolution with
+                                    //     `StartupMode::DefaultHome`.
+                                    //   * "+ Open" preserves the
+                                    //     file-picker flow for users
+                                    //     who want a specific project
+                                    //     directory (dedup still
+                                    //     applies there — opening the
+                                    //     same folder twice is always
+                                    //     a re-activate).
+                                    let bottom_bar = div()
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .flex_row()
+                                        .gap_1()
+                                        .px_1()
+                                        .mb_1()
+                                        .child(
+                                            div()
+                                                .id("sidebar-new-empty-ws")
+                                                .flex_1()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .py_2()
+                                                .rounded(px(4.0))
+                                                .text_xs()
+                                                .text_color(rgb(crate::theme::TEXT_DIM))
+                                                .cursor_pointer()
+                                                .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
+                                                .child("+  New")
+                                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                                    this.new_home_workspace(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("sidebar-open-ws")
+                                                .flex_1()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .py_2()
+                                                .rounded(px(4.0))
+                                                .text_xs()
+                                                .text_color(rgb(crate::theme::TEXT_DIM))
+                                                .cursor_pointer()
+                                                .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
+                                                .child("+  Open")
+                                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                                    this.prompt_open_local_workspace(cx);
+                                                    cx.notify();
+                                                })),
+                                        );
+
+                                    // Assemble: scrollable workspace
+                                    // list on top, pinned button bar on
+                                    // the bottom. The outer wrapper is
+                                    // `flex_col().flex_1()` so it fills
+                                    // the sidebar content area that the
+                                    // mode-switcher above this block
+                                    // already sized.
+                                    div()
+                                        .flex_col()
+                                        .flex_1()
+                                        .child(ws_col)
+                                        .child(bottom_bar)
+                                        .into_any_element()
                                 })
                                 ) // end sidebar content column
                                 // Resize handle (right edge)

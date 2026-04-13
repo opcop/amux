@@ -321,6 +321,15 @@ impl DesktopApp {
     pub fn open_local_workspace(&mut self, path: PathBuf) {
         let _ = self.dispatch(UiAction::OpenLocalWorkspace(path));
     }
+
+    /// Create a fresh workspace at `path` without dedup-reusing an
+    /// existing workspace at the same target. See
+    /// `UiAction::CreateLocalWorkspace` for why this is a separate
+    /// entry point.
+    pub fn create_local_workspace(&mut self, path: PathBuf) {
+        self.controller
+            .create_local_workspace(&mut self.state, path);
+    }
 }
 
 #[cfg(test)]

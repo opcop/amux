@@ -61,6 +61,26 @@ impl SessionState {
                 self.workspaces.push(workspace);
                 Ok(vec![Event::WorkspaceOpened(workspace_id)])
             }
+            Command::CreateWorkspace(target) => {
+                // Unlike `OpenWorkspace`, this path intentionally
+                // SKIPS dedup — the sidebar "+ New" button is the
+                // caller, and its whole point is "give me another
+                // fresh workspace even though one with this target
+                // already exists". We still disambiguate the name
+                // so the sidebar rows are visually distinct until
+                // the user renames them.
+                let base = derive_workspace_name(&target);
+                let name = disambiguate_workspace_name(&self.workspaces, &base);
+                let workspace = build_workspace(
+                    WorkspaceId::new(next_workspace_id(&self.workspaces)),
+                    name,
+                    target,
+                );
+                let workspace_id = workspace.id.clone();
+                self.active_workspace_id = Some(workspace_id.clone());
+                self.workspaces.push(workspace);
+                Ok(vec![Event::WorkspaceOpened(workspace_id)])
+            }
             Command::CloseWorkspace(workspace_id) => {
                 let Some(index) = self.workspaces.iter().position(|ws| ws.id == workspace_id) else {
                     return Err(SessionOpError::WorkspaceNotFound(workspace_id));
@@ -195,6 +215,27 @@ fn split_axis_label(axis: SplitAxis) -> &'static str {
         SplitAxis::Horizontal => "Horizontal Split",
         SplitAxis::Vertical => "Vertical Split",
     }
+}
+
+/// Append a numeric suffix to `base` so the result doesn't match
+/// any existing workspace name. Used by `CreateWorkspace` where the
+/// caller wants a fresh workspace at the same target as an existing
+/// one (sidebar "+ New"), and showing three rows all labeled
+/// "arden" would be useless. Produces `base`, then `base 2`,
+/// `base 3`, … in sequence.
+fn disambiguate_workspace_name(workspaces: &[WorkspaceState], base: &str) -> String {
+    let taken: std::collections::HashSet<&str> =
+        workspaces.iter().map(|ws| ws.name.as_str()).collect();
+    if !taken.contains(base) {
+        return base.to_string();
+    }
+    for n in 2.. {
+        let candidate = format!("{base} {n}");
+        if !taken.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+    unreachable!("usize counter exhausted");
 }
 
 /// Pick the next `workspace-N` id by scanning **existing** ids for
@@ -405,6 +446,35 @@ mod tests {
             .expect_err("should fail without workspace");
 
         assert_eq!(err, SessionOpError::NoActiveWorkspace);
+    }
+
+    #[test]
+    fn create_workspace_skips_dedup_and_disambiguates_name() {
+        // `Command::CreateWorkspace` is the sidebar "+ New" entry
+        // point. Unlike `OpenWorkspace`, every call must produce a
+        // new row — otherwise the button appears to do nothing the
+        // second time the user clicks it. Names are auto-suffixed
+        // so the rows are visually distinct until the user renames
+        // them.
+        let mut session = SessionState::default();
+        let home = WorkspaceTarget::LocalPath {
+            path: PathBuf::from("/tmp/arden"),
+        };
+
+        for _ in 0..3 {
+            session
+                .apply(Command::CreateWorkspace(home.clone()))
+                .expect("create");
+        }
+
+        assert_eq!(session.workspaces.len(), 3, "each create must push a new row");
+        assert_eq!(session.workspaces[0].name, "arden");
+        assert_eq!(session.workspaces[1].name, "arden 2");
+        assert_eq!(session.workspaces[2].name, "arden 3");
+        // All three must have unique ids.
+        let ids: std::collections::HashSet<_> =
+            session.workspaces.iter().map(|ws| ws.id.0.as_str()).collect();
+        assert_eq!(ids.len(), 3);
     }
 
     #[test]

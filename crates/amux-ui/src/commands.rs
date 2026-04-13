@@ -15,6 +15,12 @@ pub enum UiAction {
     SelectPreviousCommandPaletteItem,
     OpenWorkspacePicker,
     OpenLocalWorkspace(PathBuf),
+    /// Create a fresh workspace at `path` without the dedup check
+    /// that `OpenLocalWorkspace` applies. Used by the sidebar
+    /// "+ New" button so repeated clicks produce multiple
+    /// distinct workspaces (all rooted at `$HOME` by default,
+    /// auto-disambiguated by name until the user renames them).
+    CreateLocalWorkspace(PathBuf),
     OpenWslWorkspace {
         distro: String,
         path: String,
@@ -59,6 +65,9 @@ impl UiAction {
             | UiAction::FocusNextTab
             | UiAction::FocusPreviousTab => None,
             UiAction::OpenLocalWorkspace(path) => Some(amux_core::Command::OpenWorkspace(
+                WorkspaceTarget::LocalPath { path },
+            )),
+            UiAction::CreateLocalWorkspace(path) => Some(amux_core::Command::CreateWorkspace(
                 WorkspaceTarget::LocalPath { path },
             )),
             UiAction::OpenWslWorkspace { distro, path } => Some(amux_core::Command::OpenWorkspace(

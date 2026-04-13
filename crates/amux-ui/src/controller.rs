@@ -526,6 +526,16 @@ impl AppController {
         let _ = self.persist_session(state);
     }
 
+    /// Create a fresh workspace at `path`, skipping the dedup
+    /// pass that `open_local_workspace` inherits from
+    /// `Command::OpenWorkspace`. Used by the sidebar "+ New"
+    /// entry point.
+    pub fn create_local_workspace(&self, state: &mut UiState, path: PathBuf) {
+        state.dispatch(UiAction::CreateLocalWorkspace(path));
+        let _ = self.seed_demo_workspace_files(state);
+        let _ = self.persist_session(state);
+    }
+
     /// Test/dev helper that seeds an opinionated demo workspace.
     ///
     /// Replaces the historical `bootstrap_demo` flow. Kept around because
