@@ -20,6 +20,7 @@ pub struct GpuiWorkspaceItem {
     pub id: String,
     pub name: String,
     pub is_active: bool,
+    pub target_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,6 +208,7 @@ impl AppRenderer for GpuiRenderer {
                     id: workspace.id.clone(),
                     name: workspace.name.clone(),
                     is_active: workspace.is_active,
+                    target_path: workspace.target_path.clone(),
                 })
                 .collect(),
             agent_items: snapshot
@@ -420,7 +422,9 @@ mod tests {
                 id: "workspace-1".into(),
                 name: "demo".into(),
                 is_active: true,
+                target_path: None,
             }],
+            recent_workspaces: vec![],
             agents: vec![AgentListItem {
                 id: "codex".into(),
                 name: "Codex".into(),

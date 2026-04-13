@@ -449,13 +449,20 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                             if !this.terminals_spawned {
                                 this.terminals_spawned = true;
                                 let (shell, args) = GpuiShellView::default_shell();
-                                let default_cwd = GpuiShellView::default_cwd();
                                 let active_ws = this.active_workspace_id.clone();
+                                // Resolve the spawn cwd from the active
+                                // workspace's own target path so newly
+                                // spawned terminals open *in* the workspace,
+                                // not in amux's own launch directory (which
+                                // is `/` for macOS .app bundle launches).
+                                let spawn_cwd = this
+                                    .workspace_spawn_cwd(&active_ws)
+                                    .or_else(GpuiShellView::default_cwd);
                                 if let Some(tm) = this.workspace_terminals.get_mut(&active_ws) {
                                     let pane_ids: Vec<_> = tm.active_layout()
                                         .map(|l| l.pane_ids()).unwrap_or_default();
                                     for pid in pane_ids {
-                                        tm.spawn_all_tabs_in_pane(&pid, &shell, &args, default_cwd.as_deref());
+                                        tm.spawn_all_tabs_in_pane(&pid, &shell, &args, spawn_cwd.as_deref());
                                     }
                                 }
                                 // Generate agent-prompt.md if it doesn't exist

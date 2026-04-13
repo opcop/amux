@@ -564,27 +564,53 @@ impl GpuiShellView {
             .expect("just ensured workspace exists")
     }
 
+    /// Resolve a workspace's spawn cwd. Prefers the workspace's
+    /// own `target_path` (what the user actually opened), falling
+    /// back to `default_cwd` if the path is missing or no longer
+    /// exists on disk. Without this lookup, all workspace terminals
+    /// inherit amux's own launch directory — which is `/` when amux
+    /// is started from a macOS .app bundle, and many shell prompts
+    /// (p10k, spaceship, starship) flag `PWD=/` with a lock icon.
+    pub(crate) fn workspace_spawn_cwd(&self, workspace_id: &str) -> Option<String> {
+        let target = self
+            .model
+            .workspace_items
+            .iter()
+            .find(|w| w.id == workspace_id)
+            .and_then(|w| w.target_path.clone())?;
+        if std::path::Path::new(&target).is_dir() {
+            Some(target)
+        } else {
+            Self::default_cwd()
+        }
+    }
+
     /// Ensure a workspace has a terminal manager, creating one if needed.
     /// Also heals layout/pane inconsistencies for existing managers.
     fn ensure_workspace_terminal(&mut self, workspace_id: &str) {
+        // Resolve spawn cwd BEFORE the `&mut self.workspace_terminals`
+        // borrow below — otherwise we'd hold a mutable borrow while
+        // still trying to read `self.model` for the target path.
+        let spawn_cwd = self
+            .workspace_spawn_cwd(workspace_id)
+            .or_else(Self::default_cwd);
+
         if !self.workspace_terminals.contains_key(workspace_id) {
             let mut tm = TerminalManager::with_scrollback(self.config.scrollback);
             let ws_name = self.model.active_workspace_name
                 .clone().unwrap_or_else(|| workspace_id.to_string());
             tm.set_workspace_name(&ws_name);
             let (shell, args) = Self::default_shell();
-            let cwd = Self::default_cwd();
-            let _ = tm.spawn_in_active(&shell, &args, cwd.as_deref());
+            let _ = tm.spawn_in_active(&shell, &args, spawn_cwd.as_deref());
             self.workspace_terminals.insert(workspace_id.to_string(), tm);
         } else if let Some(tm) = self.workspace_terminals.get_mut(workspace_id) {
             // Heal layout, then spawn all tabs (not just active) for restored workspaces
             tm.heal_layout();
             let (shell, args) = Self::default_shell();
-            let cwd = Self::default_cwd();
             let pane_ids: Vec<_> = tm.active_layout()
                 .map(|l| l.pane_ids()).unwrap_or_default();
             for pid in pane_ids {
-                tm.spawn_all_tabs_in_pane(&pid, &shell, &args, cwd.as_deref());
+                tm.spawn_all_tabs_in_pane(&pid, &shell, &args, spawn_cwd.as_deref());
             }
         }
     }

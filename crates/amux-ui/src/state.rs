@@ -1,7 +1,21 @@
 use amux_core::{
     Event, LayoutNode, SaveStatus as CoreSaveStatus, SessionOpError, SessionState, SplitAxis,
-    SurfaceState, TabState, WorkspaceState,
+    SurfaceState, TabState, WorkspaceState, WorkspaceTarget,
 };
+
+/// Stringify a workspace target for the snapshot's `target_path`
+/// field. `LocalPath` / `WindowsPath` stringify via `PathBuf::display`
+/// (lossy on non-UTF-8, but fine for spawn cwd). `WslPath` carries a
+/// Linux-style path as a plain string and is returned as-is; the
+/// desktop consumer is expected to gate WSL spawns separately.
+fn workspace_target_path_string(target: &WorkspaceTarget) -> Option<String> {
+    match target {
+        WorkspaceTarget::LocalPath { path } | WorkspaceTarget::WindowsPath { path } => {
+            Some(path.display().to_string())
+        }
+        WorkspaceTarget::WslPath { path, .. } => Some(path.clone()),
+    }
+}
 use amux_platform::{format_bytes, format_cpu_usage, get_load_status, PlatformCapabilities, SystemMetrics};
 
 use crate::commands::UiAction;
@@ -28,6 +42,13 @@ pub struct WorkspaceListItem {
     pub id: String,
     pub name: String,
     pub is_active: bool,
+    /// Target path as a plain string (stringified from the
+    /// `WorkspaceTarget`). Used by the desktop shell to spawn the
+    /// workspace's terminals in the right directory instead of
+    /// inheriting amux's own launch cwd (which is `/` when launched
+    /// from a macOS .app bundle and produces a `PWD=/` shell that
+    /// prompt themes flag with a lock icon).
+    pub target_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -311,6 +332,7 @@ impl UiState {
                     id: workspace.id.0.clone(),
                     name: workspace.name.clone(),
                     is_active: self.session.active_workspace_id.as_ref() == Some(&workspace.id),
+                    target_path: workspace_target_path_string(&workspace.target),
                 })
                 .collect(),
             recent_workspaces,

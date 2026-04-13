@@ -78,6 +78,7 @@ mod tests {
                 id: "workspace-1".into(),
                 name: "demo".into(),
                 is_active: true,
+                target_path: None,
             }],
             agents: vec![AgentListItem {
                 id: "codex".into(),
