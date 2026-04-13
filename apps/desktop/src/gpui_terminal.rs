@@ -25,13 +25,27 @@ pub const SCROLLBAR_WIDTH_HOVER: f32 = 12.0;
 /// Thread-local shaped text cache to avoid re-shaping unchanged text runs.
 /// Key: u64 hash of (text_content, style_bits) — avoids String allocation on lookup.
 /// Uses hash-keyed cache with generation-based partial eviction (retains recent half).
-#[cfg(feature = "gpui")]
+/// Glyph cache for shaped text lines.
+///
+/// Text shaping is the per-frame hot path — at 60 Hz × thousands of
+/// cells × multi-pane, calling GPUI's `shape_line` uncached eats both
+/// CPU and the heap (one `Arc<TextSystem>` allocation per call). This
+/// module memoizes shaped lines keyed by everything that affects the
+/// final glyph run. The key is intentionally exhaustive: a missing
+/// field == a stale cache hit == a render bug that's almost
+/// impossible to reproduce later (we shipped one of these for Claude's
+/// `/` menu where `fg_packed` was missing — see the `tests` module).
+///
+/// The inner [`Cache`] type is generic over the cached value so unit
+/// tests can pin the key/eviction invariants without dragging in the
+/// real `gpui::ShapedLine` (which needs a `WindowTextSystem` and
+/// thus a live GPU window). Production wires `Cache<gpui::ShapedLine>`
+/// into a thread-local under `cfg(feature = "gpui")`.
 mod glyph_cache {
-    use std::cell::RefCell;
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
 
-    /// Style bits packed into a u8 for cache key
+    /// Style bits packed into a u8 for cache key.
     pub fn style_key(bold: bool, italic: bool, underline: u8, strikethrough: bool) -> u8 {
         (bold as u8)
             | ((italic as u8) << 1)
@@ -39,68 +53,281 @@ mod glyph_cache {
             | ((strikethrough as u8) << 5)
     }
 
-    /// Compute a hash key from text + style without allocating a String.
-    fn hash_key(text: &str, style: u8) -> u64 {
+    /// Compute a hash key from text + style + packed fg color
+    /// (RGBA8 → u32). Color **must** be part of the key because
+    /// `gpui::ShapedLine` bakes the `TextRun.color` into its glyph
+    /// run and `paint()` uses that baked color verbatim. Without
+    /// this, the same text shaped under different colors would
+    /// collide and a cache hit could return a stale-color line —
+    /// exactly the symptom we hit with Claude's `/` menu, where the
+    /// "selected" fg color leaked onto every menu row that text
+    /// previously rolled through.
+    pub(super) fn hash_key(text: &str, style: u8, fg_packed: u32) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hasher);
         style.hash(&mut hasher);
+        fg_packed.hash(&mut hasher);
         hasher.finish()
     }
 
-    struct CacheEntry {
-        shaped: gpui::ShapedLine,
+    pub(super) const EVICT_THRESHOLD: usize = 8192;
+
+    pub(super) struct CacheEntry<V> {
+        pub(super) value: V,
+        pub(super) generation: u64,
+    }
+
+    /// Generic glyph cache, decoupled from gpui so unit tests can run
+    /// without a live text system.
+    pub(super) struct Cache<V: Clone> {
+        entries: HashMap<u64, CacheEntry<V>>,
         generation: u64,
     }
 
-    struct Cache {
-        entries: HashMap<u64, CacheEntry>,
-        generation: u64,
+    impl<V: Clone> Cache<V> {
+        pub(super) fn with_capacity(cap: usize) -> Self {
+            Self {
+                entries: HashMap::with_capacity(cap),
+                generation: 0,
+            }
+        }
+
+        pub(super) fn get(&mut self, text: &str, style: u8, fg_packed: u32) -> Option<V> {
+            let key = hash_key(text, style, fg_packed);
+            let cur_gen = self.generation;
+            self.entries.get_mut(&key).map(|entry| {
+                entry.generation = cur_gen;
+                entry.value.clone()
+            })
+        }
+
+        pub(super) fn insert(&mut self, text: &str, style: u8, fg_packed: u32, value: V) {
+            let key = hash_key(text, style, fg_packed);
+            // Evict stale entries when cache grows too large (keep recent half).
+            if self.entries.len() > EVICT_THRESHOLD {
+                let cutoff = self.generation.saturating_sub(1);
+                self.entries.retain(|_, e| e.generation > cutoff);
+                self.generation += 1;
+            }
+            let cur_gen = self.generation;
+            self.entries.insert(
+                key,
+                CacheEntry {
+                    value,
+                    generation: cur_gen,
+                },
+            );
+        }
+
+        #[cfg(test)]
+        pub(super) fn len(&self) -> usize {
+            self.entries.len()
+        }
     }
 
+    // ─── Production wiring (gated on gpui) ──────────────────────────
+
+    #[cfg(feature = "gpui")]
     thread_local! {
-        static CACHE: RefCell<Cache> = RefCell::new(Cache {
-            entries: HashMap::with_capacity(2048),
-            generation: 0,
-        });
+        static CACHE: std::cell::RefCell<Cache<gpui::ShapedLine>> =
+            std::cell::RefCell::new(Cache::with_capacity(2048));
     }
 
-    /// Look up a shaped line in the cache (zero-allocation).
-    pub fn get(text: &str, style: u8) -> Option<gpui::ShapedLine> {
+    #[cfg(feature = "gpui")]
+    pub fn get(text: &str, style: u8, fg_packed: u32) -> Option<gpui::ShapedLine> {
         use std::sync::atomic::Ordering;
-        let key = hash_key(text, style);
         CACHE.with(|c| {
             let mut cache = c.borrow_mut();
-            let cur_gen = cache.generation;
-            if let Some(entry) = cache.entries.get_mut(&key) {
-                entry.generation = cur_gen; // mark as recently used
-                crate::metrics::GLYPH_HITS.fetch_add(1, Ordering::Relaxed);
-                Some(entry.shaped.clone())
-            } else {
-                crate::metrics::GLYPH_MISSES.fetch_add(1, Ordering::Relaxed);
-                None
+            match cache.get(text, style, fg_packed) {
+                Some(v) => {
+                    crate::metrics::GLYPH_HITS.fetch_add(1, Ordering::Relaxed);
+                    Some(v)
+                }
+                None => {
+                    crate::metrics::GLYPH_MISSES.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
             }
         })
     }
 
-    /// Insert a shaped line into the cache.
-    pub fn insert(text: &str, style: u8, shaped: gpui::ShapedLine) {
-        let key = hash_key(text, style);
-        CACHE.with(|c| {
-            let mut cache = c.borrow_mut();
-            // Evict stale entries when cache grows too large (keep recent half)
-            if cache.entries.len() > 8192 {
-                let cutoff = cache.generation.saturating_sub(1);
-                cache.entries.retain(|_, e| e.generation > cutoff);
-                cache.generation += 1;
-            }
-            let cur_gen = cache.generation;
-            cache.entries.insert(key, CacheEntry {
-                shaped,
-                generation: cur_gen,
-            });
-        });
+    #[cfg(feature = "gpui")]
+    pub fn insert(text: &str, style: u8, fg_packed: u32, shaped: gpui::ShapedLine) {
+        CACHE.with(|c| c.borrow_mut().insert(text, style, fg_packed, shaped));
     }
 
+    // ─── Tests ──────────────────────────────────────────────────────
+    //
+    // Every test below pins ONE invariant about the cache key or
+    // eviction policy. The Claude `/` menu glyph-color regression
+    // (fixed earlier the same day this test file was added) lives as
+    // `color_is_part_of_key` — the canonical bug this suite was born
+    // to prevent.
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn cache() -> Cache<&'static str> {
+            Cache::with_capacity(16)
+        }
+
+        #[test]
+        fn round_trip_same_key() {
+            let mut c = cache();
+            c.insert("foo", 0, 0xff0000ff, "red-foo");
+            assert_eq!(c.get("foo", 0, 0xff0000ff), Some("red-foo"));
+        }
+
+        #[test]
+        fn miss_when_unseen() {
+            let mut c = cache();
+            assert_eq!(c.get("foo", 0, 0xff0000ff), None);
+        }
+
+        /// **Regression for the Claude `/` menu bug.**
+        ///
+        /// The selected menu row uses fg `#b1b9f9`; surrounding rows
+        /// use `#999999`. When a row's text moved between selected /
+        /// unselected positions, the cache returned the original
+        /// shaped line with the *previous* color baked in, leaving a
+        /// trail of "selected"-looking rows. The fix wired
+        /// `fg_packed` into the hash key. This test pins it: the
+        /// same text shaped under two colors must produce two
+        /// distinct entries that never alias.
+        #[test]
+        fn color_is_part_of_key() {
+            let mut c = cache();
+            c.insert("/performance-optim", 0, 0xb1b9f9ff, "selected-purple");
+            c.insert("/performance-optim", 0, 0x999999ff, "unselected-gray");
+            assert_eq!(
+                c.get("/performance-optim", 0, 0xb1b9f9ff),
+                Some("selected-purple")
+            );
+            assert_eq!(
+                c.get("/performance-optim", 0, 0x999999ff),
+                Some("unselected-gray")
+            );
+        }
+
+        #[test]
+        fn style_is_part_of_key() {
+            let mut c = cache();
+            let plain = style_key(false, false, 0, false);
+            let bold = style_key(true, false, 0, false);
+            c.insert("foo", plain, 0xffffffff, "plain");
+            c.insert("foo", bold, 0xffffffff, "bold");
+            assert_eq!(c.get("foo", plain, 0xffffffff), Some("plain"));
+            assert_eq!(c.get("foo", bold, 0xffffffff), Some("bold"));
+        }
+
+        #[test]
+        fn text_is_part_of_key() {
+            let mut c = cache();
+            c.insert("foo", 0, 0xffffffff, "foo-line");
+            c.insert("bar", 0, 0xffffffff, "bar-line");
+            assert_eq!(c.get("foo", 0, 0xffffffff), Some("foo-line"));
+            assert_eq!(c.get("bar", 0, 0xffffffff), Some("bar-line"));
+        }
+
+        /// Hidden cells render with `fg_packed = 0` (transparent) at
+        /// the call site. Make sure that hidden-fg=0 doesn't collide
+        /// with a literal "real black" entry shaped at fg=0x000000ff
+        /// — the alpha byte differs (00 vs ff), so the keys must
+        /// remain distinct.
+        #[test]
+        fn hidden_does_not_collide_with_black() {
+            let mut c = cache();
+            c.insert("foo", 0, 0, "hidden");
+            c.insert("foo", 0, 0x000000ff, "real-black");
+            assert_eq!(c.get("foo", 0, 0), Some("hidden"));
+            assert_eq!(c.get("foo", 0, 0x000000ff), Some("real-black"));
+        }
+
+        /// Every style bit must contribute. Bold/italic/underline/
+        /// strikethrough each map to a different shaped run, so two
+        /// styles that differ in any single bit must produce two
+        /// cache entries.
+        #[test]
+        fn each_style_bit_changes_key() {
+            let combos = [
+                style_key(false, false, 0, false),
+                style_key(true, false, 0, false),
+                style_key(false, true, 0, false),
+                style_key(false, false, 1, false),
+                style_key(false, false, 2, false),
+                style_key(false, false, 0, true),
+            ];
+            // All combos must be distinct.
+            let mut seen = std::collections::HashSet::new();
+            for k in &combos {
+                assert!(seen.insert(*k), "style bit collision at {k:?}");
+            }
+            let mut c = cache();
+            for (i, k) in combos.iter().enumerate() {
+                c.insert("foo", *k, 0xffffffff, Box::leak(format!("entry-{i}").into_boxed_str()));
+            }
+            for (i, k) in combos.iter().enumerate() {
+                let want = format!("entry-{i}");
+                assert_eq!(c.get("foo", *k, 0xffffffff), Some(&*Box::leak(want.into_boxed_str())));
+            }
+        }
+
+        /// Eviction kicks in once `len > EVICT_THRESHOLD`, drops the
+        /// older generation, and lets newly-inserted entries survive.
+        /// We use a small synthetic generation cycle by inserting
+        /// just over the threshold and asserting the most-recent
+        /// inserts are still gettable while the cache stayed bounded.
+        #[test]
+        fn eviction_bounds_size() {
+            let mut c: Cache<usize> = Cache::with_capacity(16);
+            // Push a hair over the threshold to force one eviction pass.
+            for i in 0..=(EVICT_THRESHOLD + 1) {
+                c.insert("k", 0, i as u32, i);
+            }
+            // Cache must NOT have grown unbounded.
+            assert!(
+                c.len() <= EVICT_THRESHOLD + 2,
+                "cache grew to {} (threshold {})",
+                c.len(),
+                EVICT_THRESHOLD
+            );
+            // The most recent insert must still be retrievable.
+            let last = EVICT_THRESHOLD + 1;
+            assert_eq!(c.get("k", 0, last as u32), Some(last));
+        }
+
+        /// Documents the eviction policy: it is **generation-bucketed**,
+        /// not LRU. When the size threshold is crossed, every entry
+        /// whose generation is older than the current one is dropped
+        /// in a single sweep. `get` updates an entry's generation,
+        /// but only entries inserted/touched **after** the most
+        /// recent eviction bump survive the next eviction.
+        ///
+        /// This test pins both halves of that contract so a future
+        /// "smarter LRU" refactor surfaces as a deliberate change
+        /// rather than an accidental one.
+        #[test]
+        fn eviction_is_generation_bucketed() {
+            let mut c: Cache<usize> = Cache::with_capacity(16);
+            // gen 0: insert a survivor, then fill enough to force the
+            // first eviction pass.
+            c.insert("gen0", 0, 0xffffffff, 0xdead);
+            for i in 0..=(EVICT_THRESHOLD + 1) {
+                c.insert("filler", 0, i as u32, i);
+            }
+            // The survivor was at gen 0, so the first eviction wiped it.
+            assert_eq!(
+                c.get("gen0", 0, 0xffffffff),
+                None,
+                "gen-0 entries do not survive the first eviction pass"
+            );
+            // But entries inserted **after** the bump (now gen ≥ 1)
+            // are reachable.
+            c.insert("gen1", 0, 0xffffffff, 0xbeef);
+            assert_eq!(c.get("gen1", 0, 0xffffffff), Some(0xbeef));
+        }
+    }
 }
 
 // ─── Terminal Theme ─────────────────────────────────────────────
@@ -736,22 +963,33 @@ fn shape_cursor_x(
     }
 }
 
+/// Pack a `Rgba` into a u32 (RGBA8) so it can join the glyph cache key.
+#[cfg(feature = "gpui")]
+fn pack_rgba(c: Rgba) -> u32 {
+    let r = (c.r.clamp(0.0, 1.0) * 255.0) as u32;
+    let g = (c.g.clamp(0.0, 1.0) * 255.0) as u32;
+    let b = (c.b.clamp(0.0, 1.0) * 255.0) as u32;
+    let a = (c.a.clamp(0.0, 1.0) * 255.0) as u32;
+    (r << 24) | (g << 16) | (b << 8) | a
+}
+
 /// Shape a text run, using the glyph cache when possible.
 #[cfg(feature = "gpui")]
 fn shape_cached(
     text: &str,
     style_bits: u8,
+    fg_packed: u32,
     run: gpui::TextRun,
     font_size: Pixels,
     text_system: &std::sync::Arc<gpui::WindowTextSystem>,
 ) -> gpui::ShapedLine {
-    if let Some(cached) = glyph_cache::get(text, style_bits) {
+    if let Some(cached) = glyph_cache::get(text, style_bits, fg_packed) {
         return cached;
     }
     let shaped = text_system.shape_line(
         SharedString::from(text.to_string()), font_size, &[run], None,
     );
-    glyph_cache::insert(text, style_bits, shaped.clone());
+    glyph_cache::insert(text, style_bits, fg_packed, shaped.clone());
     shaped
 }
 
@@ -995,8 +1233,9 @@ fn prepaint_terminal(
                     // Flush pending narrow run
                     if has_visible {
                         let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
+                        let fg_packed = if hidden { 0 } else { pack_rgba(fg) };
                         let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
-                        let shaped = shape_cached(&narrow_text, sk, run, font_size, &text_system);
+                        let shaped = shape_cached(&narrow_text, sk, fg_packed, run, font_size, &text_system);
                         let x = content_origin_x + px(narrow_start as f32 * cell_w);
                         text_lines.push(PaintText { origin: point(x, y), shaped });
                     }
@@ -1014,8 +1253,9 @@ fn prepaint_terminal(
                     if ch != ' ' {
                         let ch_str = ch.to_string();
                         let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
+                        let fg_packed = if hidden { 0 } else { pack_rgba(fg) };
                         let run = build_run(ch_str.len(), fg, bold, italic, underline, strikethrough, hidden);
-                        let shaped = shape_cached(&ch_str, sk, run, font_size, &text_system);
+                        let shaped = shape_cached(&ch_str, sk, fg_packed, run, font_size, &text_system);
                         let x = content_origin_x + px(col as f32 * cell_w);
                         text_lines.push(PaintText { origin: point(x, y), shaped });
                     }
@@ -1049,8 +1289,9 @@ fn prepaint_terminal(
             // Flush remaining narrow run
             if has_visible {
                 let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
+                let fg_packed = if hidden { 0 } else { pack_rgba(fg) };
                 let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
-                let shaped = shape_cached(&narrow_text, sk, run, font_size, &text_system);
+                let shaped = shape_cached(&narrow_text, sk, fg_packed, run, font_size, &text_system);
                 let x = content_origin_x + px(narrow_start as f32 * cell_w);
                 text_lines.push(PaintText { origin: point(x, y), shaped });
             }
@@ -1262,7 +1503,7 @@ fn rgba_to_hsla(c: Rgba) -> Hsla {
 #[cfg(feature = "gpui")]
 fn convert_color(
     color: &alacritty_terminal::vte::ansi::Color,
-    default: &Rgba,
+    _default: &Rgba,
     is_fg: bool,
     dim: bool,
     theme: &TerminalTheme,
@@ -1316,20 +1557,6 @@ fn convert_color(
             r: base.r * 0.5,
             g: base.g * 0.5,
             b: base.b * 0.5,
-            a: base.a,
-        }
-    } else if !is_fg && !matches!(color,
-        AnsiColor::Named(NamedColor::Background | NamedColor::Foreground | NamedColor::Cursor)
-    ) && base != *default {
-        // Non-default ANSI background colors: dim to ~40% brightness so they
-        // don't overpower foreground text. Common trigger: `ls` in WSL where
-        // other-writable dirs get bright green/yellow backgrounds via LS_COLORS.
-        let bg = rgb(theme.bg);
-        let blend = 0.35_f32;
-        Rgba {
-            r: bg.r + (base.r - bg.r) * blend,
-            g: bg.g + (base.g - bg.g) * blend,
-            b: bg.b + (base.b - bg.b) * blend,
             a: base.a,
         }
     } else {
