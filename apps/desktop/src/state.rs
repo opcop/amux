@@ -111,6 +111,13 @@ pub(crate) struct ContextMenuState {
     /// Actions should target this pane, not whatever pane is
     /// active at click time.
     pub(crate) source_pane: Option<amux_platform::terminal::manager::PaneId>,
+    /// Absolute path resolved from the active selection at the
+    /// moment the menu opened. `Some` iff the selection text
+    /// resolves to an existing file via the Tier 1 pipeline.
+    /// Drives the "Open Selection as File" menu item — resolved
+    /// once at right-click time instead of on every render frame
+    /// so the FS stats don't run in the render hot path.
+    pub(crate) selection_path: Option<String>,
 }
 
 /// Drag state for resizing split panes.

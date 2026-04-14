@@ -566,9 +566,11 @@ pub fn render_alacritty_terminal(
     theme: &TerminalTheme,
     search_matches: &[alacritty_terminal::term::search::Match],
     scrollbar_expanded: bool,
+    hover_link_segments: Vec<(usize, usize, usize)>,
 ) -> impl IntoElement {
     let mut data = collect_render_data(term, cursor_blink_on, theme, search_matches);
     data.scrollbar_expanded = scrollbar_expanded;
+    data.hover_link_segments = hover_link_segments;
 
     // Active pane: respect the terminal's cursor visibility and shape.
     // Inactive pane: hide cursor so the user can identify which pane is active.
@@ -619,6 +621,11 @@ struct RenderData {
     /// (or actively dragging its thumb). Drives the wider/brighter
     /// rendering in Phase 4.
     scrollbar_expanded: bool,
+    /// Hovered file-path link segments: one `(row, start_col,
+    /// end_col)` tuple per row the link spans. Drawn as a 1.5px
+    /// underline in each cell's fg color. Multi-segment for paths
+    /// that wrap across the terminal's right edge.
+    hover_link_segments: Vec<(usize, usize, usize)>,
 }
 
 // Reusable render buffer pool — avoids per-frame Vec allocations.
@@ -953,6 +960,7 @@ fn collect_render_data(
             match_ranges,
             match_bg: rgb(crate::theme::MATCH_HIGHLIGHT_BG),
             scrollbar_expanded: false,
+            hover_link_segments: Vec::new(),
         }
     })
 }
@@ -1386,6 +1394,28 @@ fn prepaint_terminal(
                 push_underline(ul, ul_color, x, baseline_y, w, cell_w, &mut underline_rects);
             }
         }
+    }
+
+    // ── Phase 2.6: Hover-link underline ──
+    // Overlay a 1.5px underline for each segment of the Cmd/Ctrl+
+    // hovered path, signalling click-to-preview. Multi-segment when
+    // the path wraps across the terminal's right edge. Row bounds
+    // checked per-segment — RenderData.rows can shrink between hover
+    // state update and paint.
+    for &(hrow, hstart, hend) in &data.hover_link_segments {
+        if hrow >= data.rows || hstart >= data.cols { continue; }
+        let end = hend.min(data.cols.saturating_sub(1));
+        if end < hstart { continue; }
+        let y = bounds.origin.y + px(hrow as f32 * cell_h);
+        let x = content_origin_x + px(hstart as f32 * cell_w);
+        let w = (end - hstart + 1) as f32 * cell_w;
+        let baseline_y = y + px(cell_h - metrics.descent.abs().max(2.0));
+        let color = data.grid[hrow][hstart].fg;
+        underline_rects.push(PaintRect {
+            origin: point(x, baseline_y),
+            size: size(px(w), px(1.5)),
+            color,
+        });
     }
 
     // ── Phase 3: Cursor overlay (beam/underline) ──

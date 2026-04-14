@@ -37,6 +37,12 @@ pub(crate) struct GpuiShellView {
     /// Pane whose scrollbar the cursor is currently hovering over.
     /// Drives the hover-to-expand visual on the scrollbar.
     pub(crate) scrollbar_hover_pane: Option<amux_platform::terminal::manager::PaneId>,
+    /// Hovered file-path link for Cmd/Ctrl+Click preview. Present
+    /// when the preview modifier is held AND the cursor is over a
+    /// valid path. Drives the underline highlight in the terminal
+    /// renderer. Cleared on mouse move when the modifier is not
+    /// held or no path is under the cursor.
+    pub(crate) hover_link: Option<HoverLinkState>,
     pub(crate) cursor_blink_frame: u32,
     pub(crate) renaming_workspace:
         Option<(String, gpui::Entity<gpui_component::input::InputState>)>,
@@ -94,6 +100,22 @@ pub(crate) struct GpuiShellView {
     /// user clears the directory manually. `None` when nothing was
     /// found (nothing to display).
     pub(crate) crash_notice: Option<usize>,
+}
+
+/// Per-row visual segment of a hovered file link: `(row, start_col,
+/// end_col)` inclusive. A path that wraps across the terminal's
+/// right edge produces multiple segments.
+pub(crate) type HoverSegment = (usize, usize, usize);
+
+/// Per-pane hover state for the Cmd/Ctrl+Click file-link preview.
+/// `segments` covers the visual cells to underline — a single-row
+/// match has one segment; a wrapped path (via WRAPLINE flag or OSC
+/// 8 hyperlink id continuity) has one segment per row it spans.
+#[cfg(feature = "gpui")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HoverLinkState {
+    pub pane_id: amux_platform::terminal::manager::PaneId,
+    pub segments: Vec<HoverSegment>,
 }
 
 // UI state structs (SearchState, pickers, toast, context menu,
@@ -419,6 +441,7 @@ impl GpuiShellView {
             scrollbar_drag: None,
             selection_autoscroll: None,
             scrollbar_hover_pane: None,
+            hover_link: None,
             cursor_blink_frame: 0,
             renaming_workspace: None,
             renaming_tab: None,
@@ -2016,9 +2039,15 @@ impl Render for GpuiShellView {
 
                 let (mouse_mode, _) = this.active_term_mouse_mode();
 
-                // Ctrl+Click: try to preview file path under cursor.
+                // Ctrl/Cmd+Click: try to preview file path under cursor.
                 // Always takes priority, even when mouse mode is on (e.g. Claude Code).
-                if event.modifiers.control {
+                // macOS convention uses Cmd; other platforms use Ctrl.
+                let preview_modifier = if cfg!(target_os = "macos") {
+                    event.modifiers.platform
+                } else {
+                    event.modifiers.control
+                };
+                if preview_modifier {
                     if crate::preview_open::try_preview_path_at(this, col, row) {
                         cx.notify();
                         return;
@@ -2055,6 +2084,20 @@ impl Render for GpuiShellView {
                     this.selecting = true;
                 }
                 cx.notify();
+            }))
+            // Modifier key release clears stale hover-link underline.
+            // Without this, releasing Cmd/Ctrl without moving the mouse
+            // leaves the underline visible until the next mouse move.
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _window, cx| {
+                let held = if cfg!(target_os = "macos") {
+                    event.modifiers.platform
+                } else {
+                    event.modifiers.control
+                };
+                if !held && this.hover_link.is_some() {
+                    this.hover_link = None;
+                    cx.notify();
+                }
             }))
             // Mouse: move — forward to PTY or extend selection
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
@@ -2098,6 +2141,37 @@ impl Render for GpuiShellView {
                         .map(|(pid, _, _)| pid);
                     if new_hover != this.scrollbar_hover_pane {
                         this.scrollbar_hover_pane = new_hover;
+                        cx.notify();
+                    }
+                }
+                // File-link hover feedback: underline the path under
+                // the cursor when the preview modifier (Cmd on macOS,
+                // Ctrl elsewhere) is held. Driven by mouse move only,
+                // so releasing the modifier without moving the mouse
+                // leaves the underline visible until the next move.
+                {
+                    let modifier_held = if cfg!(target_os = "macos") {
+                        event.modifiers.platform
+                    } else {
+                        event.modifiers.control
+                    };
+                    // Resolve by enumeration: collect every plausible
+                    // candidate (hyperlink / markdown / quoted /
+                    // bareword with wrap extension) and validate each
+                    // against the real filesystem. Only produce hover
+                    // state when a real file is found — the contract
+                    // is "underline = clickable = exists".
+                    let new_hover: Option<HoverLinkState> = if modifier_held {
+                        this.pixel_to_term_cell_at(event.position).and_then(|(pid, col, row)| {
+                            let term = this.terminal_manager().get_pane(&pid)?.active_terminal_ref()?;
+                            let hit = crate::preview_open::resolve_path_at_term(term, &*this, col, row)?;
+                            Some(HoverLinkState { pane_id: pid, segments: hit.segments })
+                        })
+                    } else {
+                        None
+                    };
+                    if new_hover != this.hover_link {
+                        this.hover_link = new_hover;
                         cx.notify();
                     }
                 }
@@ -2415,9 +2489,26 @@ impl Render for GpuiShellView {
                     let source_pane = this.pixel_to_term_cell_at(event.position)
                         .map(|(pid, _, _)| pid)
                         .or_else(|| this.terminal_manager().active_pane_id().cloned());
+
+                    // Resolve the active selection to a real file once,
+                    // at menu-open time. Stored on ContextMenuState so
+                    // `menu::build_items` can decide enable/disable for
+                    // the "Open Selection as File" row without running
+                    // FS stats every render frame.
+                    let selection_path: Option<String> = this
+                        .terminal_manager()
+                        .active_terminal_ref()
+                        .and_then(|t| t.with_term(|term| term.selection_to_string()))
+                        .filter(|s| !s.is_empty())
+                        .and_then(|s| {
+                            crate::preview_open::try_resolve_selection_as_path(&*this, &s)
+                                .map(|hit| hit.absolute)
+                        });
+
                     this.context_menu = Some(ContextMenuState {
                         position: event.position,
                         source_pane,
+                        selection_path,
                     });
                 }
                 cx.notify();
@@ -3070,11 +3161,12 @@ impl Render for GpuiShellView {
                                     .map(|d| d.pane_id.clone())
                                     .or_else(|| self.scrollbar_hover_pane.clone());
                                 let sb_expanded_pane_ref = sb_expanded_pane.as_ref();
+                                let hover_link_ref = self.hover_link.as_ref();
                                 let result = if let Some(zpid) = zoomed {
                                     let single = amux_platform::terminal::manager::PaneLayout::Single(zpid.clone());
-                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, sb_expanded_pane_ref, cx)
+                                    render_layout(&single, self.terminal_manager(), Some(&zpid), content_w, content_h, cursor_blink_on, &metrics, true, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, sb_expanded_pane_ref, hover_link_ref, cx)
                                 } else if let Some(layout) = layout_cloned {
-                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, sb_expanded_pane_ref, cx)
+                                    render_layout(&layout, self.terminal_manager(), active_pane_id.as_ref(), content_w, content_h, cursor_blink_on, &metrics, false, &renaming_tab, origin_x, origin_y, &mut pane_bounds, &self.config.font_family, self.config.font_size, &self.terminal_theme, &self.browser_tabs, &self.preview_tabs, &search_matches, sb_expanded_pane_ref, hover_link_ref, cx)
                                 } else {
                                     div().flex_1().bg(rgb(crate::theme::SURFACE)).child("No terminal").into_any_element()
                                 };

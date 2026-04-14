@@ -98,7 +98,25 @@ pub(crate) fn build_items(view: &GpuiShellView) -> Vec<ContextMenuItem> {
     use shortcut_labels::*;
 
     let multi_pane = view.terminal_manager().total_panes() > 1;
-    vec![
+
+    // "Open Selection as File" — shown only when the right-click
+    // captured a selection that resolved to a real file. The
+    // resolution happened once at menu-open time and is stored in
+    // `context_menu.selection_path`, so `build_items` pays no FS
+    // cost here. When there's no selection or it didn't resolve,
+    // the row is omitted entirely (rather than shown disabled) to
+    // keep the menu compact in the common case.
+    let selection_resolved = view
+        .context_menu
+        .as_ref()
+        .and_then(|m| m.selection_path.as_deref())
+        .is_some();
+
+    let mut items: Vec<ContextMenuItem> = Vec::with_capacity(10);
+    if selection_resolved {
+        items.push(ContextMenuItem::action("Open Selection as File", None, true).separator());
+    }
+    items.extend([
         ContextMenuItem::action("Copy", Some(COPY), has_selection),
         ContextMenuItem::action("Paste", Some(PASTE), true).separator(),
         ContextMenuItem::action("Send to Pane", Some(SEND), multi_pane),
@@ -111,7 +129,8 @@ pub(crate) fn build_items(view: &GpuiShellView) -> Vec<ContextMenuItem> {
         } else {
             ContextMenuItem::action("Zoom Pane", Some(ZOOM), multi_pane)
         },
-    ]
+    ]);
+    items
 }
 
 /// Execute a context menu action by label.
@@ -133,6 +152,10 @@ pub(crate) fn dispatch(
     cx: &mut Context<GpuiShellView>,
 ) {
     let source_pane = view.context_menu.as_ref().and_then(|m| m.source_pane.clone());
+    let selection_path = view
+        .context_menu
+        .as_ref()
+        .and_then(|m| m.selection_path.clone());
     view.context_menu = None;
     if let Some(pid) = source_pane {
         view.terminal_manager_mut().set_active_pane(&pid);
@@ -140,6 +163,11 @@ pub(crate) fn dispatch(
 
     match label {
         "Open Workspace" => view.prompt_open_local_workspace(cx),
+        "Open Selection as File" => {
+            if let Some(path) = selection_path {
+                crate::preview_open::open_preview_file(view, &path);
+            }
+        }
         "Copy" => view.copy_selection(cx),
         "Send to Pane" => view.start_send_to_pane(cx),
         "Paste" => view.paste_clipboard(cx),
