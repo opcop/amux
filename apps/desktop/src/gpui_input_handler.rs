@@ -65,16 +65,7 @@ impl gpui::EntityInputHandler for GpuiShellView {
             }
         }
 
-        // Workspace / tab rename fields are now real
-        // `gpui_component::input::InputState` entities that own
-        // their own focus and keystroke handling (see the entity
-        // construction in the render path). When one of them has
-        // focus, GPUI routes keys into the Input directly and
-        // `replace_text_in_range` never fires on `GpuiShellView`
-        // — so there's nothing for us to intercept here. The old
-        // `rename_text.push_str(text)` path was the symptom of a
-        // toy-input implementation that ignored arrow keys,
-        // selection, and IME; it's gone.
+        // Rename Input owns its own IME routing; bail if it's focused.
         if let Some((_, ref input)) = self.renaming_workspace {
             use gpui::Focusable;
             if input.read(cx).focus_handle(cx).is_focused(_window) {
@@ -291,13 +282,9 @@ impl GpuiShellView {
 
         // (Legacy standalone preview_state removed — preview is now tab-based)
 
-        // Workspace / tab rename: when an InputState owns focus,
-        // GPUI routes keys into the Input itself (arrow nav,
-        // selection, Cmd+A, etc). We still need to swallow keys
-        // *at this level* so the rename doesn't also leak them
-        // to the terminal underneath. Enter (commit) and Escape
-        // (cancel) are handled via the Input's `InputEvent`
-        // subscription set up at construction time, not here.
+        // Swallow keys so rename doesn't leak to the terminal.
+        // Enter / Escape handled via the Input's `InputEvent`
+        // subscription, not here.
         if let Some((_, ref input)) = self.renaming_workspace {
             use gpui::Focusable;
             if input.read(cx).focus_handle(cx).is_focused(window) {
