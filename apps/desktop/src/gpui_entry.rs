@@ -803,6 +803,23 @@ impl GpuiShellView {
         }
     }
 
+    /// "Where should a new terminal spawn right now?" — the
+    /// canonical fallback for every spawn/split/restart path. The
+    /// rule: prefer the ACTIVE workspace's target path, fall back
+    /// to the GUI process's launch directory only if the workspace
+    /// has no `target_path` at all. Never just use `default_cwd`
+    /// alone — that leaks amux's own launch directory (e.g.
+    /// `/Users/.../amux` from `cargo run`, or `/` from a macOS
+    /// .app bundle) into user workspaces.
+    ///
+    /// Callers that already have a pane-specific live cwd (e.g.
+    /// split/new-tab inheriting the parent pane's cwd) should
+    /// apply this as `live_cwd.or_else(|| self.spawn_cwd())`.
+    pub(crate) fn spawn_cwd(&self) -> Option<String> {
+        self.workspace_spawn_cwd(&self.active_workspace_id)
+            .or_else(Self::default_cwd)
+    }
+
     /// Ensure a workspace has a terminal manager, creating one if needed.
     /// Also heals layout/pane inconsistencies for existing managers.
     fn ensure_workspace_terminal(&mut self, workspace_id: &str) {
@@ -930,7 +947,11 @@ impl GpuiShellView {
             .or_else(|| saved_cwd.filter(|p| std::path::Path::new(p).is_dir()));
 
         let (shell, args) = inherited.unwrap_or_else(Self::default_shell);
-        let cwd = live_cwd.or_else(Self::default_cwd);
+        // If the pane has no detectable live cwd (PTY not up yet,
+        // /proc unavailable, prompt not parseable), fall back through
+        // the active workspace's own path before hitting the GUI
+        // launch dir. See `spawn_cwd` doc for why.
+        let cwd = live_cwd.or_else(|| self.spawn_cwd());
         CapturedEnv { shell, args, cwd, initial_input: None }
     }
 
@@ -1017,9 +1038,11 @@ impl GpuiShellView {
         let ws_name = self.workspace_name();
         tm.set_workspace_name(&ws_name);
         self.workspace_terminals.insert(self.active_workspace_id.clone(), tm);
-        // Spawn terminals in all panes
+        // Spawn terminals in all panes at the active workspace's own
+        // target path (via `spawn_cwd`). See that helper's doc for
+        // why `default_cwd` alone is always wrong here.
         let (shell, args) = Self::default_shell();
-        let cwd = Self::default_cwd();
+        let cwd = self.spawn_cwd();
         let pane_ids: Vec<_> = self.terminal_manager().active_layout()
             .map(|l| l.pane_ids()).unwrap_or_default();
         for pid in pane_ids {
@@ -1206,7 +1229,10 @@ impl GpuiShellView {
         let saved_cwd = self.terminal_manager().active_cwd();
 
         let (shell, args) = inherited.unwrap_or_else(Self::default_shell);
-        let cwd = saved_cwd.or_else(Self::default_cwd);
+        // Fall back through workspace cwd if the tab has no saved
+        // cwd (shouldn't normally happen — tab records cwd at spawn
+        // — but be robust).
+        let cwd = saved_cwd.or_else(|| self.spawn_cwd());
         let _ = self.terminal_manager_mut().restart_active_terminal(&shell, &args, cwd.as_deref());
     }
 

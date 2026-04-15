@@ -240,7 +240,10 @@ impl GpuiShellView {
 
         // Split right
         self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
-        let cwd = live_cwd.or_else(Self::default_cwd);
+        // Pane-local live cwd first, then workspace cwd, then GUI
+        // dir. Going straight to `default_cwd` would spawn vibe
+        // tools in amux's launch dir instead of the workspace.
+        let cwd = live_cwd.or_else(|| self.spawn_cwd());
 
         let tool_cmd = if extra_args.is_empty() {
             linux_bin.to_string()
@@ -314,8 +317,10 @@ impl GpuiShellView {
             (true, Some(linux)) => Some(linux),
             // Native Windows tab → convert to /mnt/<drive>/...
             (false, Some(win)) => Some(Self::windows_path_to_wsl(&win)),
-            // Nothing capturable → fall back to the amux launch dir.
-            _ => Self::default_cwd().as_deref().map(Self::windows_path_to_wsl),
+            // Nothing capturable → fall back through the active
+            // workspace path (converted to WSL format), only
+            // dropping to the GUI launch dir as a last resort.
+            _ => self.spawn_cwd().as_deref().map(Self::windows_path_to_wsl),
         };
 
         self.terminal_manager_mut().add_tab_to_active_pane("WSL".into());
