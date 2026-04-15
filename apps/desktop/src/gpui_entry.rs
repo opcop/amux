@@ -86,8 +86,17 @@ pub(crate) struct GpuiShellView {
     pub(crate) file_picker: Option<crate::gpui_preview::FilePickerState>,
     /// Browser tab states keyed by browser_id (each browser tab has its own WebView2)
     pub(crate) browser_tabs: std::collections::HashMap<u64, crate::gpui_browser::BrowserTabEntry>,
-    /// Next browser_id to assign
+    /// Next browser_id to assign. Bumped past the max id in saved
+    /// layouts during startup restore so new browsers never collide
+    /// with restored ones.
     pub(crate) next_browser_id: u64,
+    /// One-shot latch: restored browser tab entries from the saved
+    /// layout on the first render frame where `cached_window_handle`
+    /// is available. Without this, persisted browser panes render
+    /// as the "Browser loading..." fallback forever because
+    /// `browser_tabs` starts empty but the pane tree already has
+    /// `TabKind::Browser` entries.
+    pub(crate) browsers_restored: bool,
     /// Flag: restore terminal focus on next render (set after URL input Enter)
     pub(crate) restore_terminal_focus: bool,
     /// Pending URL to sync to the address bar Input (set by timer, consumed by render)
@@ -466,6 +475,7 @@ impl GpuiShellView {
             preview_tabs: std::collections::HashMap::new(),
             file_picker: None,
             browser_tabs: std::collections::HashMap::new(),
+            browsers_restored: false,
             next_browser_id: 1,
             restore_terminal_focus: false,
             pending_url_bar_update: None,
@@ -1292,9 +1302,63 @@ impl GpuiShellView {
 
     /// Open a browser tab in the active pane (limux-style).
     /// WebView2 creation is deferred via cx.spawn to avoid RefCell re-borrow.
+    /// Scan every loaded workspace's pane tree for `TabKind::Browser`
+    /// entries and install a `BrowserTabEntry` for each, re-creating
+    /// the URL bar input and deferring WebView2 init the same way
+    /// `open_browser` does. Also bumps `next_browser_id` past any
+    /// saved id so new browsers opened post-restore never collide
+    /// with a restored one.
+    ///
+    /// Called once on startup as soon as `cached_window_handle` is
+    /// available, gated by the `browsers_restored` latch. Idempotent
+    /// by the latch — never runs twice.
+    ///
+    /// LIMITATION: `TabKind::Browser.url` holds the URL the tab was
+    /// originally opened with, not the last-navigated URL. On
+    /// restore we open that original URL. WebView2's own on-disk
+    /// cache means history and cookies are preserved, but the
+    /// visible page resets. Updating `TabKind` on every navigation
+    /// would let us restore the exact last page — tracked as a
+    /// follow-up.
+    pub(crate) fn restore_browser_tabs_from_layouts(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use amux_platform::terminal::manager::TabKind;
+
+        // Collect (browser_id, url) pairs without holding a borrow
+        // on self — install_browser_tab_entry takes `&mut self`.
+        let mut pairs: Vec<(u64, String)> = Vec::new();
+        for tm in self.workspace_terminals.values() {
+            for pane in tm.all_panes() {
+                for tab in &pane.tabs {
+                    if let TabKind::Browser { url, browser_id } = &tab.kind {
+                        pairs.push((*browser_id, url.clone()));
+                    }
+                }
+            }
+        }
+
+        if pairs.is_empty() { return; }
+
+        // Push next_browser_id past the highest saved id so new
+        // browsers opened later don't collide with a restored entry.
+        let max_id = pairs.iter().map(|(id, _)| *id).max().unwrap_or(0);
+        if self.next_browser_id <= max_id {
+            self.next_browser_id = max_id + 1;
+        }
+
+        for (bid, url) in pairs {
+            // Skip if somehow already installed (defensive — the
+            // latch should prevent this, but be safe).
+            if self.browser_tabs.contains_key(&bid) { continue; }
+            self.install_browser_tab_entry(bid, &url, window, cx);
+        }
+    }
+
     pub(crate) fn open_browser(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_component::input::{InputState, InputEvent};
-        use crate::gpui_browser::{BrowserPaneState, BrowserTabEntry, default_welcome_url};
+        use crate::gpui_browser::default_welcome_url;
 
         // Empty URL → load the embedded welcome page instead of
         // http://localhost:3000. The old default sat on a 30-second TCP
@@ -1307,19 +1371,20 @@ impl GpuiShellView {
             url.to_string()
         };
         let url = url_owned.as_str();
-        let raw_handle = match self.cached_window_handle {
-            Some(h) => h,
-            None => {
-                eprintln!("[amux-browser] no cached window handle yet");
-                return;
-            }
-        };
 
-        // Assign a unique browser_id
+        // Bail early if WebView2 can't be created yet — matches
+        // previous behavior and avoids orphaning a pane tab that
+        // can't be realized.
+        if self.cached_window_handle.is_none() {
+            eprintln!("[amux-browser] no cached window handle yet");
+            return;
+        }
+
+        // Assign a unique browser_id.
         let browser_id = self.next_browser_id;
         self.next_browser_id += 1;
 
-        // Add browser tab to the active pane
+        // Add browser tab to the active pane.
         let active_pid = self.terminal_manager().active_pane_id().cloned();
         if let Some(ref pid) = active_pid {
             if let Some(pane) = self.terminal_manager_mut().get_pane_mut(pid) {
@@ -1327,7 +1392,38 @@ impl GpuiShellView {
             }
         }
 
-        // Create URL bar Input entity
+        self.install_browser_tab_entry(browser_id, url, window, cx);
+        cx.notify();
+    }
+
+    /// Install the per-browser UI state (URL bar `InputState`,
+    /// `BrowserTabEntry`, deferred WebView2 init) for a `browser_id`
+    /// that is **already present** in some pane's tab list. Used by
+    /// both `open_browser` (after it creates the pane tab) and the
+    /// startup restore path (where the pane tab was loaded from
+    /// disk but `browser_tabs` is still empty).
+    ///
+    /// Requires `cached_window_handle` to be set — callers must
+    /// check and bail otherwise.
+    pub(crate) fn install_browser_tab_entry(
+        &mut self,
+        browser_id: u64,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_component::input::{InputState, InputEvent};
+        use crate::gpui_browser::{BrowserPaneState, BrowserTabEntry};
+
+        let raw_handle = match self.cached_window_handle {
+            Some(h) => h,
+            None => {
+                eprintln!("[amux-browser] install_browser_tab_entry: no window handle");
+                return;
+            }
+        };
+
+        // Create URL bar Input entity seeded with the current URL.
         let url_owned = url.to_string();
         let url_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -1335,7 +1431,7 @@ impl GpuiShellView {
                 .placeholder("Enter URL and press Enter...")
         });
 
-        // Subscribe: Enter navigates
+        // Subscribe: Enter navigates.
         let bid = browser_id;
         cx.subscribe(&url_input, move |this: &mut GpuiShellView, input_entity, event: &InputEvent, cx| {
             match event {
@@ -1362,14 +1458,13 @@ impl GpuiShellView {
 
         let bounds_cell = std::rc::Rc::new(std::cell::Cell::new(None));
 
-        // Store the browser tab entry
         self.browser_tabs.insert(browser_id, BrowserTabEntry {
             browser: BrowserPaneState::new(url),
             url_input,
             bounds_cell: bounds_cell.clone(),
         });
 
-        // Defer WebView2 creation
+        // Defer WebView2 creation — matches the original open path.
         cx.spawn(async move |this, cx| {
             smol::Timer::after(std::time::Duration::from_millis(50)).await;
             let _ = this.update(cx, |this: &mut GpuiShellView, cx| {
@@ -1386,8 +1481,6 @@ impl GpuiShellView {
                 cx.notify();
             });
         }).detach();
-
-        cx.notify();
     }
 
     /// Close the browser tab that is active in the current pane.
@@ -1882,6 +1975,17 @@ impl Render for GpuiShellView {
             if let Ok(handle) = window.window_handle() {
                 self.cached_window_handle = Some(handle.as_raw());
             }
+        }
+
+        // Restore browser tabs persisted in the workspace layout.
+        // Gated on the window handle being cached (required for
+        // WebView2 init) AND a one-shot latch so we never run twice.
+        // Without this, panes whose active tab is a `TabKind::Browser`
+        // render as the "Browser loading..." fallback because
+        // `browser_tabs` starts empty post-restart.
+        if !self.browsers_restored && self.cached_window_handle.is_some() {
+            self.browsers_restored = true;
+            self.restore_browser_tabs_from_layouts(window, cx);
         }
 
         // Browser bounds sync is done in the 60fps timer, not here in render,
