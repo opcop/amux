@@ -2079,6 +2079,19 @@ impl Render for GpuiShellView {
                 if this.resize_drag.is_some() {
                     return;
                 }
+                // Context menu open: the menu row's own on_click and the
+                // dismiss-overlay's on_click both run independently, so
+                // we just need this root handler to stay out of their
+                // way. Without this guard, the root creates a new
+                // zero-width Simple selection at the click cell —
+                // wiping the selection `start_send_to_pane` (and
+                // anything else that reads `selection_to_string`) is
+                // about to consume. Matches the user's observation
+                // that the keyboard shortcut works but the menu item
+                // doesn't: the shortcut bypasses this handler entirely.
+                if this.context_menu.is_some() {
+                    return;
+                }
                 // Ignore clicks in the sidebar region — those are handled by
                 // workspace/tab click handlers, not terminal selection.
                 // MUST check before clearing rename state, otherwise double-click
@@ -2388,6 +2401,35 @@ impl Render for GpuiShellView {
                     let (col, row) = this.pixel_to_term_cell(event.position);
                     this.send_mouse_event(0, col, row, false);
                 } else if this.selecting {
+                    // Finalize the selection endpoint at the release
+                    // position. Without this step the selection is
+                    // frozen at whatever the last processed mouse_move
+                    // set it to — if the cursor moved 1-2 cells between
+                    // that event and the button release (OS event
+                    // coalescing, fast drags), those trailing cells
+                    // never enter the selection and the copied text is
+                    // short by the delta. Mirrors the extend block in
+                    // on_mouse_move so the math matches exactly.
+                    use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Direction};
+                    if let Some((clicked_pid, col, row)) = this.pixel_to_term_cell_at(event.position) {
+                        let cw = this.cell_dims().0.max(1.0);
+                        let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
+                        let raw_x = this.pane_bounds.get(&clicked_pid.0)
+                            .map(|&(px_x, _, _, _)| event.position.x.as_f32() - px_x - pad)
+                            .unwrap_or(0.0);
+                        let cell_offset = raw_x - col as f32 * cw;
+                        let side = if cell_offset < cw * 0.5 { Direction::Left } else { Direction::Right };
+                        if let Some(term) = this.terminal_manager_mut().active_terminal() {
+                            term.with_term_mut(|t| {
+                                let display_offset = t.grid().display_offset() as i32;
+                                let grid_line = row as i32 - display_offset;
+                                let point = AlacPoint::new(Line(grid_line), Column(col));
+                                if let Some(ref mut sel) = t.selection {
+                                    sel.update(point, side);
+                                }
+                            });
+                        }
+                    }
                     // Copy selected text to clipboard
                     if let Some(term) = this.terminal_manager_mut().active_terminal() {
                         let text = term.with_term(|t| t.selection_to_string());
