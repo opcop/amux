@@ -364,7 +364,11 @@ impl GpuiShellView {
         Self::amux_dir().join("templates")
     }
 
-    /// Save a layout template to ~/.amux/templates/
+    /// Save a layout template to ~/.amux/templates/. Only called
+    /// from `save_current_as_template`, which is itself only
+    /// reachable once the command palette is wired — see that
+    /// function's comment.
+    #[allow(dead_code)]
     pub(crate) fn save_template(template: &amux_platform::terminal::manager::LayoutTemplate) {
         let dir = Self::templates_dir();
         let safe_name = template.name.replace(['/', '\\', ':', ' '], "_");

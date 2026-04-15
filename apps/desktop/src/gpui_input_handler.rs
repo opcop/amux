@@ -345,50 +345,17 @@ impl GpuiShellView {
             }
         }
 
-        // Command palette handling
-        if self.model.command_palette_open {
-            match keystr.as_str() {
-                "escape" | "ctrl+p" => {
-                    let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "enter" => {
-                    // First try the gpui-layer dispatch. Handlers
-                    // for actions that can't round-trip through
-                    // amux_core::Command (e.g. open the template
-                    // picker, start in-terminal search, toggle
-                    // zoom) live in `crate::palette_dispatch`.
-                    // Returns true when handled — in that case we
-                    // must NOT also call execute_selected_palette
-                    // _command or the action would fire twice.
-                    if let Some(cmd) = self.app.selected_palette_command_str() {
-                        if crate::palette_dispatch::dispatch(self, &cmd, window, cx) {
-                            cx.notify();
-                            return;
-                        }
-                    }
-                    let _ = self.app.execute_selected_palette_command();
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "up" | "arrowup" => {
-                    self.app.select_previous_palette_item();
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "down" | "arrowdown" => {
-                    self.app.select_next_palette_item();
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                _ => return,
-            }
-        }
+        // NOTE: the command palette keystroke gate used to live here,
+        // routing Enter / Backspace / arrows to the palette state
+        // machine in `amux_ui` when `command_palette_open` was true.
+        // Removed along with the Cmd+Shift+P handler because the
+        // palette UI has never been mounted in the render tree
+        // (see the comment on the removed shortcut above). Keeping
+        // the gate without a visible palette turned the terminal
+        // into an invisible trap — keystrokes got captured and
+        // nothing rendered. When the palette is properly wired in a
+        // future change, restore both the shortcut and this gate
+        // together.
 
         // File picker handling (Ctrl+P)
         if self.file_picker.is_some() {
@@ -636,15 +603,20 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
-                "ctrl+shift+p" => {
-                    // Cancel any active rename before opening palette
-                    self.renaming_workspace = None;
-                    self.renaming_tab = None;
-                    let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
+                // NOTE: "ctrl+shift+p" (Cmd+Shift+P on macOS) used to
+                // toggle `command_palette_open` to open the VSCode-
+                // style command palette, but the palette UI was never
+                // mounted in the render tree — the `render_command_
+                // palette` function in gpui_command_palette.rs has
+                // been dead code since the first commit. Flipping the
+                // flag without a visible UI turned the terminal into
+                // an invisible trap: Enter / Backspace / arrows got
+                // captured by the input handler's palette gate (also
+                // removed in this fix) and never reached the PTY.
+                // Handler removed until the palette is actually wired.
+                // Apply Layout / Open Workspace — the most common
+                // palette destinations — are now in the right-click
+                // menu instead.
                 "ctrl+shift+s" => {
                     // Open terminal search
                     self.search_state = Some(crate::gpui_entry::SearchState::new());

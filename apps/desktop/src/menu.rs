@@ -76,6 +76,8 @@ pub(crate) fn build_items(view: &GpuiShellView) -> Vec<ContextMenuItem> {
     #[cfg(target_os = "macos")]
     mod shortcut_labels {
         pub const COPY: &str = "⌘⇧C";
+        pub const SELECT_ALL: &str = "⌘A";
+        pub const CLEAR: &str = "⌘K";
         pub const SEND: &str = "⌘⇧Enter";
         pub const PASTE: &str = "⌘V";
         pub const SPLIT_RIGHT: &str = "⌘⇧\\";
@@ -87,6 +89,8 @@ pub(crate) fn build_items(view: &GpuiShellView) -> Vec<ContextMenuItem> {
     #[cfg(not(target_os = "macos"))]
     mod shortcut_labels {
         pub const COPY: &str = "Ctrl+Shift+C";
+        pub const SELECT_ALL: &str = "Ctrl+Shift+A";
+        pub const CLEAR: &str = "Ctrl+K";
         pub const SEND: &str = "Ctrl+Shift+Enter";
         pub const PASTE: &str = "Ctrl+V";
         pub const SPLIT_RIGHT: &str = "Ctrl+Shift+\\";
@@ -118,6 +122,7 @@ pub(crate) fn build_items(view: &GpuiShellView) -> Vec<ContextMenuItem> {
     }
     items.extend([
         ContextMenuItem::action("Copy", Some(COPY), has_selection),
+        ContextMenuItem::action("Select All", Some(SELECT_ALL), true),
         ContextMenuItem::action("Paste", Some(PASTE), true).separator(),
         ContextMenuItem::action("Send to Pane", Some(SEND), multi_pane),
         ContextMenuItem::action("Split Right", Some(SPLIT_RIGHT), true),
@@ -129,6 +134,16 @@ pub(crate) fn build_items(view: &GpuiShellView) -> Vec<ContextMenuItem> {
         } else {
             ContextMenuItem::action("Zoom Pane", Some(ZOOM), multi_pane)
         },
+        ContextMenuItem::action("Clear Buffer", Some(CLEAR), true).separator(),
+        // Workspace-level actions. These used to live in a command
+        // palette (`Cmd+Shift+P` → "layout template …", "workspace
+        // open …") but the palette UI was never mounted in the
+        // render tree — leaving the shortcuts entirely hidden.
+        // Restoring them here so the features remain discoverable
+        // until the palette itself is properly wired.
+        ContextMenuItem::action("Apply Layout...", None, true),
+        ContextMenuItem::action("Edit Startup Script...", None, true),
+        ContextMenuItem::action("Open Workspace...", None, view.model.local_workspace_supported),
     ]);
     items
 }
@@ -162,13 +177,21 @@ pub(crate) fn dispatch(
     }
 
     match label {
-        "Open Workspace" => view.prompt_open_local_workspace(cx),
+        // Accept both the historical "Open Workspace" label
+        // (still used by renderer-side menus when no workspace is
+        // loaded — see module-level comment) and the new
+        // "Open Workspace..." label used by the terminal context
+        // menu. Same dispatch target.
+        "Open Workspace" | "Open Workspace..." => view.prompt_open_local_workspace(cx),
+        "Apply Layout..." => view.open_template_picker(),
+        "Edit Startup Script..." => view.edit_startup_file(),
         "Open Selection as File" => {
             if let Some(path) = selection_path {
                 crate::preview_open::open_preview_file(view, &path);
             }
         }
         "Copy" => view.copy_selection(cx),
+        "Select All" => view.select_all_in_terminal(cx),
         "Send to Pane" => view.start_send_to_pane(cx),
         "Paste" => view.paste_clipboard(cx),
         "Split Right" => {
@@ -192,6 +215,11 @@ pub(crate) fn dispatch(
             view.terminal_manager_mut().close_active_pane();
         }
         "Zoom Pane" | "Restore Pane" => view.toggle_zoom(),
+        "Clear Buffer" => {
+            if let Some(term) = view.terminal_manager_mut().active_terminal() {
+                term.clear_buffer();
+            }
+        }
         _ => {}
     }
 

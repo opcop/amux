@@ -44,6 +44,13 @@ use crate::gpui_entry::GpuiShellView;
 /// Every handler closes the palette first (via the
 /// `ToggleCommandPalette` UiAction) so the user doesn't have to
 /// `Esc` out after firing a one-shot action.
+///
+/// Currently unreachable: the command palette UI has never been
+/// mounted in the render tree, so no keystroke path reaches this
+/// dispatcher. Kept as the starting point for a future proper
+/// palette implementation — the command routing here is non-
+/// trivial and doesn't want to be reinvented.
+#[allow(dead_code)]
 pub(crate) fn dispatch(
     view: &mut GpuiShellView,
     cmd: &str,
@@ -167,7 +174,9 @@ pub(crate) fn dispatch(
 
 /// Dismiss the command palette. Called at the top of every
 /// handler so the user gets the "run this action then close the
-/// palette" behavior they expect.
+/// palette" behavior they expect. Unreachable until the palette
+/// is wired — see `dispatch`.
+#[allow(dead_code)]
 fn close_palette(view: &mut GpuiShellView) {
     let _ = view.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
 }

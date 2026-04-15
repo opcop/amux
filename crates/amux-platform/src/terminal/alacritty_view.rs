@@ -390,6 +390,17 @@ impl AlacrittyTerminal {
         term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
     }
 
+    /// Clear the terminal buffer (scrollback + visible screen).
+    /// Sends the "Erase in Display: All" + "Erase Saved Lines" escape
+    /// sequences, matching `Ctrl+L` behavior in most shells.
+    pub fn clear_buffer(&self) {
+        use alacritty_terminal::vte::ansi::Handler;
+        self.with_term_mut(|t| {
+            t.clear_screen(alacritty_terminal::vte::ansi::ClearMode::Saved);
+            t.clear_screen(alacritty_terminal::vte::ansi::ClearMode::All);
+        });
+    }
+
     /// Whether scrolled up
     pub fn is_scrolled(&self) -> bool {
         let term = self.term.lock_unfair();

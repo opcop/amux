@@ -25,6 +25,29 @@ impl GpuiShellView {
         }
     }
 
+    /// Select all text in the active terminal.
+    /// Creates a selection from the top of the scrollback to the bottom
+    /// of the visible screen.
+    pub(crate) fn select_all_in_terminal(&mut self, cx: &mut Context<Self>) {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Side};
+        use alacritty_terminal::selection::{Selection, SelectionType};
+
+        if let Some(term) = self.terminal_manager_mut().active_terminal() {
+            term.with_term_mut(|t| {
+                let top = t.topmost_line();
+                let cols = t.columns();
+                let bottom = Line(t.screen_lines() as i32 - 1);
+                let start = AlacPoint::new(top, Column(0));
+                let end = AlacPoint::new(bottom, Column(cols - 1));
+                let mut sel = Selection::new(SelectionType::Simple, start, Side::Left);
+                sel.update(end, Side::Right);
+                t.selection = Some(sel);
+            });
+        }
+        cx.notify();
+    }
+
     /// Paste from clipboard into terminal
     pub(crate) fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
         let text = cx.read_from_clipboard()

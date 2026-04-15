@@ -220,18 +220,16 @@ impl GpuiShellView {
             .detach();
             return;
         }
-        // Picker capability not advertised — fall back to the command
-        // palette path so the user still has a way to type a workspace
-        // path manually.
-        self.renaming_workspace = None;
-        self.renaming_tab = None;
-        if !self.model.command_palette_open {
-            let _ = self.app.dispatch(amux_ui::UiAction::ToggleCommandPalette);
-        }
-        let _ = self
-            .app
-            .dispatch(amux_ui::UiAction::SetCommandPaletteQuery("workspace open ".into()));
-        self.refresh_model();
+        // Picker capability not advertised — historically this
+        // dropped into the command palette with a "workspace open "
+        // query pre-filled, but the palette UI was never mounted in
+        // the render tree so that fallback only turned the terminal
+        // into an invisible keystroke trap. Log the capability gap
+        // and return without side effects; the caller (right-click
+        // menu or sidebar) already has its own no-op on miss.
+        eprintln!(
+            "[amux] prompt_open_local_workspace: folder picker not available on this platform"
+        );
     }
 
     pub(crate) fn start_workspace_rename(
@@ -1031,6 +1029,10 @@ impl GpuiShellView {
     }
 
     /// Save current layout as a custom template with auto-generated name.
+    /// Currently unreachable: was only called from the command palette
+    /// dispatcher, which has never been wired (see palette_dispatch).
+    /// Kept so the future palette revival has a working target.
+    #[allow(dead_code)]
     pub(crate) fn save_current_as_template(&mut self, name: &str) {
         let desc = format!("{} panes", self.terminal_manager().total_panes());
         let template = self.terminal_manager().to_template(name, &desc);
@@ -1073,7 +1075,12 @@ impl GpuiShellView {
         }
     }
 
-    /// Open the agent launcher picker.
+    /// Open the agent launcher picker. Unreachable today: the
+    /// `+▾` new-tab dropdown (see `NewTabPickerState`) covers the
+    /// same "pick an agent to launch" flow, and the command
+    /// palette that used to reach this function has never been
+    /// mounted. Retained so either entry point can revive it.
+    #[allow(dead_code)]
     pub(crate) fn open_agent_picker(&mut self) {
         let mut agents: Vec<(String, String, bool)> = Vec::new();
         if self.wsl_supported() && self.wsl_detected {
