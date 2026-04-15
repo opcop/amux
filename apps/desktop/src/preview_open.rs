@@ -392,6 +392,15 @@ pub(crate) enum CandidateSource {
     Hyperlink = 3,
 }
 
+/// What kind of target a candidate represents. Drives resolution:
+/// `File` goes through CWD × `exists()`, `Url` bypasses FS checks
+/// entirely (URLs self-validate by syntax).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidateKind {
+    File,
+    Url,
+}
+
 /// A single plausible path interpretation at a click position.
 ///
 /// `display` is the "cleaned" form (no `:L:C`, no backticks, no
@@ -399,13 +408,14 @@ pub(crate) enum CandidateSource {
 /// original un-stripped form kept as a fallback — if a file is
 /// literally named `foo.tar.gz:42`, stripping would discard it.
 /// `segments` is the visual highlight range; `source` drives
-/// resolution priority.
+/// resolution priority; `kind` splits file vs URL handling.
 #[derive(Debug, Clone)]
 pub(crate) struct PathCandidate {
     pub display: String,
     pub with_suffix: Option<String>,
     pub segments: Vec<HoverSegment>,
     pub source: CandidateSource,
+    pub kind: CandidateKind,
 }
 
 /// Result of successfully resolving a click to a real file.
@@ -415,6 +425,87 @@ pub(crate) struct PathCandidate {
 pub(crate) struct PathHit {
     pub absolute: String,
     pub segments: Vec<HoverSegment>,
+}
+
+/// What a successfully-resolved click points at.
+#[derive(Debug, Clone)]
+pub(crate) enum ClickKind {
+    /// Absolute filesystem path, validated to exist.
+    File(String),
+    /// URL with a supported scheme (http/https). No validation —
+    /// syntax is the contract.
+    Url(String),
+}
+
+/// Unified result for any click in terminal output. The hover path
+/// reads `segments` to draw the underline; the click path branches
+/// on `kind` to decide whether to open a preview or launch a URL.
+#[derive(Debug, Clone)]
+pub(crate) struct ClickHit {
+    pub kind: ClickKind,
+    pub segments: Vec<HoverSegment>,
+}
+
+// ─── URL helpers ───────────────────────────────────────────────
+
+/// Return true if `s` starts with a supported URL scheme. v1
+/// supports `http://` and `https://` only — other schemes
+/// (`mailto:`, `ftp://`, `ssh://`, etc.) fall through and are
+/// treated as file candidates by the rest of the pipeline.
+pub(crate) fn has_url_scheme(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+/// Strip trailing punctuation that is almost always a sentence
+/// terminator rather than a real part of the URL. Runs in a loop
+/// so stacked punctuation (`…foo.com).` → `…foo.com`) gets fully
+/// trimmed.
+///
+/// Rules:
+///   * Always trim: `.,;:!?"'>`
+///   * Trim `)` only when it would leave parens unbalanced in the
+///     remaining prefix — this preserves Wikipedia-style URLs
+///     ending in `_(programming_language)` while still removing
+///     the stray `)` from `(see http://foo.com)`.
+pub(crate) fn trim_url_trailing(raw: &str) -> &str {
+    let mut end = raw.len();
+    loop {
+        let s = &raw[..end];
+        let last = match s.chars().next_back() {
+            Some(c) => c,
+            None => break,
+        };
+        let is_sentence_punct =
+            matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '>' | ']' | '}');
+        let is_unbalanced_close_paren = last == ')' && {
+            let opens = s.chars().filter(|&c| c == '(').count();
+            let closes = s.chars().filter(|&c| c == ')').count();
+            closes > opens
+        };
+        if !(is_sentence_punct || is_unbalanced_close_paren) {
+            break;
+        }
+        end -= last.len_utf8();
+    }
+    &raw[..end]
+}
+
+/// Open a URL in the user's system default browser/handler.
+/// Runs asynchronously via a spawned child process — failure is
+/// logged but otherwise ignored, matching the "best-effort click"
+/// contract the rest of the pipeline uses.
+pub(crate) fn open_url_external(url: &str) {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+    if let Err(e) = result {
+        eprintln!("[amux] failed to open url {url:?}: {e}");
+    }
 }
 
 /// Extract the hyperlink (OSC 8) at a given cell together with
@@ -499,6 +590,9 @@ pub(crate) fn pick_existing<F: Fn(&str) -> bool>(
     exists: F,
 ) -> Option<PathHit> {
     for cand in candidates {
+        // URL candidates never resolve as files — skip them here.
+        // `resolve_click_at_term` handles URL candidates separately.
+        if matches!(cand.kind, CandidateKind::Url) { continue; }
         // Try each form: cleaned first (it's the common case), then
         // the un-stripped form as a fallback for files literally
         // named with `:N` at the end.
@@ -598,6 +692,10 @@ fn candidate_from_selection(s: &str) -> Option<PathCandidate> {
         // Source priority is moot for a single candidate, but use
         // a neutral tier so sorting (if ever added) doesn't matter.
         source: CandidateSource::Bareword,
+        // Right-click selection path only handles files for now;
+        // URL selection would be a straightforward extension but
+        // isn't part of this change.
+        kind: CandidateKind::File,
     })
 }
 
@@ -625,35 +723,49 @@ pub(crate) fn try_resolve_selection_as_path(
     })
 }
 
-/// Orchestrator: collect candidates at a click, build the CWD list,
-/// validate against the real filesystem. Returns `Some(PathHit)`
-/// only when a candidate resolves to a file that exists.
+/// Orchestrator: collect candidates at a click, classify as File or
+/// Url, and return the first resolvable hit. URL candidates win
+/// instantly (syntax is the contract); file candidates go through
+/// the CWD × `exists()` pipeline.
 ///
-/// This is the new contract for both hover highlighting and click
-/// opening: the underline appears **iff** a file resolves, and the
-/// resolved absolute path is what gets previewed. Nothing is shown
-/// or opened based on "looks like a path" alone.
-pub(crate) fn resolve_path_at_term(
+/// Candidates are pre-sorted by source priority descending. That
+/// means an OSC 8 hyperlink wins over a markdown link over a
+/// bareword, whether the target is a file or a URL.
+///
+/// The underline appears **iff** this returns `Some`. For files,
+/// the absolute path is ready to hand to `open_preview_file`; for
+/// URLs, the URL is ready to pass to `open_url_external`.
+pub(crate) fn resolve_click_at_term(
     term: &amux_platform::terminal::alacritty_view::AlacrittyTerminal,
     view: &GpuiShellView,
     col: usize,
     row: usize,
-) -> Option<PathHit> {
+) -> Option<ClickHit> {
     let candidates = collect_candidates_at_term(term, col, row);
     if candidates.is_empty() { return None; }
-    let cwds = collect_cwd_bases(view);
 
-    // Probe via std::fs, with WSL path translation applied to each
-    // probe string so `/mnt/c/...` paths resolve on Windows too.
-    // The returned absolute path also goes through conversion so
-    // the preview opener sees a path its own code can read.
+    // URL candidates resolve by inspection — no FS, no CWD. Walk
+    // the (already-sorted) list once; the highest-priority URL
+    // wins. Markdown > bareword still holds because sorting was
+    // done by the collector.
+    for cand in &candidates {
+        if matches!(cand.kind, CandidateKind::Url) {
+            return Some(ClickHit {
+                kind: ClickKind::Url(cand.display.clone()),
+                segments: cand.segments.clone(),
+            });
+        }
+    }
+
+    // File candidates go through the existing CWD × exists()
+    // pipeline. pick_existing skips Url candidates internally.
+    let cwds = collect_cwd_bases(view);
     let exists = |p: &str| -> bool {
         let converted = maybe_convert_wsl_path(view, p);
         std::path::Path::new(&converted).is_file()
     };
-
-    pick_existing(&candidates, &cwds, exists).map(|hit| PathHit {
-        absolute: maybe_convert_wsl_path(view, &hit.absolute),
+    pick_existing(&candidates, &cwds, exists).map(|hit| ClickHit {
+        kind: ClickKind::File(maybe_convert_wsl_path(view, &hit.absolute)),
         segments: hit.segments,
     })
 }
@@ -778,10 +890,8 @@ pub(crate) fn collect_candidates_at_term(
     let mut out: Vec<PathCandidate> = Vec::new();
 
     // OSC 8 fast path. When the cell is tagged, we trust the CLI
-    // completely — no heuristic candidates mixed in. If the URI is
-    // non-file we return an empty vec (no fallback), matching the
-    // established rule that `http(s)://` shouldn't silently turn
-    // into a local-file probe.
+    // completely — no heuristic candidates mixed in. The URI's
+    // scheme determines whether this is a file or a URL click.
     if let Some((uri, segs)) = extract_hyperlink_multirow(term, col, row) {
         if let Some(path) = decode_file_uri(&uri) {
             out.push(PathCandidate {
@@ -789,6 +899,17 @@ pub(crate) fn collect_candidates_at_term(
                 with_suffix: None,
                 segments: segs,
                 source: CandidateSource::Hyperlink,
+                kind: CandidateKind::File,
+            });
+        } else if has_url_scheme(&uri) {
+            // OSC 8 URIs don't carry stray punctuation — the
+            // terminal emitted them deliberately — so no trim.
+            out.push(PathCandidate {
+                display: uri,
+                with_suffix: None,
+                segments: segs,
+                source: CandidateSource::Hyperlink,
+                kind: CandidateKind::Url,
             });
         }
         return out;
@@ -820,12 +941,9 @@ pub(crate) fn collect_candidates_at_term(
                 let raw: String = cur[s..=e].iter().filter(|&&c| c != '\0').collect();
                 let raw = raw.trim().to_string();
                 let with_suffix = if !raw.is_empty() && raw != display { Some(raw) } else { None };
-                out.push(PathCandidate {
-                    display,
-                    with_suffix,
-                    segments: vec![(row, vs, ve)],
-                    source: CandidateSource::Markdown,
-                });
+                if let Some(c) = make_candidate(display, with_suffix, vec![(row, vs, ve)], CandidateSource::Markdown) {
+                    out.push(c);
+                }
             }
         }
 
@@ -835,12 +953,9 @@ pub(crate) fn collect_candidates_at_term(
                 let raw: String = cur[s..=e].iter().filter(|&&c| c != '\0').collect();
                 let raw = raw.trim().to_string();
                 let with_suffix = if !raw.is_empty() && raw != display { Some(raw) } else { None };
-                out.push(PathCandidate {
-                    display,
-                    with_suffix,
-                    segments: vec![(row, vs, ve)],
-                    source: CandidateSource::Quoted,
-                });
+                if let Some(c) = make_candidate(display, with_suffix, vec![(row, vs, ve)], CandidateSource::Quoted) {
+                    out.push(c);
+                }
             }
         }
 
@@ -849,30 +964,34 @@ pub(crate) fn collect_candidates_at_term(
             wrap_extend_bareword_raw(&read_row, &row_wraps, rows, cols, row, col)
         {
             let raw_trim = raw.trim().to_string();
-            let cleaned = cleanup_path_suffix(&raw_trim);
-            match cleaned {
-                Some(display) => {
-                    let with_suffix = if raw_trim != display { Some(raw_trim) } else { None };
-                    out.push(PathCandidate {
-                        display,
-                        with_suffix,
-                        segments: segs,
-                        source: CandidateSource::Bareword,
-                    });
+            // URL bareword: the raw form IS the display (no :L:C
+            // stripping for URLs — that suffix machinery is file
+            // specific). Classify first so cleanup doesn't mangle
+            // a URL's trailing port or query.
+            if has_url_scheme(&raw_trim) {
+                if let Some(c) = make_candidate(raw_trim.clone(), None, segs, CandidateSource::Bareword) {
+                    out.push(c);
                 }
-                None if raw_trim.len() >= 3 => {
-                    // Cleanup rejected but raw is long enough — keep
-                    // the raw form as the only candidate. Covers
-                    // cases where `:L:C` stripping shortened it
-                    // below the 3-char threshold.
-                    out.push(PathCandidate {
-                        display: raw_trim,
-                        with_suffix: None,
-                        segments: segs,
-                        source: CandidateSource::Bareword,
-                    });
+            } else {
+                let cleaned = cleanup_path_suffix(&raw_trim);
+                match cleaned {
+                    Some(display) => {
+                        let with_suffix = if raw_trim != display { Some(raw_trim) } else { None };
+                        if let Some(c) = make_candidate(display, with_suffix, segs, CandidateSource::Bareword) {
+                            out.push(c);
+                        }
+                    }
+                    None if raw_trim.len() >= 3 => {
+                        // Cleanup rejected but raw is long enough — keep
+                        // the raw form as the only candidate. Covers
+                        // cases where `:L:C` stripping shortened it
+                        // below the 3-char threshold.
+                        if let Some(c) = make_candidate(raw_trim, None, segs, CandidateSource::Bareword) {
+                            out.push(c);
+                        }
+                    }
+                    None => {}
                 }
-                None => {}
             }
         }
     });
@@ -880,6 +999,51 @@ pub(crate) fn collect_candidates_at_term(
     // Priority descending: highest source first.
     out.sort_by(|a, b| b.source.cmp(&a.source));
     out
+}
+
+/// Build a PathCandidate, classifying File vs Url by the display
+/// string's scheme. For Url candidates, trim trailing sentence
+/// punctuation and shrink the visual highlight range to match so
+/// the hover underline doesn't include a stray period or paren.
+fn make_candidate(
+    display: String,
+    with_suffix: Option<String>,
+    segments: Vec<HoverSegment>,
+    source: CandidateSource,
+) -> Option<PathCandidate> {
+    if has_url_scheme(&display) {
+        let trimmed = trim_url_trailing(&display).to_string();
+        if trimmed.len() < 3 { return None; }
+        // Shrink the last segment's end_col by the number of
+        // trailing chars we removed. URLs don't wrap in practice,
+        // but if they do (multi-segment hyperlinks), we only adjust
+        // the tail segment — the leading rows stay full-width.
+        let shrink = display.chars().count() - trimmed.chars().count();
+        let segments = if shrink == 0 {
+            segments
+        } else {
+            let mut segs = segments;
+            if let Some(last) = segs.last_mut() {
+                last.2 = last.2.saturating_sub(shrink);
+            }
+            segs
+        };
+        Some(PathCandidate {
+            display: trimmed,
+            with_suffix: None,
+            segments,
+            source,
+            kind: CandidateKind::Url,
+        })
+    } else {
+        Some(PathCandidate {
+            display,
+            with_suffix,
+            segments,
+            source,
+            kind: CandidateKind::File,
+        })
+    }
 }
 
 /// Pure heuristic path scanner. Given a row of terminal cells as
@@ -1169,18 +1333,26 @@ pub(crate) fn open_preview_file_with_cwd(
     open_preview_file(view, &full_path);
 }
 
-/// Try to preview the file at a terminal cell click. Delegates to
-/// `resolve_path_at_term`, which generates every plausible path
-/// interpretation (OSC 8 hyperlink / markdown link / quoted string
-/// / bareword) and returns only matches that exist on disk. The
-/// old extension whitelist is gone: `PreviewState::load` has its
-/// own size and binary guards, and the FS existence check already
-/// weeds out accidental matches. Returns `true` iff a file was
-/// actually found and the preview pipeline invoked on it.
+/// Handle a Cmd/Ctrl+click at a terminal cell. Delegates to
+/// `resolve_click_at_term`, then dispatches by kind:
+///
+/// * `File` → `open_preview_file` (existing preview pipeline)
+/// * `Url`  → `open_url_external` (system default browser)
+///
+/// Returns `true` iff a hit was found and dispatched. Callers use
+/// the return to decide whether to consume the click or fall
+/// through to normal selection.
 pub(crate) fn try_preview_path_at(view: &mut GpuiShellView, col: usize, row: usize) -> bool {
     let Some(term) = view.terminal_manager().active_terminal_ref() else { return false; };
-    let Some(hit) = resolve_path_at_term(term, view, col, row) else { return false; };
-    open_preview_file(view, &hit.absolute);
+    let Some(hit) = resolve_click_at_term(term, view, col, row) else { return false; };
+    match hit.kind {
+        ClickKind::File(absolute) => {
+            open_preview_file(view, &absolute);
+        }
+        ClickKind::Url(url) => {
+            open_url_external(&url);
+        }
+    }
     true
 }
 
@@ -1586,6 +1758,7 @@ mod tests {
             with_suffix: with_suffix.map(String::from),
             segments: vec![(0, 0, display.len().saturating_sub(1))],
             source,
+            kind: CandidateKind::File,
         }
     }
 
@@ -1681,6 +1854,132 @@ mod tests {
     fn pick_empty_candidates_returns_none() {
         let fs = fake_fs(&["/a"]);
         assert!(pick_existing(&[], &[], fs).is_none());
+    }
+
+    #[test]
+    fn pick_skips_url_candidates() {
+        // A Url candidate mixed in must not be treated as a file
+        // lookup. The only other candidate is a non-existent file,
+        // so the overall result is None (URLs are handled by the
+        // dedicated branch in resolve_click_at_term).
+        let url_cand = PathCandidate {
+            display: "https://example.com".to_string(),
+            with_suffix: None,
+            segments: vec![],
+            source: CandidateSource::Bareword,
+            kind: CandidateKind::Url,
+        };
+        let file_cand = cand("missing.rs", None, CandidateSource::Bareword);
+        let cwds = vec!["/ws".to_string()];
+        let fs = fake_fs(&[]);
+        assert!(pick_existing(&[url_cand, file_cand], &cwds, fs).is_none());
+    }
+
+    // ─── URL helpers ─────────────────────────────────────────────
+
+    #[test]
+    fn url_scheme_detection() {
+        assert!(has_url_scheme("https://example.com"));
+        assert!(has_url_scheme("http://example.com/path?q=1"));
+        assert!(!has_url_scheme("ftp://example.com"));
+        assert!(!has_url_scheme("mailto:a@b.com"));
+        assert!(!has_url_scheme("src/main.rs"));
+        assert!(!has_url_scheme("/etc/hosts"));
+        assert!(!has_url_scheme(""));
+    }
+
+    #[test]
+    fn url_trim_sentence_punct() {
+        assert_eq!(trim_url_trailing("https://example.com."), "https://example.com");
+        assert_eq!(trim_url_trailing("https://example.com,"), "https://example.com");
+        assert_eq!(trim_url_trailing("https://example.com!"), "https://example.com");
+        assert_eq!(trim_url_trailing("https://example.com?"), "https://example.com");
+    }
+
+    #[test]
+    fn url_trim_stacked_punct() {
+        // `.).` should strip all three from the tail in order.
+        assert_eq!(
+            trim_url_trailing("https://example.com).."),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn url_preserves_balanced_trailing_paren() {
+        // Wikipedia-style URL with a literal `)` in the path
+        // must not have its tail paren stripped — the parens
+        // balance.
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(trim_url_trailing(url), url);
+    }
+
+    #[test]
+    fn url_trims_unbalanced_closing_paren() {
+        // "(see https://foo.com)" as written in prose: the bareword
+        // is "https://foo.com)" with one unbalanced `)` — strip it.
+        assert_eq!(trim_url_trailing("https://foo.com)"), "https://foo.com");
+    }
+
+    #[test]
+    fn url_preserves_path_with_balanced_parens_in_middle() {
+        // Parens in the middle of the URL with a non-paren tail
+        // survive untouched.
+        let url = "https://a.com/foo(bar)/baz";
+        assert_eq!(trim_url_trailing(url), url);
+    }
+
+    #[test]
+    fn url_trim_preserves_query_string() {
+        let url = "https://a.com/search?q=rust&lang=en";
+        assert_eq!(trim_url_trailing(url), url);
+    }
+
+    #[test]
+    fn url_trim_empty_string() {
+        assert_eq!(trim_url_trailing(""), "");
+    }
+
+    #[test]
+    fn make_candidate_classifies_url() {
+        let c = make_candidate(
+            "https://example.com".to_string(),
+            None,
+            vec![(0, 0, 18)],
+            CandidateSource::Bareword,
+        )
+        .unwrap();
+        assert_eq!(c.kind, CandidateKind::Url);
+        assert_eq!(c.display, "https://example.com");
+    }
+
+    #[test]
+    fn make_candidate_classifies_file() {
+        let c = make_candidate(
+            "src/main.rs".to_string(),
+            None,
+            vec![(0, 0, 10)],
+            CandidateSource::Bareword,
+        )
+        .unwrap();
+        assert_eq!(c.kind, CandidateKind::File);
+    }
+
+    #[test]
+    fn make_candidate_shrinks_range_on_url_trim() {
+        // Display includes a trailing `.` that trim will drop.
+        // The visual range must shrink by 1 so the underline
+        // doesn't cover the period.
+        let c = make_candidate(
+            "https://example.com.".to_string(),
+            None,
+            vec![(5, 10, 29)], // 20 chars long
+            CandidateSource::Bareword,
+        )
+        .unwrap();
+        assert_eq!(c.display, "https://example.com");
+        assert_eq!(c.segments.len(), 1);
+        assert_eq!(c.segments[0], (5, 10, 28)); // end_col -1
     }
 
     // ─── Selection-to-candidate helper ──────────────────────────

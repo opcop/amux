@@ -2274,14 +2274,15 @@ impl Render for GpuiShellView {
                     };
                     // Resolve by enumeration: collect every plausible
                     // candidate (hyperlink / markdown / quoted /
-                    // bareword with wrap extension) and validate each
-                    // against the real filesystem. Only produce hover
-                    // state when a real file is found — the contract
-                    // is "underline = clickable = exists".
+                    // bareword with wrap extension), classify as
+                    // file or URL, and validate accordingly.
+                    // Underline = "clickable" — the modifier-click
+                    // will open the hit (preview for files, system
+                    // browser for URLs).
                     let new_hover: Option<HoverLinkState> = if modifier_held {
                         this.pixel_to_term_cell_at(event.position).and_then(|(pid, col, row)| {
                             let term = this.terminal_manager().get_pane(&pid)?.active_terminal_ref()?;
-                            let hit = crate::preview_open::resolve_path_at_term(term, &*this, col, row)?;
+                            let hit = crate::preview_open::resolve_click_at_term(term, &*this, col, row)?;
                             Some(HoverLinkState { pane_id: pid, segments: hit.segments })
                         })
                     } else {
