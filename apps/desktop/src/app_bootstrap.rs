@@ -407,11 +407,16 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                             }
 
                             // Collect which browser_ids should be visible: any browser tab
-                            // that is the active tab in its pane (regardless of which pane
-                            // has focus). This way the user can see the browser while working
-                            // in a different terminal pane.
+                            // that is the active tab in its pane AND that pane lives in
+                            // the currently-active workspace. Browsers in other workspaces
+                            // must stay hidden — WebView2 is an OS-level child window
+                            // pinned to pixel bounds, so a "visible" browser from a
+                            // non-active workspace would paint over whatever the active
+                            // workspace is rendering at the same coordinates (and its
+                            // URL bar / tab strip wouldn't be drawn, since those live
+                            // in the render tree only for the active workspace).
                             let mut visible_bids: Vec<u64> = Vec::new();
-                            for tm in this.workspace_terminals.values() {
+                            if let Some(tm) = this.workspace_terminals.get(&this.active_workspace_id) {
                                 for pane in tm.all_panes() {
                                     if let Some(amux_platform::terminal::manager::TabKind::Browser { browser_id, .. }) = pane.active_tab_kind() {
                                         visible_bids.push(*browser_id);
