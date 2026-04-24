@@ -16,12 +16,23 @@ mod palette_dispatch;
 #[cfg(feature = "gpui")]
 mod preview_open;
 #[cfg(feature = "gpui")]
+mod preview_search;
+#[cfg(feature = "gpui")]
+mod preview_selection;
+#[cfg(feature = "gpui")]
+mod preview_shortcuts;
+#[cfg(feature = "gpui")]
+mod preview_toc;
+#[cfg(feature = "gpui")]
 mod search;
 #[cfg(feature = "gpui")]
 mod state;
+mod tab_intercept;
 mod theme;
 #[cfg(feature = "gpui")]
 mod gpui_entry;
+#[cfg(feature = "gpui")]
+mod gpui_entry_render;
 #[cfg(feature = "gpui")]
 mod gpui_input_handler;
 #[cfg(feature = "gpui")]

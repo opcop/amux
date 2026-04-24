@@ -269,6 +269,12 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         crate::metrics::startup_phase("gpui_component_init_done");
 
+        // Install the Tab-key interceptor on macOS so Tab reaches the
+        // PTY instead of being consumed by AppKit's key view loop.
+        // See tab_intercept.rs for the full diagnosis.
+        crate::tab_intercept::install();
+        crate::metrics::startup_phase("tab_intercept_installed");
+
         // macOS Dock icon. NSApplication is now alive (gpui's application
         // bootstrap created it before invoking this closure), so we can
         // safely call setApplicationIconImage_. Without this, dev `cargo
@@ -395,6 +401,19 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                             this.cursor_blink_frame = this.cursor_blink_frame.wrapping_add(1);
                             let cursor_blink_toggle = this.cursor_blink_frame % 30 == 0;
 
+                            // Keep the tab_intercept module in sync with the
+                            // currently-active terminal so the NSEvent monitor
+                            // (Tab interception) always sends to the right PTY.
+                            {
+                                let ptr = this
+                                    .workspace_terminals
+                                    .get_mut(&this.active_workspace_id)
+                                    .and_then(|tm| tm.active_terminal())
+                                    .map(|t| t as *const _ as usize)
+                                    .unwrap_or(0);
+                                crate::tab_intercept::set_active_terminal(ptr);
+                            }
+
                             // Check if any terminal has new output (dirty flag from PTY wakeup)
                             let mut any_dirty = false;
                             'outer: for tm in this.workspace_terminals.values() {
@@ -491,6 +510,25 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                                     });
                                 }).detach();
                             }
+                            // One-shot re-hydration of preview tabs that
+                            // survived in a saved layout. Tab tree restores
+                            // from layouts.json carry TabKind::Preview
+                            // entries but `preview_tabs` starts empty, so
+                            // without this pass restored previews stick on
+                            // the "Preview: <path>" placeholder forever.
+                            // Gated by the same "first few frames" cadence
+                            // as tool detection — no need for window handle
+                            // (previews don't use WebView2), just wait for
+                            // the view to settle.
+                            if !this.previews_restored {
+                                this.previews_restored = true;
+                                this.restore_preview_tabs_from_layouts(cx);
+                            }
+                            // Drain preview filesystem events each tick so an
+                            // edit in the user's editor reaches the preview
+                            // within one frame cycle. Cheap when nothing is
+                            // watched — just a `try_recv` that misses.
+                            this.poll_preview_reloads(cx);
                             // Poll terminal activity — only for the active workspace.
                             // Background workspaces keep their dirty flag set by the
                             // PTY event proxy; the sidebar shows a green dot for those.

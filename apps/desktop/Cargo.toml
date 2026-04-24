@@ -34,6 +34,11 @@ smol = { version = "2", optional = true }
 wry = { version = "0.53", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 image = { version = "0.25", default-features = false, features = ["bmp", "png", "jpeg"] }
+# Cross-platform filesystem watcher (inotify/FSEvents/ReadDirectoryChangesW).
+# Used to auto-reload preview tabs when the source file changes on disk.
+# Opt-in events only: we only subscribe to paths behind active preview tabs,
+# so the watch set stays small.
+notify = "7"
 # Native folder picker. Used via AsyncFileDialog from cx.spawn so the dialog
 # runs on the main NSApp loop *outside* a GPUI listener stack frame, which
 # avoids the RefCell re-entrancy panic that the synchronous variant triggers
@@ -48,8 +53,9 @@ rfd.workspace = true
 # in main.rs to give the dev-mode `cargo run` binary a real Dock icon
 # even before we ship a packaged .app bundle.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder"] }
-objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSEvent", "NSImage", "NSResponder", "block2"] }
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSObjCRuntime", "NSThread"] }
+block2 = "0.6"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 git2 = { version = "0.20", features = ["https", "ssh", "vendored-libgit2", "vendored-openssl"] }
