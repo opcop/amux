@@ -613,6 +613,9 @@ pub fn render_alacritty_terminal(
 #[cfg(feature = "gpui")]
 struct RenderData {
     grid: Vec<Vec<RenderCell>>,
+    /// Which viewport rows are dirty (changed since last frame).
+    /// True = re-shape glyphs; False = reuse cached shaped text.
+    dirty_rows: Vec<bool>,
     rows: usize,
     cols: usize,
     cursor_row: usize,
@@ -650,6 +653,11 @@ struct RenderData {
 #[cfg(feature = "gpui")]
 thread_local! {
     static RENDER_BUF: std::cell::RefCell<Vec<Vec<RenderCell>>> =
+        std::cell::RefCell::new(Vec::new());
+    /// Tracks which viewport rows were modified since the last frame.
+    /// Set by collect_render_data, consumed by prepaint for incremental
+    /// glyph shaping.
+    static DIRTY_ROWS: std::cell::RefCell<Vec<bool>> =
         std::cell::RefCell::new(Vec::new());
 }
 
@@ -760,33 +768,75 @@ fn collect_render_data(
     use alacritty_terminal::grid::Dimensions;
     use alacritty_terminal::term::cell::Flags as CellFlags;
 
-    term.with_term(|t| {
-        let content = t.renderable_content();
+    term.with_term_mut(|t| {
         let cols = t.columns();
         let rows = t.screen_lines();
-        let cursor = content.cursor;
         let display_offset = t.grid().display_offset();
+
+        // Read alacritty damage info, then drop the TermDamage borrow
+        // before calling renderable_content() which needs an immutable
+        // borrow on the same term.
+        let damage_set: Vec<bool> = {
+            let damage = t.damage();
+            let is_full = matches!(damage, alacritty_terminal::term::TermDamage::Full);
+            if is_full {
+                vec![true; rows]
+            } else {
+                let mut dirty = vec![false; rows];
+                if let alacritty_terminal::term::TermDamage::Partial(iter) = &damage {
+                    for dmg in iter.clone() {
+                        let viewport_line =
+                            dmg.line.saturating_sub(display_offset as usize);
+                        if viewport_line < rows {
+                            dirty[viewport_line] = true;
+                        }
+                    }
+                }
+                dirty
+            }
+        }; // TermDamage borrow released
+
+        let content = t.renderable_content();
+        let cursor = content.cursor;
 
         let default_fg = rgb(theme.fg);
         let default_bg = rgb(theme.bg);
         let cursor_color = rgb(theme.cursor);
 
-        // Reuse thread-local buffer to avoid per-frame allocations.
-        // Reallocate only when terminal dimensions change.
-        let mut grid = RENDER_BUF.with(|buf| {
+        // Reuse thread-local buffer; only reset cells in dirty rows.
+        let (mut grid, dirty_rows) = RENDER_BUF.with(|buf| {
             let mut buf = buf.borrow_mut();
-            if buf.len() != rows || buf.first().map_or(true, |r| r.len() != cols) {
+            let resized = buf.len() != rows || buf.first().map_or(true, |r| r.len() != cols);
+            if resized {
                 *buf = vec![vec![RenderCell::default(); cols]; rows];
             } else {
-                // Reset cells to default — only populated cells get overwritten.
-                for row in buf.iter_mut() {
-                    for cell in row.iter_mut() {
-                        *cell = RenderCell::default();
+                // Only clear cells in damaged rows; undamaged rows keep
+                // their previous content to avoid redundant glyph shaping.
+                for (row_idx, row) in buf.iter_mut().enumerate() {
+                    if damage_set.get(row_idx).copied().unwrap_or(true) {
+                        for cell in row.iter_mut() {
+                            *cell = RenderCell::default();
+                        }
                     }
                 }
             }
-            // Take ownership of the grid, leaving an empty Vec behind.
-            std::mem::take(&mut *buf)
+            let grid = std::mem::take(&mut *buf);
+            // Track which rows are dirty for incremental prepaint.
+            let mut dirty = DIRTY_ROWS.with(|d| {
+                let mut d = d.borrow_mut();
+                if d.len() != rows {
+                    *d = vec![true; rows];
+                } else {
+                    for (i, is_dirty) in damage_set.iter().enumerate() {
+                        d[i] = *is_dirty;
+                    }
+                }
+                d.clone()
+            });
+            // Also mark cursor's previous and current row as dirty so the
+            // cursor blink and movement always get redrawn.
+            // (Cursor paint is handled separately after cell paint.)
+            (grid, dirty)
         });
 
         for indexed in content.display_iter {
@@ -951,6 +1001,7 @@ fn collect_render_data(
 
         RenderData {
             grid,
+            dirty_rows,
             rows,
             cols,
             // Cursor viewport row: convert absolute grid line → viewport row index.
