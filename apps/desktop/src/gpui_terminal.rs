@@ -567,8 +567,23 @@ pub fn render_alacritty_terminal(
     search_matches: &[alacritty_terminal::term::search::Match],
     scrollbar_expanded: bool,
     hover_link_segments: Vec<(usize, usize, usize)>,
+    bell_flash_on: bool,
 ) -> impl IntoElement {
-    let mut data = collect_render_data(term, cursor_blink_on, theme, search_matches);
+    // Tint the background yellow briefly when the bell rings.
+    // Linear interpolation: bg → yellow (0xb58900), 25% blend.
+    let mut bell_theme = if bell_flash_on {
+        let mut t = theme.clone();
+        let bg = theme.bg;
+        let (br, bg, bb) = ((bg >> 16) & 0xff, (bg >> 8) & 0xff, bg & 0xff);
+        let (yr, yg, yb) = (0xb5u32, 0x89u32, 0x00u32);
+        let (mr, mg, mb) = ((br + yr) / 2, (bg + yg) / 2, (bb + yb) / 2);
+        t.bg = (mr << 16) | (mg << 8) | mb;
+        t
+    } else {
+        theme.clone()
+    };
+    let effective_theme = &bell_theme;
+    let mut data = collect_render_data(term, cursor_blink_on, effective_theme, search_matches);
     data.scrollbar_expanded = scrollbar_expanded;
     data.hover_link_segments = hover_link_segments;
 
@@ -973,32 +988,6 @@ fn collect_render_data(
 /// Shape text prefix to get precise cursor X within a narrow run.
 /// Returns the pixel offset from bounds origin.
 #[cfg(feature = "gpui")]
-fn shape_cursor_x(
-    narrow_text: &str,
-    text_idx: usize,
-    narrow_start: usize,
-    cell_w: f32,
-    bold: bool,
-    italic: bool,
-    text_system: &std::sync::Arc<gpui::WindowTextSystem>,
-    font_size: Pixels,
-    font_family: &str,
-) -> Pixels {
-    if text_idx == 0 {
-        px(narrow_start as f32 * cell_w)
-    } else {
-        let prefix: String = narrow_text.chars().take(text_idx).collect();
-        let prun = gpui::TextRun {
-            len: prefix.len(),
-            font: make_font_styled(font_family, bold, italic),
-            color: Hsla::default(),
-            background_color: None, underline: None, strikethrough: None,
-        };
-        let ps = text_system.shape_line(SharedString::from(prefix), font_size, &[prun], None);
-        px(narrow_start as f32 * cell_w) + ps.width()
-    }
-}
-
 /// Pack a `Rgba` into a u32 (RGBA8) so it can join the glyph cache key.
 #[cfg(feature = "gpui")]
 fn pack_rgba(c: Rgba) -> u32 {
@@ -1085,15 +1074,16 @@ fn prepaint_terminal(
 
     // Block cursor colors are applied inline in the bg_rects loop below.
 
-    // Cursor X is computed during Phase 2 text layout for the cursor row,
-    // matching the exact run boundaries and shaped widths used for text rendering.
-    // Fallback: grid-aligned position.
-    let mut cursor_shaped_x = px(data.cursor_col as f32 * cell_w);
-    let mut cursor_x_found = false;
+    // Cursor X is a pure grid computation. The terminal-rendering
+    // invariant is that every cell — wide or narrow, ligature or not,
+    // primary-font or fallback — is painted at its grid column
+    // `col * cell_w`. The cursor is a cell, so it follows the same
+    // rule. No shaping required, no flag, no search. See
+    // `docs/terminal-rendering-invariants.md`.
+    let cursor_shaped_x = px(data.cursor_col as f32 * cell_w);
     let mut narrow_text = String::new();
 
     for row in 0..data.rows {
-        let is_cursor_row = data.cursor_visible && row == data.cursor_row;
         let y = bounds.origin.y + px(row as f32 * cell_h);
 
         // ── Phase 1: Background quads ──
@@ -1267,6 +1257,76 @@ fn prepaint_terminal(
                 }
             };
 
+            // Flush the accumulated narrow run to `text_lines`.
+            //
+            // **Invariant**: each character in a narrow run is painted
+            // at its grid column `col * cell_w`. We shape the run as
+            // one unit (for ligature support — FiraCode `=>`, JetBrains
+            // Mono `!=`, etc.), and if the shaper happens to return a
+            // total width that matches the grid (`narrow_cells *
+            // cell_w` within half a pixel), we trust it and paint the
+            // bulk shaped line at the run origin. This is the fast,
+            // ligature-preserving path and hits ~100% of the time for
+            // normal text in a monospace font whose primary font has
+            // every glyph we need.
+            //
+            // If the shaper drifts — the hallmark of a fallback font
+            // rendering a missing PUA glyph like `\ue0a0`, or a font
+            // that lies about its advances — we refuse to trust the
+            // bulk advances and re-shape **per character** at grid
+            // positions. This confines any drift to the single
+            // offending cell, and everything around it stays exactly
+            // on grid. The per-char path is slower per call but
+            // Glyph cache is per-string, so repeat characters
+            // (spaces, common ASCII) are hashed once and reused.
+            //
+            // Ligatures are sacrificed in the drifted path. That's
+            // the correct tradeoff: a misaligned ligature is worse
+            // than no ligature, and fonts that ship correct ligature
+            // advances never trigger the fallback in the first place.
+            let flush_narrow = |
+                narrow_text: &mut String,
+                narrow_start: usize,
+                has_visible: bool,
+                text_lines: &mut Vec<PaintText>,
+            | {
+                if narrow_text.is_empty() || !has_visible {
+                    narrow_text.clear();
+                    return;
+                }
+                let narrow_cells = narrow_text.chars().count();
+                let expected_width = narrow_cells as f32 * cell_w;
+                let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
+                let fg_packed = if hidden { 0 } else { pack_rgba(fg) };
+                let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
+                let shaped = shape_cached(narrow_text, sk, fg_packed, run, font_size, &text_system);
+                let actual_width = shaped.width().as_f32();
+                const DRIFT_TOLERANCE_PX: f32 = 0.5;
+
+                if (actual_width - expected_width).abs() < DRIFT_TOLERANCE_PX {
+                    // Fast path: ligature-preserving bulk paint at run origin.
+                    let x = content_origin_x + px(narrow_start as f32 * cell_w);
+                    text_lines.push(PaintText { origin: point(x, y), shaped });
+                } else {
+                    // Drifted: per-char re-shape at grid positions.
+                    // See the fn doc above for the rationale.
+                    for (i, ch) in narrow_text.chars().enumerate() {
+                        if ch == ' ' || ch == '\0' { continue; }
+                        let cell_col = narrow_start + i;
+                        let ch_str = ch.to_string();
+                        let run_one = build_run(
+                            ch_str.len(), fg, bold, italic, underline, strikethrough, hidden,
+                        );
+                        let shaped_one = shape_cached(
+                            &ch_str, sk, fg_packed, run_one, font_size, &text_system,
+                        );
+                        let x = content_origin_x + px(cell_col as f32 * cell_w);
+                        text_lines.push(PaintText { origin: point(x, y), shaped: shaped_one });
+                    }
+                }
+                narrow_text.clear();
+            };
+
             while col < data.cols {
                 let c = &data.grid[row][col];
                 if c.wide_continuation {
@@ -1287,38 +1347,15 @@ fn prepaint_terminal(
                     && data.grid[row][col + 1].wide_continuation;
 
                 if is_wide {
-                    // Cursor detection: check if cursor falls in the narrow run being flushed
-                    if is_cursor_row && !cursor_x_found
-                        && !narrow_text.is_empty()
-                        && data.cursor_col >= narrow_start
-                        && data.cursor_col <= narrow_start + narrow_text.len()
-                    {
-                        cursor_x_found = true;
-                        cursor_shaped_x = shape_cursor_x(
-                            &narrow_text, data.cursor_col - narrow_start, narrow_start,
-                            cell_w, bold, italic, &text_system, font_size, font_family,
-                        );
-                    }
-
-                    // Flush pending narrow run
-                    if has_visible {
-                        let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
-                        let fg_packed = if hidden { 0 } else { pack_rgba(fg) };
-                        let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
-                        let shaped = shape_cached(&narrow_text, sk, fg_packed, run, font_size, &text_system);
-                        let x = content_origin_x + px(narrow_start as f32 * cell_w);
-                        text_lines.push(PaintText { origin: point(x, y), shaped });
-                    }
-                    narrow_text.clear();
+                    // Flush pending narrow run before the wide char.
+                    flush_narrow(&mut narrow_text, narrow_start, has_visible, &mut text_lines);
                     has_visible = false;
 
-                    // Cursor detection: cursor on this wide char
-                    if is_cursor_row && !cursor_x_found && col == data.cursor_col {
-                        cursor_x_found = true;
-                        cursor_shaped_x = px(col as f32 * cell_w);
-                    }
-
-                    // Shape wide char individually at exact grid position
+                    // Shape the wide char on its own at exact grid
+                    // position. Wide chars always span 2 cells so
+                    // even if the shaped glyph overflows a fraction,
+                    // the overflow stays inside the next cell and
+                    // nothing after it shifts.
                     let ch = if c.ch == '\0' { ' ' } else { c.ch };
                     if ch != ' ' {
                         let ch_str = ch.to_string();
@@ -1343,28 +1380,10 @@ fn prepaint_terminal(
                 }
             }
 
-            // Cursor detection: check if cursor falls in the remaining narrow run
-            if is_cursor_row && !cursor_x_found
-                && !narrow_text.is_empty()
-                && data.cursor_col >= narrow_start
-                && data.cursor_col <= narrow_start + narrow_text.len()
-            {
-                cursor_x_found = true;
-                cursor_shaped_x = shape_cursor_x(
-                    &narrow_text, data.cursor_col - narrow_start, narrow_start,
-                    cell_w, bold, italic, &text_system, font_size, font_family,
-                );
-            }
-
-            // Flush remaining narrow run
-            if has_visible {
-                let sk = glyph_cache::style_key(bold, italic, underline.as_u8(), strikethrough);
-                let fg_packed = if hidden { 0 } else { pack_rgba(fg) };
-                let run = build_run(narrow_text.len(), fg, bold, italic, underline, strikethrough, hidden);
-                let shaped = shape_cached(&narrow_text, sk, fg_packed, run, font_size, &text_system);
-                let x = content_origin_x + px(narrow_start as f32 * cell_w);
-                text_lines.push(PaintText { origin: point(x, y), shaped });
-            }
+            // Flush the tail narrow run (if the inner loop exited on
+            // a style change, a special char, or end-of-row rather
+            // than a wide char).
+            flush_narrow(&mut narrow_text, narrow_start, has_visible, &mut text_lines);
         }
 
         // ── Phase 2.5: Underline spans ──

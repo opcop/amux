@@ -122,6 +122,7 @@ pub(crate) fn render_layout(
     avail_w: f32,
     avail_h: f32,
     cursor_blink_on: bool,
+    bell_flash_on: bool,
     metrics: &crate::gpui_terminal::CellMetrics,
     is_zoomed: bool,
     renaming_tab: &Option<(
@@ -137,6 +138,14 @@ pub(crate) fn render_layout(
     theme: &crate::gpui_terminal::TerminalTheme,
     browser_tabs: &std::collections::HashMap<u64, crate::gpui_browser::BrowserTabEntry>,
     preview_tabs: &std::collections::HashMap<String, crate::gpui_preview::PreviewState>,
+    preview_search: Option<&crate::preview_search::PreviewSearchState>,
+    preview_scroll_handle: &gpui::UniformListScrollHandle,
+    preview_list_states: &std::collections::HashMap<String, gpui::ListState>,
+    preview_toc: Option<&crate::preview_toc::TocPickerState>,
+    preview_selection: Option<&crate::preview_selection::PreviewSelectionState>,
+    preview_body_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    preview_selection_bg: gpui::Hsla,
+    preview_selection_sink: &crate::preview_selection::SelectionRangeSink,
     search_matches: &[alacritty_terminal::term::search::Match],
     scrollbar_expanded_pane: Option<&amux_platform::terminal::manager::PaneId>,
     hover_link: Option<&crate::gpui_entry::HoverLinkState>,
@@ -152,10 +161,14 @@ pub(crate) fn render_layout(
             pane_bounds.insert(pane_id.0.clone(), (origin_x, origin_y + tab_strip_h, avail_w, (avail_h - tab_strip_h).max(0.0)));
             let is_active = active_pane_id == Some(pane_id);
 
-            // Build per-pane tab strip + terminal content
-            // get_pane may return None if layout references a pane that doesn't
-            // exist in the panes map (e.g., corrupted saved layout). In that case,
-            // we skip the pane and render a placeholder.
+            // Build per-pane tab strip + terminal content.
+            // `get_pane` should always return Some after `heal_layout`, which
+            // `ensure_workspace_terminal` runs on every workspace switch. If
+            // we still fall through (e.g. a save captured a transient
+            // inconsistent state and we're one frame ahead of the next
+            // heal), show the same "Starting terminal..." placeholder the
+            // missing-PTY branch uses. The bootstrap tick will re-run
+            // ensure_workspace_terminal on the next interaction.
             let (tab_strip, content) = if let Some(pane) = manager.get_pane(pane_id) {
                 let tabs = pane.tab_titles();
                 let pid_for_tabs = pane_id.clone();
@@ -368,6 +381,7 @@ pub(crate) fn render_layout(
                                                 }
                                                 Some(amux_platform::terminal::manager::TabKind::Preview { path }) => {
                                                     this.preview_tabs.remove(path);
+                                                    this.preview_unwatch_path(path);
                                                 }
                                                 _ => {}
                                             }
@@ -610,7 +624,46 @@ pub(crate) fn render_layout(
                         let preview_w = avail_w;
                         let preview_h = (avail_h - tab_strip_h).max(0.0);
                         if let Some(preview) = preview_tabs.get(path) {
-                            crate::gpui_preview::render_preview_panel(preview, preview_w, preview_h, cx).into_any_element()
+                            let list_state = preview_list_states.get(path).cloned();
+                            // Selection ctx is only live when the
+                            // stored selection is for THIS preview's
+                            // path AND has non-coincident endpoints
+                            // AND we've captured bounds on a prior
+                            // frame. Anything else and the ctx is
+                            // None — no highlights painted.
+                            let selection_ctx = preview_selection
+                                .filter(|s| s.path == *path)
+                                .and_then(|s| {
+                                    let anchor = s.anchor?;
+                                    let head = s.head?;
+                                    if anchor == head { return None; }
+                                    let bounds = preview_body_bounds?;
+                                    let scroll = preview_list_states
+                                        .get(path)
+                                        .map(|ls| ls.scroll_px_offset_for_scrollbar())
+                                        .unwrap_or_default();
+                                    Some(crate::preview_selection::SelectionRenderCtx {
+                                        start_window: crate::preview_selection::content_to_window(
+                                            anchor, bounds, scroll,
+                                        ),
+                                        end_window: crate::preview_selection::content_to_window(
+                                            head, bounds, scroll,
+                                        ),
+                                        background: preview_selection_bg,
+                                        sink: preview_selection_sink.clone(),
+                                    })
+                                });
+                            crate::gpui_preview::render_preview_panel(
+                                preview,
+                                preview_w,
+                                preview_h,
+                                preview_search,
+                                preview_scroll_handle.clone(),
+                                list_state,
+                                preview_toc,
+                                selection_ctx,
+                                cx,
+                            ).into_any_element()
                         } else {
                             div().flex_1().bg(rgb(crate::theme::SURFACE))
                                 .child(format!("Preview: {}", path))
@@ -633,9 +686,9 @@ pub(crate) fn render_layout(
                                 .map(|h| h.segments.clone())
                                 .unwrap_or_default();
                             if active_tab_exited {
-                                render_exited_overlay(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, pane_id, term_matches, sb_expanded, hover_segments, cx)
+                                render_exited_overlay(term, cursor_blink_on, bell_flash_on, &metrics, is_active, font_family, font_size, theme, pane_id, term_matches, sb_expanded, hover_segments, cx)
                             } else {
-                                crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, term_matches, sb_expanded, hover_segments).into_any_element()
+                                crate::gpui_terminal::render_alacritty_terminal(term, cursor_blink_on, &metrics, is_active, font_family, font_size, theme, term_matches, sb_expanded, hover_segments, bell_flash_on).into_any_element()
                             }
                         } else {
                             div().flex_1().flex().items_center().justify_center()
@@ -652,7 +705,13 @@ pub(crate) fn render_layout(
             } else {
                 (
                     div().into_any_element(),
-                    div().flex_1().bg(rgb(crate::theme::SURFACE)).child("Empty pane").into_any_element(),
+                    div().flex_1().flex().items_center().justify_center()
+                        .bg(rgb(crate::theme::SURFACE))
+                        .child(
+                            div().flex().flex_col().items_center().gap_2()
+                                .child(div().text_sm().text_color(rgb(crate::theme::TEXT_DIM)).child("Starting terminal..."))
+                        )
+                        .into_any_element(),
                 )
             };
 
@@ -724,7 +783,7 @@ pub(crate) fn render_layout(
                 .w(px(left_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, scrollbar_expanded_pane, hover_link, cx));
+                .child(render_layout(left, manager, active_pane_id, left_w, avail_h, cursor_blink_on, bell_flash_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, preview_search, preview_scroll_handle, preview_list_states, preview_toc, preview_selection, preview_body_bounds, preview_selection_bg, preview_selection_sink, search_matches, scrollbar_expanded_pane, hover_link, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-h-{}", split_id).into()))
@@ -755,7 +814,7 @@ pub(crate) fn render_layout(
                 .w(px(right_w))
                 .h_full()
                 .overflow_hidden()
-                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, scrollbar_expanded_pane, hover_link, cx));
+                .child(render_layout(right, manager, active_pane_id, right_w, avail_h, cursor_blink_on, bell_flash_on, metrics, is_zoomed, renaming_tab, origin_x + left_w + handle_px, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, preview_search, preview_scroll_handle, preview_list_states, preview_toc, preview_selection, preview_body_bounds, preview_selection_bg, preview_selection_sink, search_matches, scrollbar_expanded_pane, hover_link, cx));
 
             div()
                 .w(px(avail_w))
@@ -785,7 +844,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(top_h))
                 .overflow_hidden()
-                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, scrollbar_expanded_pane, hover_link, cx));
+                .child(render_layout(top, manager, active_pane_id, avail_w, top_h, cursor_blink_on, bell_flash_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, preview_search, preview_scroll_handle, preview_list_states, preview_toc, preview_selection, preview_body_bounds, preview_selection_bg, preview_selection_sink, search_matches, scrollbar_expanded_pane, hover_link, cx));
 
             let handle = div()
                 .id(gpui::ElementId::Name(format!("resize-v-{}", split_id).into()))
@@ -816,7 +875,7 @@ pub(crate) fn render_layout(
                 .w_full()
                 .h(px(bottom_h))
                 .overflow_hidden()
-                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, search_matches, scrollbar_expanded_pane, hover_link, cx));
+                .child(render_layout(bottom, manager, active_pane_id, avail_w, bottom_h, cursor_blink_on, bell_flash_on, metrics, is_zoomed, renaming_tab, origin_x, origin_y + top_h + handle_px, pane_bounds, font_family, font_size, theme, browser_tabs, preview_tabs, preview_search, preview_scroll_handle, preview_list_states, preview_toc, preview_selection, preview_body_bounds, preview_selection_bg, preview_selection_sink, search_matches, scrollbar_expanded_pane, hover_link, cx));
 
             div()
                 .w(px(avail_w))
@@ -1187,6 +1246,7 @@ pub(crate) fn render_pane_picker(
 fn render_exited_overlay(
     term: &amux_platform::terminal::alacritty_view::AlacrittyTerminal,
     cursor_blink_on: bool,
+    bell_flash_on: bool,
     metrics: &crate::gpui_terminal::CellMetrics,
     is_active: bool,
     font_family: &str,
@@ -1200,7 +1260,7 @@ fn render_exited_overlay(
 ) -> gpui::AnyElement {
     let terminal_content = crate::gpui_terminal::render_alacritty_terminal(
         term, cursor_blink_on, metrics, is_active, font_family, font_size, theme, search_matches,
-        scrollbar_expanded, hover_link_segments,
+        scrollbar_expanded, hover_link_segments, bell_flash_on,
     );
     let pid_restart = pane_id.clone();
     let pid_close = pane_id.clone();

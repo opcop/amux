@@ -391,19 +391,18 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
         crate::metrics::startup_phase("window_open_requested");
         let window_result = cx.open_window(window_opts, |window, cx| {
             let view = cx.new(|cx| {
-                // Start a ~60fps polling timer to drain PTY output into the emulator
+                // === Render tick: adaptive polling for PTY output + render ===
+                //
+                // Uses 16ms polling when the terminal is actively producing
+                // output, switches to 100ms after ~2 seconds of inactivity.
+                // This keeps rendering responsive during active use while
+                // reducing idle CPU wakeups by 6x.
                 cx.spawn(async move |this, cx| {
                     loop {
-                        Timer::after(std::time::Duration::from_millis(16)).await;
-                        let result = this.update(cx, |this: &mut GpuiShellView, cx: &mut Context<GpuiShellView>| {
-                            let has_drag = this.resize_drag.is_some();
-                            // Cursor blink: toggle every ~30 frames (500ms at 60fps)
+                        let interval_ms = this.update(cx, |this: &mut GpuiShellView, cx| {
                             this.cursor_blink_frame = this.cursor_blink_frame.wrapping_add(1);
-                            let cursor_blink_toggle = this.cursor_blink_frame % 30 == 0;
 
-                            // Keep the tab_intercept module in sync with the
-                            // currently-active terminal so the NSEvent monitor
-                            // (Tab interception) always sends to the right PTY.
+                            // Tab interception pointer update (cheap, per-frame)
                             {
                                 let ptr = this
                                     .workspace_terminals
@@ -414,7 +413,7 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                                 crate::tab_intercept::set_active_terminal(ptr);
                             }
 
-                            // Check if any terminal has new output (dirty flag from PTY wakeup)
+                            // Check dirty flags across all terminals
                             let mut any_dirty = false;
                             'outer: for tm in this.workspace_terminals.values() {
                                 for term in tm.all_terminals() {
@@ -424,16 +423,21 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                                     }
                                 }
                             }
+                            // Track last-dirty frame for adaptive polling
+                            if any_dirty {
+                                this.last_dirty_frame = this.cursor_blink_frame;
+                            }
+                            // Visual bell: flash the terminal background briefly
+                            if let Some(tm) = this.workspace_terminals.get(&this.active_workspace_id) {
+                                for term in tm.all_terminals() {
+                                    if term.take_bell() {
+                                        this.bell_flash_frame = Some(this.cursor_blink_frame);
+                                        break;
+                                    }
+                                }
+                            }
 
-                            // Collect which browser_ids should be visible: any browser tab
-                            // that is the active tab in its pane AND that pane lives in
-                            // the currently-active workspace. Browsers in other workspaces
-                            // must stay hidden — WebView2 is an OS-level child window
-                            // pinned to pixel bounds, so a "visible" browser from a
-                            // non-active workspace would paint over whatever the active
-                            // workspace is rendering at the same coordinates (and its
-                            // URL bar / tab strip wouldn't be drawn, since those live
-                            // in the render tree only for the active workspace).
+                            // Browser bounds sync (cheap — just atomic reads)
                             let mut visible_bids: Vec<u64> = Vec::new();
                             if let Some(tm) = this.workspace_terminals.get(&this.active_workspace_id) {
                                 for pane in tm.all_panes() {
@@ -442,8 +446,6 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                                     }
                                 }
                             }
-
-                            // Sync browser WebView2 bounds, visibility, and pending navigations.
                             for (&bid, entry) in this.browser_tabs.iter_mut() {
                                 let should_show = visible_bids.contains(&bid);
                                 if should_show {
@@ -459,26 +461,14 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                                 entry.browser.process_pending_nav();
                                 if let Some(url) = entry.browser.take_current_url() {
                                     this.pending_url_bar_update = Some(url);
-                                    cx.notify();
                                 }
                             }
 
-                            // Only re-render when needed: new output, cursor blink, or drag
-                            if any_dirty || cursor_blink_toggle || has_drag || this.selecting {
-                                cx.notify();
-                            }
-                            // Deferred startup: spawn PTY processes on first frame
-                            // Only spawn the active workspace's terminals for fast startup.
-                            // Other workspaces spawn on first switch (ensure_workspace_terminal).
+                            // Deferred one-shots (first few frames only)
                             if !this.terminals_spawned {
                                 this.terminals_spawned = true;
                                 let (shell, args) = GpuiShellView::default_shell();
                                 let active_ws = this.active_workspace_id.clone();
-                                // Resolve the spawn cwd from the active
-                                // workspace's own target path so newly
-                                // spawned terminals open *in* the workspace,
-                                // not in amux's own launch directory (which
-                                // is `/` for macOS .app bundle launches).
                                 let spawn_cwd = this
                                     .workspace_spawn_cwd(&active_ws)
                                     .or_else(GpuiShellView::default_cwd);
@@ -489,16 +479,11 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                                         tm.spawn_all_tabs_in_pane(&pid, &shell, &args, spawn_cwd.as_deref());
                                     }
                                 }
-                                // Generate agent-prompt.md if it doesn't exist
                                 GpuiShellView::ensure_agent_prompt_file();
-                                cx.notify();
                             }
-                            // Deferred tool detection: launch in background thread on third frame
                             if !this.tools_detected && this.cursor_blink_frame >= 3 {
                                 this.tools_detected = true;
-                                // Spawn detection in background so it doesn't block rendering
                                 cx.spawn(async move |this, cx| {
-                                    // Run blocking detection on a background thread
                                     let (tools, wsl) = smol::unblock(|| {
                                         let tools = GpuiShellView::detect_all_vibe_tools();
                                         let wsl = GpuiShellView::wsl_available();
@@ -510,66 +495,70 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                                     });
                                 }).detach();
                             }
-                            // One-shot re-hydration of preview tabs that
-                            // survived in a saved layout. Tab tree restores
-                            // from layouts.json carry TabKind::Preview
-                            // entries but `preview_tabs` starts empty, so
-                            // without this pass restored previews stick on
-                            // the "Preview: <path>" placeholder forever.
-                            // Gated by the same "first few frames" cadence
-                            // as tool detection — no need for window handle
-                            // (previews don't use WebView2), just wait for
-                            // the view to settle.
                             if !this.previews_restored {
                                 this.previews_restored = true;
                                 this.restore_preview_tabs_from_layouts(cx);
                             }
-                            // Drain preview filesystem events each tick so an
-                            // edit in the user's editor reaches the preview
-                            // within one frame cycle. Cheap when nothing is
-                            // watched — just a `try_recv` that misses.
                             this.poll_preview_reloads(cx);
-                            // Poll terminal activity — only for the active workspace.
-                            // Background workspaces keep their dirty flag set by the
-                            // PTY event proxy; the sidebar shows a green dot for those.
-                            // Full poll (agent status detection) runs only on the
-                            // workspace the user is actually looking at.
-                            if this.cursor_blink_frame % 4 == 0 {
-                                let frame = this.cursor_blink_frame;
-                                let active_ws = this.active_workspace_id.clone();
-                                if let Some(tm) = this.workspace_terminals.get_mut(&active_ws) {
-                                    let notifs = tm.poll_activity();
-                                    for n in notifs {
-                                        // Auto-expand sidebar when agent needs attention
-                                        if matches!(n.new_status, amux_platform::terminal::manager::AgentStatus::Waiting | amux_platform::terminal::manager::AgentStatus::Error) {
-                                            this.sidebar_state.collapsed = false;
-                                            this.sidebar_state.mode = crate::gpui_workspace_sidebar::SidebarMode::Agents;
-                                        }
-                                        let msg = format!("{} {} — {}",
-                                            n.new_status.icon(),
-                                            n.tab_title,
-                                            n.new_status.label(),
-                                        );
-                                        this.toasts.push(crate::state::ToastNotification {
-                                            message: msg,
-                                            color: n.new_status.color_rgb(),
-                                            frame_created: frame,
-                                            pane_id: n.pane_id,
-                                            tab_index: n.tab_index,
-                                        });
-                                    }
-                                    // Clear activity for the active tab since user is looking at it
-                                    this.terminal_manager_mut().clear_active_activity();
-                                }
-                                // Expire old toasts (after ~3 seconds = 180 frames at 60fps)
-                                this.toasts.retain(|t| {
-                                    frame.wrapping_sub(t.frame_created) < 180
-                                });
+
+                            // Trigger re-render on output, blink toggle, drag, or selection
+                            let has_drag = this.resize_drag.is_some();
+                            let blink_toggle = this.cursor_blink_frame % 30 == 0;
+                            if any_dirty || blink_toggle || has_drag || this.selecting {
+                                cx.notify();
                             }
-                            // Auto-save layouts every ~5 seconds (300 frames at 60fps)
-                            if this.cursor_blink_frame % 300 == 0 {
+
+                            // Adaptive interval: 16ms active, 100ms idle
+                            let idle_frames = this.cursor_blink_frame.wrapping_sub(this.last_dirty_frame);
+                            if idle_frames < 120 { 16u64 } else { 100u64 }
+                        }).unwrap_or(100);
+
+                        Timer::after(std::time::Duration::from_millis(interval_ms)).await;
+                    }
+                })
+                .detach();
+
+                // === Background poll: agent activity, toasts, auto-save (1 Hz) ===
+                cx.spawn(async move |this, cx| {
+                    let save_tick = std::cell::Cell::new(0u32);
+                    loop {
+                        Timer::after(std::time::Duration::from_millis(1000)).await;
+                        let result = this.update(cx, |this: &mut GpuiShellView, cx: &mut Context<GpuiShellView>| {
+                            let frame = this.cursor_blink_frame;
+                            let active_ws = this.active_workspace_id.clone();
+                            if let Some(tm) = this.workspace_terminals.get_mut(&active_ws) {
+                                let notifs = tm.poll_activity();
+                                for n in notifs {
+                                    if matches!(n.new_status, amux_platform::terminal::manager::AgentStatus::Waiting | amux_platform::terminal::manager::AgentStatus::Error) {
+                                        this.sidebar_state.collapsed = false;
+                                        this.sidebar_state.mode = crate::gpui_workspace_sidebar::SidebarMode::Agents;
+                                    }
+                                    let msg = format!("{} {} — {}",
+                                        n.new_status.icon(),
+                                        n.tab_title,
+                                        n.new_status.label(),
+                                    );
+                                    this.toasts.push(crate::state::ToastNotification {
+                                        message: msg,
+                                        color: n.new_status.color_rgb(),
+                                        frame_created: frame,
+                                        pane_id: n.pane_id,
+                                        tab_index: n.tab_index,
+                                    });
+                                }
+                                this.terminal_manager_mut().clear_active_activity();
+                            }
+                            // Expire toasts older than ~3 seconds
+                            this.toasts.retain(|t| {
+                                frame.wrapping_sub(t.frame_created) < 180
+                            });
+                            // Auto-save every ~5 seconds
+                            let tick = save_tick.get();
+                            save_tick.set(tick.wrapping_add(1));
+                            if tick % 5 == 0 {
                                 this.save_all_layouts();
                             }
+                            cx.notify();
                         });
                         if result.is_err() {
                             break;
