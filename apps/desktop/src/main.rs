@@ -34,6 +34,8 @@ mod gpui_entry;
 #[cfg(feature = "gpui")]
 mod gpui_entry_render;
 #[cfg(feature = "gpui")]
+mod gpui_pickers;
+#[cfg(feature = "gpui")]
 mod gpui_input_handler;
 #[cfg(feature = "gpui")]
 mod gpui_layout_renderer;
