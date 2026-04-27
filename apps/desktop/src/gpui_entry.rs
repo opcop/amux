@@ -168,6 +168,10 @@ pub(crate) struct GpuiShellView {
     /// every `Render::render` so stale ranges from a previous frame
     /// can't leak into the next copy.
     pub(crate) preview_selection_ranges: crate::preview_selection::SelectionRangeSink,
+    /// Unix socket notification receiver. The listener thread pushes
+    /// `SocketNotification` messages; the 1 Hz poll loop drains them
+    /// and creates toast notifications.
+    pub(crate) socket_notify_rx: Option<std::sync::mpsc::Receiver<amux_platform::socket_notify::SocketNotification>>,
 }
 
 /// Per-row visual segment of a hovered file link: `(row, start_col,
@@ -566,6 +570,7 @@ impl GpuiShellView {
             preview_selection: None,
             preview_body_bounds: None,
             preview_selection_ranges: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            socket_notify_rx: None,
         }
     }
 

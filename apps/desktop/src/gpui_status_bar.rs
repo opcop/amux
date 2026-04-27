@@ -1,5 +1,7 @@
 #[cfg(feature = "gpui")]
-use gpui::{rgb, px, FontWeight, IntoElement, div, prelude::*};
+use gpui::{rgb, px, Context, ElementId, FontWeight, IntoElement, div, prelude::*};
+#[cfg(feature = "gpui")]
+use crate::gpui_entry::GpuiShellView;
 #[cfg(feature = "gpui")]
 use crate::theme;
 
@@ -30,7 +32,10 @@ pub struct StatusBarData {
 }
 
 #[cfg(feature = "gpui")]
-pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
+pub fn render_status_bar(
+    data: &StatusBarData,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
     let workspace = &data.workspace_name;
     let pane_count = data.pane_count;
     let tab_count = data.tab_count;
@@ -118,10 +123,13 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                     None => Vec::new(),
                 })
                 // Crash notice (shown when ~/.amux/logs/crash has entries).
-                // Passive — points the user at the log directory.
+                // Clickable: opens the log directory in the system file
+                // manager and clears the in-memory count so the badge
+                // disappears. Disk files are left alone.
                 .children(match data.crash_notice {
                     Some(n) if n > 0 => vec![
                         div()
+                            .id(ElementId::Name("crash-notice".into()))
                             .flex()
                             .gap(px(4.0))
                             .items_center()
@@ -132,8 +140,14 @@ pub fn render_status_bar(data: &StatusBarData) -> impl IntoElement {
                             .border_1()
                             .border_color(rgb(theme::DANGER))
                             .text_color(rgb(theme::DANGER_BRIGHT))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(theme::DANGER)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.reveal_crash_logs();
+                                cx.notify();
+                            }))
                             .child(format!(
-                                "⚠ {} crash log{} — see ~/.amux/logs/crash",
+                                "⚠ {} crash log{} — click to open",
                                 n,
                                 if n == 1 { "" } else { "s" }
                             ))

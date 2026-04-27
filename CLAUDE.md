@@ -50,10 +50,29 @@ The `gpui` feature is required for the GUI — without it, only a basic text TUI
 - `gpui_config.rs`: Config from `~/.amux/config.toml` (font, theme, scrollback)
 
 **Terminal management** (`crates/amux-platform/src/terminal/`):
-- `manager.rs`: `TerminalManager` — pane tree (splits), tab management, resize
-- `emulator.rs`: `TerminalEmulator` wrapping `alacritty_terminal::Term`, pty spawning
-- `backend.rs`: Terminal backend abstraction
-- `session.rs`, `view.rs`, `alacritty_view.rs`: Terminal state views
+- `manager.rs`: `TerminalManager` — pane tree (splits), tab management, resize. Owns `PaneTab`, `CommandPhase`, agent status detection.
+- `alacritty_view.rs`: `AlacrittyTerminal` wrapping `alacritty_terminal::Term` — the live emulator. On Unix, PTY reads are routed through `FilterPty` → `OscInterceptor` before hitting the VTE parser.
+- `osc_intercept.rs`: Byte-level state machine extracting OSC 7 (cwd) and OSC 133 (shell integration) from the PTY stream. See "OSC integration" below.
+- `backend.rs`: PTY spawn + reader thread (`portable-pty`)
+- `keys.rs`: Key-event → PTY-byte translation
+
+## OSC integration
+
+The PTY output stream passes through `OscInterceptor` before alacritty sees it. Extracts:
+
+- **OSC 7** (`ESC ] 7 ; file://host/path ST`) — working directory. Updates `PaneTab.shell_reported_cwd`, which `active_tab_live_cwd` checks first (before the title-change cache, before the process cwd syscall, before the saved spawn cwd).
+- **OSC 133** (shell integration lifecycle) — drives `PaneTab.shell_integration_phase`:
+  - `133;A` prompt start → `CommandPhase::PromptReady` → `AgentStatus::Waiting`
+  - `133;B` / `133;C` command executing → `CommandPhase::Executing` → regex still runs (agents like claude hide inside long-running commands; regex refines Thinking vs Waiting)
+  - `133;D[;exit]` command finished → `CommandPhase::FinishedOk` or `FinishedErr(exit)` → `AgentStatus::Done` / `Error`
+
+Every other OSC (0/2 title, 4/10/11 palette, 52 clipboard, 9/777 notifications that we don't yet handle) passes through byte-for-byte so alacritty's existing handling stays untouched.
+
+**Fallbacks preserved**: shells without OSC 7 keep using the title-change → `proc_pidinfo` chain; shells without OSC 133 keep using the last-5-lines regex for agent status. The integration layer is purely additive.
+
+**Platform**: Unix only for now. Windows falls through to raw `tty::Pty` — adding OSC support on Windows needs an equivalent `FilterPty` wrapper on the Windows PTY type.
+
+**Testing**: `crates/amux-platform/src/terminal/osc_intercept.rs` has 29 unit tests covering OSC parsing invariants. `crates/amux-platform/tests/osc_smoke.rs` spawns a real `/bin/sh` that emits OSC sequences via `printf` and asserts the events reach `AlacrittyTerminal::take_osc_events()`.
 
 **Third-party** (`third_party/`): Vendored GPUI component library and limux (not actively used).
 

@@ -58,11 +58,15 @@ fn main() {
     }
     let total_bytes = payload.len();
 
+    // Benchmark: no PTY reader, no OSC drain. Rx dropped immediately.
+    let (osc_event_tx, _osc_event_rx) = std::sync::mpsc::channel();
     let proxy = AmuEventProxy {
         title: Arc::new(Mutex::new(None)),
         bell: Arc::new(AtomicBool::new(false)),
         child_exited: Arc::new(AtomicBool::new(false)),
         dirty: Arc::new(AtomicBool::new(false)),
+        title_changed: Arc::new(AtomicBool::new(false)),
+        osc_event_tx,
     };
     let size = BenchSize { cols: 120, rows: 40 };
     let mut config = TermConfig::default();

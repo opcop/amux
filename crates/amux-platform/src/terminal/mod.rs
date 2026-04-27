@@ -6,22 +6,13 @@ pub mod backend;
 pub mod keys;
 pub mod manager;
 pub mod alacritty_view;
+pub mod osc_intercept;
 
-// The following modules are dead code retained on disk for historical reference.
-// They are excluded from the compile graph so they neither generate warnings nor
-// rot alongside the live terminal stack. See developer-handoff.md §6.1.
-//
-// - `emulator`: original in-house ANSI parser / cell grid (TerminalEmulator).
-//   Superseded by `alacritty_view::AlacrittyTerminal`, which wraps
-//   `alacritty_terminal::Term` and is the only emulator the desktop now drives.
-// - `view`: thin TerminalView wrapper around the in-house emulator. Already
-//   marked "no longer used by desktop" in docs/HANDOFF-CANVAS-RENDERING.md.
-// - `session`: parallel TerminalSessionManager + keyboard_to_pty implementation
-//   whose only consumer was the (also unused) `gpui_terminal_component.rs`.
-//
-// pub mod emulator;
-// pub mod view;
-// pub mod session;
+// The live terminal stack is `alacritty_view::AlacrittyTerminal` (wraps
+// `alacritty_terminal::Term`) plus `backend` for PTY spawn and `manager`
+// for the pane/tab tree. The old in-house ANSI parser and its
+// TerminalView / TerminalSessionManager wrappers were removed together
+// with the unused `gpui_terminal_component.rs` desktop module.
 
 /// Query the current working directory of a process by PID.
 /// On Windows, uses sysinfo (which reads the PEB via NtQueryInformationProcess).

@@ -22,6 +22,12 @@ pub struct AgentSidebarItem {
     pub agent_status: Option<String>,
     pub status_icon: String,
     pub status_color: u32,
+    /// Rich session data from JSONL monitoring (Claude Code only)
+    pub session_tool: Option<String>,
+    pub session_tokens: Option<u64>,
+    pub session_subagents: usize,
+    pub session_todo_done: usize,
+    pub session_todo_total: usize,
 }
 
 /// State for the workspace sidebar.

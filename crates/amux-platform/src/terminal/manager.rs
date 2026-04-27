@@ -62,6 +62,73 @@ impl AgentStatus {
     }
 }
 
+/// Shell command lifecycle phase derived from OSC 133 sequences.
+///
+/// Each tab starts in `Unknown` and stays there unless the shell
+/// emits at least one OSC 133 sequence (driven by vscode-shell-
+/// integration, Kitty shell integration, p10k's instant prompt, etc.).
+/// Once any 133 fires, the tab opts into event-driven agent status
+/// detection and we stop falling back to regex for clearly
+/// determinate states (prompt / finished with exit code).
+///
+/// `Executing` is deliberately ambiguous for interactive children
+/// like `claude` / `vim` / `ssh`: OSC 133 tells us "a command is
+/// running" but can't distinguish "working on output" from "waiting
+/// for user input at the REPL prompt". The regex path still
+/// participates when phase is `Executing` so it can refine to
+/// `Thinking` vs `Waiting` based on the agent's own UI markers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandPhase {
+    /// Shell never emitted OSC 133 on this tab. Agent status is
+    /// entirely determined by regex against recent output.
+    Unknown,
+    /// Last OSC 133 was `133;A` — shell printed its prompt and is
+    /// ready for input. Maps to `AgentStatus::Waiting`.
+    PromptReady,
+    /// Last OSC 133 was `133;B` or `133;C` — shell dispatched a
+    /// command and it's currently running. Regex path still
+    /// participates so interactive REPL agents can report their
+    /// internal state; falls back to `Thinking` when regex can't
+    /// determine anything.
+    Executing,
+    /// Last OSC 133 was `133;D;0` — command completed successfully.
+    /// Briefly visible as `AgentStatus::Done` before the next
+    /// `133;A` flips the tab back to `PromptReady`.
+    FinishedOk,
+    /// Last OSC 133 was `133;D;<nonzero>` — command failed.
+    /// Maps to `AgentStatus::Error`. Exit code is retained for
+    /// potential display in a future tooltip.
+    FinishedErr(Option<i32>),
+}
+
+impl Default for CommandPhase {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl CommandPhase {
+    /// Update phase in response to an OSC 133 subcommand. Called
+    /// by `poll_activity` for each event drained from the OSC
+    /// interceptor channel.
+    pub fn apply(&mut self, event: &crate::terminal::osc_intercept::OscEvent) {
+        use crate::terminal::osc_intercept::OscEvent;
+        *self = match event {
+            OscEvent::PromptStart => CommandPhase::PromptReady,
+            OscEvent::CommandStart | OscEvent::CommandExecuting => CommandPhase::Executing,
+            OscEvent::CommandFinished(exit) => match exit {
+                // Missing exit code (some shells omit for `D`) is
+                // treated as success — spec §10 risk register says
+                // "D alone = `CommandFinished(None)`".
+                None | Some(0) => CommandPhase::FinishedOk,
+                Some(code) => CommandPhase::FinishedErr(Some(*code)),
+            },
+            // Non-133 events don't advance the phase.
+            OscEvent::WorkingDirectory(_) => return,
+        };
+    }
+}
+
 /// Notification emitted when an agent's status changes
 #[derive(Clone, Debug)]
 pub struct AgentNotification {
@@ -91,6 +158,9 @@ pub struct PaneInfo {
     pub agent_kind: Option<String>,
     pub agent_status: Option<String>,
     pub tab_kind: String, // "terminal", "browser", "preview"
+    /// Claude Code session data from JSONL monitoring (tool, tokens, sub-agents, progress)
+    #[serde(skip)]
+    pub agent_session: Option<crate::agent_monitor::AgentSessionState>,
 }
 
 /// The kind of content a tab holds.
@@ -134,6 +204,30 @@ pub struct PaneTab {
     pub exited: bool,
     /// Working directory at spawn time (used for session restore)
     pub cwd: Option<String>,
+    /// Live working directory, refreshed from the OS when the shell
+    /// sets a new window title (OSC 0/2). Most shell configs set the
+    /// title at every prompt, so this stays fresh after `cd`. Avoids
+    /// a per-lookup syscall; readers can just check this field.
+    pub cached_cwd: Option<String>,
+    /// Cwd reported directly by the shell via OSC 7
+    /// (`ESC ] 7 ; file://host/path ST`). Takes precedence over
+    /// `cached_cwd` and every syscall-based fallback when present —
+    /// it's the only source that tells us the shell's intended cwd
+    /// without prompt-parsing or process-table lookups. Updated by
+    /// `poll_activity` from the OSC interceptor event stream.
+    ///
+    /// Stays `None` on Windows and on any shell that doesn't emit
+    /// OSC 7 (plain bash without `PROMPT_COMMAND`, older zsh setups,
+    /// fish in some configs). In those cases the existing fallback
+    /// chain (title-triggered syscall → live syscall → saved spawn
+    /// cwd) keeps working unchanged.
+    pub shell_reported_cwd: Option<String>,
+    /// Shell integration lifecycle state, driven by OSC 133 events.
+    /// `Unknown` until the shell emits its first 133 sequence —
+    /// until then, agent status detection runs on the existing
+    /// regex path. Once any 133 fires, this tab opts into the
+    /// event-driven agent status path (see `detect_agent_status`).
+    pub shell_integration_phase: CommandPhase,
     /// Shell program and args used to spawn this terminal (for inheriting on split/new tab)
     pub shell_cmd: Option<(String, Vec<String>)>,
     /// Detected AI agent type (None if this is a plain terminal)
@@ -163,6 +257,9 @@ impl TerminalPane {
                 has_activity: false,
                 exited: false,
                 cwd: None,
+                cached_cwd: None,
+                shell_reported_cwd: None,
+                shell_integration_phase: CommandPhase::Unknown,
                 shell_cmd: None,
                 agent_kind: None,
                 agent_status: None,
@@ -183,9 +280,19 @@ impl TerminalPane {
     }
 
     /// Get the active tab's current working directory.
-    /// Prefers live /proc/PID/cwd if available, falls back to saved spawn-time cwd.
+    /// Priority: OSC 7 (authoritative shell report) → cached live
+    /// cwd (refreshed on title change) → live syscall → saved
+    /// spawn-time cwd. OSC 7 wins when present because it's the
+    /// only source free of timing / prompt-parsing / WSL-process-
+    /// table caveats.
     pub fn active_tab_live_cwd(&self) -> Option<String> {
         let tab = self.tabs.get(self.active_tab)?;
+        if let Some(ref reported) = tab.shell_reported_cwd {
+            return Some(reported.clone());
+        }
+        if let Some(ref cached) = tab.cached_cwd {
+            return Some(cached.clone());
+        }
         if let Some(ref term) = tab.terminal {
             if let Some(live_cwd) = term.current_cwd() {
                 return Some(live_cwd);
@@ -246,6 +353,9 @@ impl TerminalPane {
             has_activity: false,
             exited: false,
             cwd: None,
+            cached_cwd: None,
+            shell_reported_cwd: None,
+            shell_integration_phase: CommandPhase::Unknown,
             shell_cmd: None,
             agent_kind: None,
             agent_status: None,
@@ -514,6 +624,11 @@ pub struct TerminalManager {
     scrollback_lines: usize,
     /// Workspace name for env var injection into spawned terminals
     workspace_name: Option<String>,
+    /// Claude Code JSONL session monitor for rich agent status
+    agent_monitor: crate::agent_monitor::AgentSessionMonitor,
+    /// Navigation history for focus back/forward across panes and tabs.
+    nav_back: Vec<(PaneId, usize)>,
+    nav_forward: Vec<(PaneId, usize)>,
 }
 
 impl TerminalManager {
@@ -534,6 +649,9 @@ impl TerminalManager {
             next_pane_num: 2,
             scrollback_lines,
             workspace_name: None,
+            agent_monitor: crate::agent_monitor::AgentSessionMonitor::new(),
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
         }
     }
 
@@ -567,6 +685,9 @@ impl TerminalManager {
             next_pane_num: max_num + 1,
             scrollback_lines: 10000,
             workspace_name: None,
+            agent_monitor: crate::agent_monitor::AgentSessionMonitor::new(),
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
         }
     }
 
@@ -661,8 +782,56 @@ impl TerminalManager {
 
     pub fn set_active_pane(&mut self, pane_id: &PaneId) {
         if self.panes.contains_key(pane_id) {
-            self.active_pane = pane_id.clone();
+            let old = std::mem::replace(&mut self.active_pane, pane_id.clone());
+            if old != *pane_id {
+                let old_tab = self.panes.get(&old).map(|p| p.active_tab).unwrap_or(0);
+                self.nav_back.push((old, old_tab));
+                self.nav_forward.clear();
+                // Cap history to prevent unbounded growth
+                if self.nav_back.len() > 50 {
+                    self.nav_back.remove(0);
+                }
+            }
         }
+    }
+
+    /// Navigate back to the previous pane/tab in history.
+    /// Returns true if navigation occurred.
+    pub fn nav_back(&mut self) -> bool {
+        while let Some((pane_id, tab_idx)) = self.nav_back.pop() {
+            if self.panes.contains_key(&pane_id) {
+                let current = std::mem::replace(&mut self.active_pane, pane_id.clone());
+                let current_tab = self.panes.get(&current).map(|p| p.active_tab).unwrap_or(0);
+                self.nav_forward.push((current, current_tab));
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    if tab_idx < pane.tabs.len() {
+                        pane.active_tab = tab_idx;
+                    }
+                }
+                return true;
+            }
+            // Stale entry (pane closed) — skip
+        }
+        false
+    }
+
+    /// Navigate forward after a back navigation.
+    /// Returns true if navigation occurred.
+    pub fn nav_forward(&mut self) -> bool {
+        while let Some((pane_id, tab_idx)) = self.nav_forward.pop() {
+            if self.panes.contains_key(&pane_id) {
+                let current = std::mem::replace(&mut self.active_pane, pane_id.clone());
+                let current_tab = self.panes.get(&current).map(|p| p.active_tab).unwrap_or(0);
+                self.nav_back.push((current, current_tab));
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    if tab_idx < pane.tabs.len() {
+                        pane.active_tab = tab_idx;
+                    }
+                }
+                return true;
+            }
+        }
+        false
     }
 
     /// Send text to a specific pane's active terminal with bracketed paste support.
@@ -761,21 +930,35 @@ impl TerminalManager {
 
     // === Spawn ===
 
-    /// Create an AlacrittyTerminal with CWD fallback: tries cwd first, then None on failure.
-    /// Returns (terminal, actual_cwd_used) so callers can record what worked.
+    /// Create an AlacrittyTerminal with a three-step CWD fallback: requested cwd,
+    /// then the user's real home directory, then the OS default. Returns
+    /// `(terminal, actual_cwd_used)` so callers can record what worked.
+    ///
+    /// The `$HOME` middle step matters on Windows, where "no cwd" resolves to
+    /// `C:\Windows\System32` and most shells refuse to be useful there. It also
+    /// gives macOS/Linux a predictable landing spot when the workspace's
+    /// target path is gone (deleted folder, unmounted volume, stale layout).
     fn create_terminal_with_fallback(
         shell: &str, args: &[String], cwd: Option<&str>, scrollback: usize,
         extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<(AlacrittyTerminal, Option<String>), String> {
-        match AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, cwd, scrollback, extra_env) {
-            Ok(t) => Ok((t, cwd.map(|s| s.to_string()))),
-            Err(e) if cwd.is_some() => {
-                eprintln!("[amux] spawn failed with cwd {:?}: {}, retrying with default", cwd, e);
-                let t = AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, None, scrollback, extra_env)?;
-                Ok((t, None))
+        if let Some(c) = cwd {
+            match AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, Some(c), scrollback, extra_env) {
+                Ok(t) => return Ok((t, Some(c.to_string()))),
+                Err(e) => eprintln!("[amux] spawn failed with cwd {:?}: {}, trying $HOME", c, e),
             }
-            Err(e) => Err(e),
         }
+        let home = crate::dirs::real_user_home()
+            .map(|p| p.to_string_lossy().to_string())
+            .filter(|h| cwd != Some(h.as_str()));
+        if let Some(ref h) = home {
+            match AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, Some(h), scrollback, extra_env) {
+                Ok(t) => return Ok((t, Some(h.clone()))),
+                Err(e) => eprintln!("[amux] spawn failed with $HOME {:?}: {}, falling back to OS default", h, e),
+            }
+        }
+        let t = AlacrittyTerminal::with_scrollback(120, 40, 8, 20, shell, args, None, scrollback, extra_env)?;
+        Ok((t, None))
     }
 
     /// Spawn a terminal in the active pane's active tab using AlacrittyTerminal
@@ -1164,6 +1347,33 @@ impl TerminalManager {
                         }
                     }
 
+                    // Drain OSC events pushed by the PTY reader's
+                    // interceptor since the last poll. OSC 7 updates
+                    // `shell_reported_cwd` (which `active_tab_live_cwd`
+                    // now checks first). OSC 133 events advance
+                    // `shell_integration_phase`, which feeds into
+                    // `detect_agent_status` below.
+                    for event in term.take_osc_events() {
+                        use crate::terminal::osc_intercept::OscEvent;
+                        if let OscEvent::WorkingDirectory(path) = &event {
+                            tab.shell_reported_cwd = Some(path.clone());
+                        }
+                        tab.shell_integration_phase.apply(&event);
+                    }
+
+                    // When the shell sets a new title (most configs do
+                    // this at every prompt), refresh the cached CWD
+                    // from the OS so downstream lookups (Ctrl+P, split,
+                    // vibe tool launch) get a fresh value without an
+                    // extra syscall. This is the title-based fallback
+                    // for shells that don't emit OSC 7; it stays live
+                    // so cwd detection keeps working on non-integrated
+                    // setups. `shell_reported_cwd` above takes
+                    // precedence when set.
+                    if term.take_title_changed() {
+                        tab.cached_cwd = term.current_cwd();
+                    }
+
                     // Auto-detect agent kind from terminal title on first output
                     if tab.agent_kind.is_none() {
                         if let Some(title) = term.title() {
@@ -1171,7 +1381,9 @@ impl TerminalManager {
                         }
                     }
 
-                    // Detect agent status from recent terminal output
+                    // Detect agent status from OSC 133 phase first,
+                    // falling back to recent-output regex for tabs
+                    // whose shell hasn't opted into shell integration.
                     if tab.agent_kind.is_some() {
                         let old_status = tab.agent_status.clone();
                         let lines = term.last_lines(5);
@@ -1179,6 +1391,7 @@ impl TerminalManager {
                             tab.agent_kind.as_ref().unwrap(),
                             &lines,
                             tab.exited,
+                            &tab.shell_integration_phase,
                         );
                         // Notify on status change (thinking→done or thinking→waiting)
                         if !is_active_tab && old_status != tab.agent_status {
@@ -1196,11 +1409,45 @@ impl TerminalManager {
                                 });
                             }
                         }
+
+                        // JSONL session monitoring for Claude Code: reads
+                        // transcript files to track tool usage, sub-agents,
+                        // token consumption, and TodoWrite progress.
+                        if matches!(tab.agent_kind, Some(AgentKind::Claude)) {
+                            let monitor_cwd = tab.shell_reported_cwd.clone()
+                                .or_else(|| tab.cached_cwd.clone())
+                                .or_else(|| tab.cwd.clone());
+                            if let Some(ref cwd_path) = monitor_cwd {
+                                self.agent_monitor.update(
+                                    &pane_id.0,
+                                    std::path::Path::new(cwd_path),
+                                );
+                            }
+                        }
                     }
                 }
             }
         }
         notifications
+    }
+
+    /// Access the JSONL agent session monitor for rich Claude Code status.
+    pub fn agent_monitor(&self) -> &crate::agent_monitor::AgentSessionMonitor {
+        &self.agent_monitor
+    }
+
+    /// Build an AI usage summary from all Claude Code sessions.
+    pub fn ai_usage_summary(&self) -> crate::ai_usage::AiUsageSummary {
+        let sessions: Vec<(String, &crate::agent_monitor::AgentSessionState)> = self
+            .panes
+            .iter()
+            .filter_map(|(id, _)| {
+                self.agent_monitor.state(&id.0).map(|s| (id.0.clone(), s))
+            })
+            .collect();
+        crate::ai_usage::AiUsageSummary::from_sessions(
+            &sessions.iter().map(|(a, b)| (a.clone(), *b)).collect::<Vec<_>>(),
+        )
     }
 
     /// Collect summary of all detected agents across all panes/tabs.
@@ -1222,62 +1469,160 @@ impl TerminalManager {
         out
     }
 
-    /// Detect AI agent kind from terminal title
+    /// Detect AI agent kind from terminal title.
+    ///
+    /// Uses word-boundary matching with a length heuristic. Claude Code
+    /// sets the terminal title to plain "claude"; shells typically
+    /// include path context making the title longer. A title like
+    /// "~/claude-demo" is 14+ chars — the agent keyword occupies
+    /// less than half the title and is rejected.
     fn detect_agent_kind(title: &str) -> Option<AgentKind> {
-        let title_lower = title.to_lowercase();
-        if title_lower.contains("claude") { return Some(AgentKind::Claude); }
-        if title_lower.contains("aider") { return Some(AgentKind::Aider); }
-        if title_lower.contains("opencode") { return Some(AgentKind::OpenCode); }
-        if title_lower.contains("codex") { return Some(AgentKind::Codex); }
-        if title_lower.contains("gemini") { return Some(AgentKind::Gemini); }
-        if title_lower.contains("copilot") { return Some(AgentKind::Copilot); }
+        let tl = title.to_lowercase();
+        // Exact phrase matches (agent's own title formatting).
+        if tl.contains("claude code") { return Some(AgentKind::Claude); }
+        if tl.contains("github copilot") { return Some(AgentKind::Copilot); }
+        if tl.contains("gemini cli") { return Some(AgentKind::Gemini); }
+
+        // Single-word matches: only match when the title is short
+        // enough that the agent keyword dominates. Real shell titles
+        // that happen to include an agent name as a substring (like
+        // "~/claude-demo — bash" at 20+ chars) are rejected.
+        let words: Vec<&str> = title.split(|c: char| !c.is_alphanumeric()).collect();
+        let has_claude = words.iter().any(|w| w.eq_ignore_ascii_case("claude"));
+        let has_aider = words.iter().any(|w| w.eq_ignore_ascii_case("aider"));
+        let has_opencode = words.iter().any(|w| w.eq_ignore_ascii_case("opencode"));
+        let has_codex = words.iter().any(|w| w.eq_ignore_ascii_case("codex"));
+        let has_gemini = words.iter().any(|w| w.eq_ignore_ascii_case("gemini"));
+        let has_copilot = words.iter().any(|w| w.eq_ignore_ascii_case("copilot"));
+
+        // Only one agent keyword should be present for a reliable match.
+        let keyword_count = has_claude as u8 + has_aider as u8 + has_opencode as u8
+            + has_codex as u8 + has_gemini as u8 + has_copilot as u8;
+        if keyword_count != 1 {
+            return None;
+        }
+
+        // Length heuristic: the agent keyword must occupy >= 30% of the
+        // title. "claude" is 6 chars → title must be ≤ 20 chars.
+        // "aider" is 5 chars → title must be ≤ 16 chars.
+        // "claude-project" (14 chars) still passes (6/14 ≈ 43%).
+        // But "~/projects/claude-experiment — bash" (35 chars) fails
+        // (6/35 ≈ 17%).
+        let agent_len = if has_claude { 6 } else if has_aider { 5 }
+            else if has_opencode { 8 } else if has_codex { 5 }
+            else if has_gemini { 6 } else { 7 }; // copilot
+        if (agent_len as f64) / (title.len().max(1) as f64) < 0.30 {
+            return None;
+        }
+
+        if has_claude { return Some(AgentKind::Claude); }
+        if has_aider { return Some(AgentKind::Aider); }
+        if has_opencode { return Some(AgentKind::OpenCode); }
+        if has_codex { return Some(AgentKind::Codex); }
+        if has_gemini { return Some(AgentKind::Gemini); }
+        if has_copilot { return Some(AgentKind::Copilot); }
         None
     }
 
-    /// Detect agent status from the last few lines of terminal output.
-    fn detect_agent_status(kind: &AgentKind, lines: &[String], exited: bool) -> Option<AgentStatus> {
+    /// Detect agent status.
+    ///
+    /// Priority:
+    /// 1. Child process exited → `Done` (terminal is about to close,
+    ///    nothing the shell can say overrides this).
+    /// 2. OSC 133 phase (if the shell opted into shell integration):
+    ///    - `PromptReady` → `Waiting` (shell idle, awaiting input)
+    ///    - `FinishedOk` → `Done` (command just completed successfully)
+    ///    - `FinishedErr` → `Error` (command returned nonzero)
+    ///    - `Executing` → defer to regex (interactive REPL like claude
+    ///      hides inside a long-running command; regex can still tell
+    ///      us Thinking vs Waiting based on agent-specific UI markers;
+    ///      default to `Thinking` when regex is inconclusive)
+    /// 3. `Unknown` phase (shell never emitted 133) → regex scan of
+    ///    the last 5 lines (original behavior, preserves backward
+    ///    compat for bash / fish / older zsh).
+    fn detect_agent_status(
+        kind: &AgentKind,
+        lines: &[String],
+        exited: bool,
+        phase: &CommandPhase,
+    ) -> Option<AgentStatus> {
         if exited {
             return Some(AgentStatus::Done);
+        }
+        // OSC 133-driven states win when available.
+        match phase {
+            CommandPhase::PromptReady => return Some(AgentStatus::Waiting),
+            CommandPhase::FinishedOk => return Some(AgentStatus::Done),
+            CommandPhase::FinishedErr(_) => return Some(AgentStatus::Error),
+            CommandPhase::Executing => {
+                // Fall through to regex — but if regex can't
+                // decide, default to Thinking since a command IS
+                // running per the shell.
+                let regex_result = Self::detect_agent_status_regex(kind, lines);
+                return Some(regex_result.unwrap_or(AgentStatus::Thinking));
+            }
+            CommandPhase::Unknown => {
+                // Pure regex path — unchanged behavior for shells
+                // without integration.
+            }
         }
         if lines.is_empty() {
             return None;
         }
+        Self::detect_agent_status_regex(kind, lines)
+    }
 
-        // Check lines from bottom up for the most recent signal
+    /// Regex-scan the last few lines of terminal output for agent
+    /// status markers. Extracted out of `detect_agent_status` so both
+    /// the Unknown-phase fallback and the Executing-phase refinement
+    /// can share the same logic.
+    fn detect_agent_status_regex(kind: &AgentKind, lines: &[String]) -> Option<AgentStatus> {
+        if lines.is_empty() {
+            return None;
+        }
+
+        // Walk lines bottom-up for the most recent signal.
+        // Match only agent-specific markers — NOT generic words like
+        // "Error" or "failed" that appear in normal compiler/log output.
         for line in lines.iter().rev() {
             let trimmed = line.trim();
             if trimmed.is_empty() { continue; }
 
-            // Common error patterns (check first — errors override other states)
-            if trimmed.contains("Error") || trimmed.contains("error:")
-                || trimmed.contains("ERROR") || trimmed.contains("failed")
-                || trimmed.contains("Permission denied") || trimmed.contains("panic")
-            {
-                return Some(AgentStatus::Error);
-            }
-
             match kind {
                 AgentKind::Claude => {
-                    // Claude Code: ">" prompt = waiting, spinner/progress = thinking
-                    if trimmed.ends_with('>')
-                        || trimmed.ends_with('>') && trimmed.contains('$')
+                    // Claude Code prompt patterns (waiting for input):
+                    //   "⏣ > "  — the standard prompt
+                    //   "> "     — minimal prompt, only at start of line
+                    if trimmed.ends_with("\u{23e3} > ")
                         || trimmed == ">"
+                        || trimmed.starts_with("> ")
                     {
                         return Some(AgentStatus::Waiting);
                     }
-                    if trimmed.contains("Thinking") || trimmed.contains("⠋")
-                        || trimmed.contains("⠙") || trimmed.contains("⠹")
-                        || trimmed.contains("⠸") || trimmed.contains("⠼")
-                        || trimmed.contains("⠴") || trimmed.contains("⠦")
-                        || trimmed.contains("⠧") || trimmed.contains("⠇")
-                        || trimmed.contains("⠏")
+                    // Claude Code thinking markers:
+                    // Braille spinners used by claude's progress bar
+                    if trimmed.contains("\u{280b}") // ⠋
+                        || trimmed.contains("\u{2819}") // ⠙
+                        || trimmed.contains("\u{2818}") // ⠸
+                        || trimmed.contains("\u{280c}") // ⠼
+                        || trimmed.contains("\u{281c}") // ⠴
+                        || trimmed.contains("\u{280e}") // ⠦
+                        || trimmed.contains("\u{2807}") // ⠇
+                        || trimmed.contains("\u{280f}") // ⠏
+                        || trimmed.contains("Thinking")
                     {
                         return Some(AgentStatus::Thinking);
                     }
+                    // Claude error: only match explicit claude error lines
+                    if trimmed.contains("Claude Code error")
+                        || trimmed.contains("API Error")
+                        || trimmed.contains("Rate limit")
+                    {
+                        return Some(AgentStatus::Error);
+                    }
                 }
                 AgentKind::Aider => {
-                    // Aider: "aider>" or ">" = waiting, "Thinking..." = thinking
-                    if trimmed.ends_with('>') || trimmed.starts_with("aider>") {
+                    if trimmed.starts_with("aider>") || trimmed.ends_with("> aider") {
                         return Some(AgentStatus::Waiting);
                     }
                     if trimmed.contains("Thinking") || trimmed.contains("sending") {
@@ -1285,7 +1630,7 @@ impl TerminalManager {
                     }
                 }
                 AgentKind::OpenCode => {
-                    if trimmed.ends_with('>') || trimmed.contains("opencode>") {
+                    if trimmed.starts_with("opencode>") || trimmed.contains("opencode >") {
                         return Some(AgentStatus::Waiting);
                     }
                     if trimmed.contains("Thinking") || trimmed.contains("Processing") {
@@ -1293,15 +1638,18 @@ impl TerminalManager {
                     }
                 }
                 AgentKind::Codex => {
-                    if trimmed.ends_with('>') {
+                    if trimmed.starts_with("codex>") || trimmed.contains("codex >") {
                         return Some(AgentStatus::Waiting);
                     }
                     if trimmed.contains("Thinking") || trimmed.contains("Running") {
                         return Some(AgentStatus::Thinking);
                     }
+                    if trimmed.contains("codex error") || trimmed.contains("Codex error") {
+                        return Some(AgentStatus::Error);
+                    }
                 }
                 AgentKind::Gemini | AgentKind::Copilot => {
-                    if trimmed.ends_with('>') || trimmed.ends_with("$ ") {
+                    if trimmed.ends_with("$ ") || trimmed.ends_with("> ") {
                         return Some(AgentStatus::Waiting);
                     }
                     if trimmed.contains("Thinking") || trimmed.contains("Generating") {
@@ -1310,8 +1658,11 @@ impl TerminalManager {
                 }
             }
         }
-        // If agent is detected but no status signal found, assume thinking (output in progress)
-        Some(AgentStatus::Thinking)
+        // No agent-specific signal found — return None so the caller
+        // can fall back to the phase-based path (Executing → Thinking,
+        // others → None). This avoids falsely reporting Thinking on
+        // terminals that happen to match a title keyword.
+        None
     }
 
     /// Clear activity flag for the active pane's active tab.
@@ -1423,6 +1774,9 @@ impl TerminalManager {
                         has_activity: false,
                         exited: false,
                         cwd: st.cwd.clone(),
+                        cached_cwd: None,
+                shell_reported_cwd: None,
+                shell_integration_phase: CommandPhase::Unknown,
                         shell_cmd: st.shell_cmd.clone(),
                         agent_kind: None,
                         agent_status: None,
@@ -1455,6 +1809,9 @@ impl TerminalManager {
             next_pane_num: state.next_pane_num,
             scrollback_lines: 10000, // overridden by caller with config value
             workspace_name: None,
+            agent_monitor: crate::agent_monitor::AgentSessionMonitor::new(),
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
         })
     }
 
@@ -1480,12 +1837,14 @@ impl TerminalManager {
                 TabKind::Browser { .. } => "browser",
                 TabKind::Preview { .. } => "preview",
             }).unwrap_or("terminal").to_string();
+            let agent_session = self.agent_monitor.state(&id.0).cloned();
             PaneInfo {
                 pane_id: id.clone(),
                 tab_title,
                 agent_kind,
                 agent_status,
                 tab_kind,
+                agent_session,
             }
         }).collect()
     }
@@ -1527,6 +1886,247 @@ mod tests {
         let ids = layout.pane_ids();
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], pane_id(1));
+    }
+
+    /// Builder for a TerminalPane with just enough state to exercise
+    /// the `active_tab_live_cwd` priority chain. Tests below set the
+    /// individual cwd sources directly instead of spawning a real PTY.
+    fn pane_with_tab_cwds(
+        shell_reported_cwd: Option<&str>,
+        cached_cwd: Option<&str>,
+        saved_cwd: Option<&str>,
+    ) -> TerminalPane {
+        let mut pane = TerminalPane::new(pane_id(1));
+        let tab = pane.tabs.get_mut(0).expect("default tab must exist");
+        tab.shell_reported_cwd = shell_reported_cwd.map(|s| s.to_string());
+        tab.cached_cwd = cached_cwd.map(|s| s.to_string());
+        tab.cwd = saved_cwd.map(|s| s.to_string());
+        pane
+    }
+
+    #[test]
+    fn osc7_cwd_takes_precedence_over_cached() {
+        // Shell-reported cwd wins over title-change cache.
+        let pane = pane_with_tab_cwds(Some("/from/osc7"), Some("/from/cache"), Some("/from/spawn"));
+        assert_eq!(
+            pane.active_tab_live_cwd().as_deref(),
+            Some("/from/osc7"),
+            "OSC 7 report must win when present"
+        );
+    }
+
+    #[test]
+    fn cached_cwd_used_when_no_osc7() {
+        // Shell never emitted OSC 7 — fall back to title-triggered
+        // cached cwd (the current state of the world on bash-plain).
+        let pane = pane_with_tab_cwds(None, Some("/from/cache"), Some("/from/spawn"));
+        assert_eq!(pane.active_tab_live_cwd().as_deref(), Some("/from/cache"));
+    }
+
+    #[test]
+    fn saved_cwd_is_last_resort() {
+        // Neither OSC 7 nor title ever fired — saved spawn-time cwd
+        // is all we have. (No terminal attached so syscall branch
+        // is inert.)
+        let pane = pane_with_tab_cwds(None, None, Some("/from/spawn"));
+        assert_eq!(pane.active_tab_live_cwd().as_deref(), Some("/from/spawn"));
+    }
+
+    #[test]
+    fn no_cwd_sources_yields_none() {
+        let pane = pane_with_tab_cwds(None, None, None);
+        assert!(pane.active_tab_live_cwd().is_none());
+    }
+
+    // ─── OSC 133 → CommandPhase state machine ──────────────────
+
+    #[test]
+    fn command_phase_applies_prompt_start() {
+        use crate::terminal::osc_intercept::OscEvent;
+        let mut phase = CommandPhase::Unknown;
+        phase.apply(&OscEvent::PromptStart);
+        assert_eq!(phase, CommandPhase::PromptReady);
+    }
+
+    #[test]
+    fn command_phase_applies_command_start_and_executing() {
+        use crate::terminal::osc_intercept::OscEvent;
+        let mut phase = CommandPhase::PromptReady;
+        phase.apply(&OscEvent::CommandStart);
+        assert_eq!(phase, CommandPhase::Executing);
+        let mut phase = CommandPhase::PromptReady;
+        phase.apply(&OscEvent::CommandExecuting);
+        assert_eq!(phase, CommandPhase::Executing);
+    }
+
+    #[test]
+    fn command_phase_applies_finished_with_zero_exit() {
+        use crate::terminal::osc_intercept::OscEvent;
+        let mut phase = CommandPhase::Executing;
+        phase.apply(&OscEvent::CommandFinished(Some(0)));
+        assert_eq!(phase, CommandPhase::FinishedOk);
+    }
+
+    #[test]
+    fn command_phase_applies_finished_with_no_exit_treats_as_ok() {
+        // Some shells omit exit code for `D`. Spec § risk register
+        // says "D alone = CommandFinished(None) = success".
+        use crate::terminal::osc_intercept::OscEvent;
+        let mut phase = CommandPhase::Executing;
+        phase.apply(&OscEvent::CommandFinished(None));
+        assert_eq!(phase, CommandPhase::FinishedOk);
+    }
+
+    #[test]
+    fn command_phase_applies_finished_with_nonzero_exit() {
+        use crate::terminal::osc_intercept::OscEvent;
+        let mut phase = CommandPhase::Executing;
+        phase.apply(&OscEvent::CommandFinished(Some(127)));
+        assert_eq!(phase, CommandPhase::FinishedErr(Some(127)));
+    }
+
+    #[test]
+    fn command_phase_ignores_osc7() {
+        // OSC 7 advances cwd, not phase. Mixing them in one drain
+        // cycle must leave the phase untouched.
+        use crate::terminal::osc_intercept::OscEvent;
+        let mut phase = CommandPhase::Executing;
+        phase.apply(&OscEvent::WorkingDirectory("/tmp".into()));
+        assert_eq!(phase, CommandPhase::Executing);
+    }
+
+    #[test]
+    fn command_phase_round_trip_prompt_cycle() {
+        // Realistic sequence: shell executes a command then returns
+        // to prompt. A → C → D;0 → A again.
+        use crate::terminal::osc_intercept::OscEvent;
+        let mut phase = CommandPhase::Unknown;
+        phase.apply(&OscEvent::PromptStart);
+        assert_eq!(phase, CommandPhase::PromptReady);
+        phase.apply(&OscEvent::CommandExecuting);
+        assert_eq!(phase, CommandPhase::Executing);
+        phase.apply(&OscEvent::CommandFinished(Some(0)));
+        assert_eq!(phase, CommandPhase::FinishedOk);
+        phase.apply(&OscEvent::PromptStart);
+        assert_eq!(phase, CommandPhase::PromptReady);
+    }
+
+    // ─── detect_agent_status phase priority ────────────────────
+
+    #[test]
+    fn detect_status_prompt_phase_maps_to_waiting() {
+        let got = TerminalManager::detect_agent_status(
+            &AgentKind::Claude,
+            &[],
+            false,
+            &CommandPhase::PromptReady,
+        );
+        assert_eq!(got, Some(AgentStatus::Waiting));
+    }
+
+    #[test]
+    fn detect_status_finished_ok_phase_maps_to_done() {
+        let got = TerminalManager::detect_agent_status(
+            &AgentKind::Claude,
+            &[],
+            false,
+            &CommandPhase::FinishedOk,
+        );
+        assert_eq!(got, Some(AgentStatus::Done));
+    }
+
+    #[test]
+    fn detect_status_finished_err_phase_maps_to_error() {
+        let got = TerminalManager::detect_agent_status(
+            &AgentKind::Claude,
+            &[],
+            false,
+            &CommandPhase::FinishedErr(Some(1)),
+        );
+        assert_eq!(got, Some(AgentStatus::Error));
+    }
+
+    #[test]
+    fn detect_status_executing_defers_to_regex_with_thinking_default() {
+        // Claude's spinner shows dots. With `Executing` phase AND
+        // matching regex, Thinking wins.
+        let got = TerminalManager::detect_agent_status(
+            &AgentKind::Claude,
+            &["⠋ Thinking...".to_string()],
+            false,
+            &CommandPhase::Executing,
+        );
+        assert_eq!(got, Some(AgentStatus::Thinking));
+    }
+
+    #[test]
+    fn detect_status_executing_with_inconclusive_regex_defaults_to_thinking() {
+        // Shell is running a command (Executing) but the regex
+        // can't classify the most recent line. Default to Thinking —
+        // SOMETHING is running per the shell.
+        let got = TerminalManager::detect_agent_status(
+            &AgentKind::Claude,
+            &["miscellaneous output".to_string()],
+            false,
+            &CommandPhase::Executing,
+        );
+        assert_eq!(got, Some(AgentStatus::Thinking));
+    }
+
+    #[test]
+    fn detect_status_unknown_phase_uses_regex_fallback() {
+        // Shell never emitted OSC 133 (e.g. plain bash). Original
+        // regex-based detection must keep working byte-identically.
+        let got = TerminalManager::detect_agent_status(
+            &AgentKind::Claude,
+            &["> ".to_string()],
+            false,
+            &CommandPhase::Unknown,
+        );
+        assert_eq!(got, Some(AgentStatus::Waiting));
+    }
+
+    #[test]
+    fn detect_status_exited_overrides_phase() {
+        // Child process gone — status is Done no matter what the
+        // phase said. Avoids showing an "Executing" spinner on a
+        // dead tab.
+        let got = TerminalManager::detect_agent_status(
+            &AgentKind::Claude,
+            &[],
+            true,
+            &CommandPhase::Executing,
+        );
+        assert_eq!(got, Some(AgentStatus::Done));
+    }
+
+    #[test]
+    fn osc7_does_not_affect_other_tabs() {
+        // Per-tab scoping: setting shell_reported_cwd on tab 0
+        // must not leak to tab 1 — each tab's cwd is independent
+        // (different panes may have different shells open in
+        // different dirs).
+        let mut pane = pane_with_tab_cwds(Some("/tab0"), None, None);
+        pane.tabs.push(PaneTab {
+            title: "t1".into(),
+            custom_title: false,
+            kind: TabKind::Terminal,
+            terminal: None,
+            has_activity: false,
+            exited: false,
+            cwd: Some("/tab1-spawn".into()),
+            cached_cwd: None,
+            shell_reported_cwd: None,
+            shell_integration_phase: CommandPhase::Unknown,
+            shell_cmd: None,
+            agent_kind: None,
+            agent_status: None,
+            last_cursor_line: 0,
+        });
+        pane.active_tab = 1;
+        assert_eq!(pane.active_tab_live_cwd().as_deref(), Some("/tab1-spawn"));
+        pane.active_tab = 0;
+        assert_eq!(pane.active_tab_live_cwd().as_deref(), Some("/tab0"));
     }
 
     #[test]

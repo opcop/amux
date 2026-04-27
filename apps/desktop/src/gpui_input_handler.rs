@@ -95,6 +95,85 @@ impl gpui::EntityInputHandler for GpuiShellView {
             return;
         }
 
+        // Preview-tab keyboard shortcuts. When the focused pane's
+        // active tab is a Preview, plain characters intercept as
+        // shortcuts instead of leaking through to the terminal PTY
+        // that's hiding behind the preview. Without this guard,
+        // typing "Y" to copy the doc would also send "Y" to the
+        // background shell.
+        if self.active_preview_path().is_some() {
+            // TOC overlay input mode: every character appends to the
+            // filter query. Arrow keys / Enter / Escape / Backspace
+            // are handled in `on_global_key_down` above.
+            if self.preview_toc.is_some() {
+                self.preview_toc_input(text, cx);
+                return;
+            }
+            // Preview search input mode takes priority: while the
+            // user is typing into the `/` search bar, every
+            // character appends to the query instead of running a
+            // shortcut. Exit via Enter (commit) or Escape (close),
+            // both handled in `on_global_key_down`.
+            if let Some(state) = self.preview_search.as_ref()
+                && state.input_active
+            {
+                self.preview_search_input(text, cx);
+                return;
+            }
+            match text {
+                "/" => {
+                    self.preview_search_open(cx);
+                    return;
+                }
+                "o" | ":" => {
+                    // Both keys open the same TOC overlay. mdterm
+                    // splits them into plain-TOC and fuzzy-heading
+                    // with separate UIs; we collapse to one overlay
+                    // that always accepts typing. Colon is easier to
+                    // reach on non-US layouts via shift+semicolon —
+                    // keeping both bindings mirrors muscle memory
+                    // from mdterm.
+                    self.preview_toc_open(cx);
+                    return;
+                }
+                "[" => {
+                    self.preview_jump_heading_prev(cx);
+                    return;
+                }
+                "]" => {
+                    self.preview_jump_heading_next(cx);
+                    return;
+                }
+                "n" => {
+                    if self.preview_search.is_some() {
+                        self.preview_search_next(cx);
+                        return;
+                    }
+                }
+                "N" => {
+                    if self.preview_search.is_some() {
+                        self.preview_search_prev(cx);
+                        return;
+                    }
+                }
+                "Y" => {
+                    self.preview_copy_full_document(cx);
+                    cx.notify();
+                    return;
+                }
+                "c" => {
+                    self.preview_copy_first_code_block(cx);
+                    cx.notify();
+                    return;
+                }
+                _ => {}
+            }
+            // Any other text input while preview is active: swallow so
+            // typing doesn't dribble into the hidden terminal behind
+            // the preview.
+            return;
+        }
+
         // Send to terminal PTY and ensure we're viewing the latest output
         if let Some(term) = self.terminal_manager_mut().active_terminal() {
             term.scroll_to_bottom();
@@ -298,6 +377,97 @@ impl GpuiShellView {
             }
         }
 
+        // Preview TOC overlay — highest priority among preview-
+        // scoped modals because the overlay paints on top of
+        // everything inside the preview panel. Handled before
+        // preview_search so keys routed at the TOC hit it first.
+        if self.preview_toc.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.preview_toc_close(cx);
+                    return;
+                }
+                "enter" => {
+                    self.preview_toc_commit(cx);
+                    return;
+                }
+                "up" | "arrowup" => {
+                    self.preview_toc_prev(cx);
+                    return;
+                }
+                "down" | "arrowdown" => {
+                    self.preview_toc_next(cx);
+                    return;
+                }
+                "backspace" => {
+                    self.preview_toc_backspace(cx);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Preview text-selection escape: when the active tab is a
+        // preview, no other modal is open, and a selection exists,
+        // Escape clears it. Mirrors the Finder/editor convention
+        // where ESC dismisses a selection without taking other
+        // action. Placed after the TOC guard (which handles its own
+        // Escape) but before preview_search — selection has lower
+        // priority than the search bar because the search UI is
+        // visually the foreground element when both exist.
+        if keystr == "escape"
+            && self.preview_toc.is_none()
+            && self.preview_search.is_none()
+            && self.active_preview_path().is_some()
+            && self
+                .preview_selection
+                .as_ref()
+                .is_some_and(|s| s.has_nonempty_selection())
+        {
+            self.preview_selection_clear(cx);
+            return;
+        }
+
+        // Preview search handling — highest priority among modal
+        // states because its input bar is visually on top of the
+        // preview panel. Handled before file_picker / terminal search
+        // so Enter/Escape hit the right state machine.
+        if self.preview_search.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.preview_search_close(cx);
+                    return;
+                }
+                "enter" => {
+                    // In input mode: commit query (Enter = "search
+                    // for this"). After commit: Enter acts like `n`
+                    // to advance to the next match.
+                    let input_active = self
+                        .preview_search
+                        .as_ref()
+                        .map(|s| s.input_active)
+                        .unwrap_or(false);
+                    if input_active {
+                        self.preview_search_commit(cx);
+                    } else {
+                        self.preview_search_next(cx);
+                    }
+                    return;
+                }
+                "backspace" => {
+                    if self
+                        .preview_search
+                        .as_ref()
+                        .is_some_and(|s| s.input_active)
+                    {
+                        self.preview_search_backspace(cx);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Terminal search handling
         if self.search_state.is_some() {
             match keystr.as_str() {
@@ -365,7 +535,7 @@ impl GpuiShellView {
                 }
                 "enter" => {
                     let idx = self.file_picker.as_ref().map(|p| p.selected_index).unwrap_or(0);
-                    crate::preview_open::open_preview_from_picker(self, idx);
+                    crate::preview_open::open_preview_from_picker(self, cx, idx);
                 }
                 "up" | "arrowup" => {
                     if let Some(ref mut p) = self.file_picker {
@@ -653,6 +823,22 @@ impl GpuiShellView {
         if ctrl && !shift {
             match keystr.as_str() {
                 "ctrl+c" => {
+                    // Preview text selection takes precedence over the
+                    // terminal copy path. If the focused pane's active
+                    // tab is a Preview AND the last paint recorded any
+                    // byte ranges, copy those to the clipboard and
+                    // skip both the terminal selection path and the
+                    // SIGINT forward. Empty preview selection falls
+                    // through to the terminal's existing logic so the
+                    // user doesn't lose Ctrl+C = SIGINT when the
+                    // preview tab is focused but no text is selected.
+                    if self.active_preview_path().is_some()
+                        && !self.preview_selection_ranges.borrow().is_empty()
+                    {
+                        self.copy_preview_selection(cx);
+                        cx.notify();
+                        return;
+                    }
                     // If there's a non-empty text selection, copy it (like modern terminals).
                     // Otherwise forward to PTY as SIGINT (readline interrupt).
                     // Must check `selection_to_string()` not just `is_some()` —
@@ -689,6 +875,29 @@ impl GpuiShellView {
                     let _ = self.app.run_command("switch pane next");
                     self.refresh_model();
                     cx.notify();
+                    return;
+                }
+                // Navigation history (browser-like back/forward)
+                "ctrl+-" => {
+                    {
+                        let ws_id = self.active_workspace_id.clone();
+                        if let Some(tm) = self.workspace_terminals.get_mut(&ws_id) {
+                            if tm.nav_back() {
+                                cx.notify();
+                            }
+                        }
+                    }
+                    return;
+                }
+                "ctrl+=" => {
+                    {
+                        let ws_id = self.active_workspace_id.clone();
+                        if let Some(tm) = self.workspace_terminals.get_mut(&ws_id) {
+                            if tm.nav_forward() {
+                                cx.notify();
+                            }
+                        }
+                    }
                     return;
                 }
                 "ctrl+q" => {

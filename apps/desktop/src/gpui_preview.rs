@@ -3,9 +3,12 @@
 
 #[cfg(feature = "gpui")]
 use gpui::{
-    rgb, px, div, prelude::*, AnyElement, FontWeight, IntoElement,
+    rgb, px, div, list, prelude::*, uniform_list, AnyElement, FontWeight, IntoElement,
     ParentElement, Styled,
 };
+
+#[cfg(feature = "gpui")]
+use std::sync::Arc;
 
 #[cfg(feature = "gpui")]
 use crate::gpui_entry::GpuiShellView;
@@ -20,6 +23,55 @@ pub struct PreviewState {
     pub file_name: String,
     /// Parsed content elements
     pub elements: Vec<PreviewElement>,
+    /// Index of every Markdown heading in `elements`, precomputed at
+    /// load time. Used for TOC overlay (`o`), heading jump (`[` / `]`),
+    /// and fuzzy heading search (`:`). Empty for non-Markdown files or
+    /// markdown with no headings.
+    pub headings: Vec<HeadingEntry>,
+    /// Monotonic sequence number bumped on every load/reload. The
+    /// text-selection subsystem captures this in
+    /// `PreviewSelectionState.generation` on mouse-down; a mismatch
+    /// on any render tick means the document was swapped (auto-
+    /// reload, placeholder → real parse, etc.) and the stored
+    /// selection may no longer map to valid text. The render-loop
+    /// invalidator drops such selections before they cause a
+    /// mis-copy. See `plans/preview-text-selection-spec.md` §3
+    /// "Auto-reload interaction".
+    pub generation: u64,
+}
+
+/// Global monotonic counter for `PreviewState.generation`. A single
+/// atomic covers every preview state in every workspace — uniqueness
+/// across reload / tab-switch / path-reuse is what matters, not
+/// per-path sequencing. An atomic `fetch_add` is ~1 ns and runs on
+/// the UI thread path anyway, so there's no hot-spot risk.
+#[cfg(feature = "gpui")]
+pub(crate) fn next_preview_generation() -> u64 {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A single heading in the preview, with cached section bounds and
+/// content text. Mirrors mdterm's `TocEntry` structure: `section_end`
+/// is the **exclusive** index of the first element that ends this
+/// heading's section (next same-or-higher-level heading, or
+/// `elements.len()` if this is the last one). That range is what a
+/// future "copy section" shortcut copies.
+#[cfg(feature = "gpui")]
+#[derive(Clone, Debug)]
+pub struct HeadingEntry {
+    pub level: u8,
+    pub text: String,
+    /// Index into `PreviewState.elements` where the `Heading` lives.
+    pub element_idx: usize,
+    /// Exclusive end — the element index where the next same-level-or-
+    /// higher heading starts, or `elements.len()` for the last one.
+    pub section_end_idx: usize,
+    /// Concatenated plain text of every element in `[element_idx ..
+    /// section_end_idx]`. Used for fuzzy match and "copy section".
+    /// Computed once at load time so fuzzy filtering stays cheap per
+    /// keystroke.
+    pub content_text: String,
 }
 
 /// A renderable element in the preview
@@ -30,8 +82,8 @@ pub enum PreviewElement {
     Paragraph { spans: Vec<TextSpan> },
     CodeBlock {
         language: String,
-        /// Pre-formatted lines: (display_text, dominant_color). Computed once at load time.
-        formatted_lines: Vec<(String, u32)>,
+        /// Pre-formatted lines: (line_number, code_text, dominant_color). Computed once at load time.
+        formatted_lines: Vec<(String, String, u32)>,
         total_lines: usize,
     },
     ListItem { depth: u8, ordered: bool, index: usize, spans: Vec<TextSpan> },
@@ -57,7 +109,11 @@ pub struct TextSpan {
 pub struct FilePickerState {
     pub query: String,
     /// Cached full file list (scanned once on open)
-    all_files: Vec<String>,
+    /// All previewable files scanned under `base_dir`, paired with
+    /// their last-modified time. Keeping the mtime here means
+    /// `filter_files` can sort by recency without re-`stat`'ing
+    /// every file on every keystroke.
+    all_files: Vec<(String, std::time::SystemTime)>,
     /// Filtered matches for current query
     pub matches: Vec<String>,
     pub selected_index: usize,
@@ -71,9 +127,27 @@ pub struct FilePickerState {
 impl PreviewState {
     /// Load and parse a file for preview
     pub fn load(file_path: &str) -> Option<Self> {
-        // Guard: check file size before reading (skip files > 2MB)
         let metadata = std::fs::metadata(file_path).ok()?;
-        if metadata.len() > 2 * 1024 * 1024 {
+        let is_markdown = file_path.ends_with(".md") || file_path.ends_with(".markdown");
+
+        // Split caps by file kind:
+        //
+        // * Markdown caps at 20 MB because pulldown-cmark produces a
+        //   heterogeneous element tree (headings, paragraphs, lists,
+        //   tables) that has to be fully realized in the DOM — GPUI
+        //   layout is O(N) over elements, so unbounded markdown would
+        //   stall on multi-MB specs. 20 MB covers any real-world doc.
+        //
+        // * Code (everything else) caps at 100 MB only as a sanity
+        //   guard against someone accidentally previewing a binary
+        //   dump as text. The renderer uses `uniform_list` virtual
+        //   scrolling for pure-code files, so the per-frame cost
+        //   scales with viewport size, not file size — a 1 GB log
+        //   would render fine, but reading 1 GB into memory via
+        //   `read_to_string` would still stall the load thread and
+        //   blow up RSS. 100 MB is the compromise.
+        let size_cap: u64 = if is_markdown { 20 * 1024 * 1024 } else { 100 * 1024 * 1024 };
+        if metadata.len() > size_cap {
             let file_name = std::path::Path::new(file_path)
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -83,13 +157,19 @@ impl PreviewState {
                 file_name,
                 elements: vec![PreviewElement::Paragraph {
                     spans: vec![TextSpan {
-                        text: format!("File too large to preview ({:.1} MB)", metadata.len() as f64 / 1024.0 / 1024.0),
+                        text: format!(
+                            "File too large to preview ({:.1} MB — cap {} MB)",
+                            metadata.len() as f64 / 1024.0 / 1024.0,
+                            size_cap / 1024 / 1024,
+                        ),
                         bold: false,
                         italic: true,
                         code: false,
                         link_url: None,
                     }],
                 }],
+                headings: Vec::new(),
+                generation: next_preview_generation(),
             });
         }
 
@@ -101,7 +181,7 @@ impl PreviewState {
 
         // Catch panics from markdown/syntax parsing to prevent crashes
         let elements = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if file_path.ends_with(".md") || file_path.ends_with(".markdown") {
+            if is_markdown {
                 parse_markdown(&content)
             } else {
                 let lang = detect_language(file_path);
@@ -109,42 +189,184 @@ impl PreviewState {
             }
         })).unwrap_or_else(|_| {
             eprintln!("[amux-preview] panic while parsing: {}", file_path);
-            // Fallback: show as plain text
+            // Fallback: plain-text dump. No truncation — the renderer
+            // virtualizes this path via `uniform_list`, so a 100k-line
+            // log is just as cheap to display as a 10-line one.
+            let all_lines: Vec<&str> = content.lines().collect();
+            let total = all_lines.len();
+            let gutter_w = gutter_width_for(total);
             vec![PreviewElement::CodeBlock {
                 language: "text".to_string(),
-                formatted_lines: content.lines().take(300).enumerate()
-                    .map(|(i, l)| (format!("{:>4} {}", i + 1, l), 0xc5c8c6))
+                formatted_lines: all_lines.iter().enumerate()
+                    .map(|(i, l)| (format!("{:>width$}", i + 1, width = gutter_w), l.to_string(), 0xc5c8c6))
                     .collect(),
-                total_lines: content.lines().count(),
+                total_lines: total,
             }]
         });
 
+        let headings = build_headings_index(&elements);
         Some(Self {
             file_path: file_path.to_string(),
             file_name,
             elements,
+            headings,
+            generation: next_preview_generation(),
         })
+    }
+
+    /// Synchronous placeholder inserted while the real `load` runs on a
+    /// background thread. Exists so clicking a path in the terminal
+    /// produces an immediate tab+panel instead of a frame stall while
+    /// pulldown-cmark / syntax highlighting chew through the file.
+    pub fn loading_placeholder(file_path: &str) -> Self {
+        let file_name = std::path::Path::new(file_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| file_path.to_string());
+        Self {
+            file_path: file_path.to_string(),
+            file_name,
+            elements: vec![PreviewElement::Paragraph {
+                spans: vec![TextSpan {
+                    text: "Loading…".to_string(),
+                    bold: false,
+                    italic: true,
+                    code: false,
+                    link_url: None,
+                }],
+            }],
+            headings: Vec::new(),
+            generation: next_preview_generation(),
+        }
     }
 }
 
-/// Pre-format a code block: highlight + format into (display_text, color) pairs.
-/// Done once at load time so render is zero-cost.
+/// Scan `elements` for `Heading` variants and produce a `HeadingEntry`
+/// for each with its section bounds + concatenated content text.
+/// Runs once per load — O(N) in element count, cheap even on 20 MB
+/// markdown docs.
+#[cfg(feature = "gpui")]
+fn build_headings_index(elements: &[PreviewElement]) -> Vec<HeadingEntry> {
+    // Pass 1: collect every heading's (element_idx, level, text).
+    let mut entries: Vec<HeadingEntry> = Vec::new();
+    for (i, el) in elements.iter().enumerate() {
+        if let PreviewElement::Heading { level, text } = el {
+            entries.push(HeadingEntry {
+                level: *level,
+                text: text.clone(),
+                element_idx: i,
+                section_end_idx: 0, // filled in pass 2
+                content_text: String::new(), // filled in pass 3
+            });
+        }
+    }
+    // Pass 2: section_end_idx. Walk right-to-left so each entry can
+    // look up its successor. A section ends at the next heading whose
+    // level is ≤ this one's (equal or higher in hierarchy). If none
+    // exists, the section runs to the end of the document.
+    let total = elements.len();
+    for i in (0..entries.len()).rev() {
+        let lvl = entries[i].level;
+        let end = entries[i + 1..]
+            .iter()
+            .find(|e| e.level <= lvl)
+            .map(|e| e.element_idx)
+            .unwrap_or(total);
+        entries[i].section_end_idx = end;
+    }
+    // Pass 3: content_text for fuzzy matching and future copy-section.
+    // Concatenate plain text of every element in the section range.
+    for i in 0..entries.len() {
+        let s = entries[i].element_idx;
+        let e = entries[i].section_end_idx;
+        entries[i].content_text = elements[s..e]
+            .iter()
+            .map(element_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    entries
+}
+
+/// Strip styling and return the plain-text content of an element.
+/// Used by `build_headings_index` to populate `content_text`. Best-
+/// effort — tables flatten to row-joined text, code blocks return
+/// their joined lines. The point is readable text for fuzzy match,
+/// not byte-perfect round-trip.
+#[cfg(feature = "gpui")]
+fn element_plain_text(el: &PreviewElement) -> String {
+    match el {
+        PreviewElement::Heading { text, .. } => text.clone(),
+        PreviewElement::Paragraph { spans } | PreviewElement::Blockquote { spans } => {
+            spans.iter().map(|s| s.text.as_str()).collect()
+        }
+        PreviewElement::ListItem { spans, .. } => {
+            spans.iter().map(|s| s.text.as_str()).collect()
+        }
+        PreviewElement::CodeBlock { formatted_lines, .. } => formatted_lines
+            .iter()
+            .map(|(_, t, _)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        PreviewElement::Table { headers, rows } => {
+            let mut lines = Vec::new();
+            lines.push(
+                headers
+                    .iter()
+                    .map(|cell| cell.iter().map(|s| s.text.as_str()).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            );
+            for row in rows {
+                lines.push(
+                    row.iter()
+                        .map(|cell| cell.iter().map(|s| s.text.as_str()).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                );
+            }
+            lines.join("\n")
+        }
+        PreviewElement::HorizontalRule => String::new(),
+    }
+}
+
+/// Gutter column width (character count) for a given total line count.
+/// Small files get a 2-char gutter, 10M-line files get 8. Shared between
+/// the primary format path and the panic fallback so both agree on
+/// column alignment.
+#[cfg(feature = "gpui")]
+fn gutter_width_for(total: usize) -> usize {
+    match total {
+        0..=99 => 2,
+        100..=999 => 3,
+        1_000..=9_999 => 4,
+        10_000..=99_999 => 5,
+        100_000..=999_999 => 6,
+        1_000_000..=9_999_999 => 7,
+        _ => 8,
+    }
+}
+
+/// Pre-format a code block: highlight + format into (line_num, text, color)
+/// rows. Processes every line in the file — the renderer uses
+/// `uniform_list` virtual scrolling in the pure-code path, so the cost
+/// of creating the per-line vec is linear in file size but the render
+/// cost per frame stays O(viewport).
 #[cfg(feature = "gpui")]
 fn format_code_block(language: &str, code: &str) -> PreviewElement {
-    let max_lines = 300;
     let all_lines: Vec<&str> = code.lines().collect();
     let total = all_lines.len();
-    let render_count = total.min(max_lines);
-    let gutter_w = if total >= 1000 { 5 } else if total >= 100 { 4 } else { 3 };
-    let formatted: Vec<(String, u32)> = all_lines[..render_count].iter().enumerate().map(|(i, line)| {
+    let gutter_w = gutter_width_for(total);
+    let formatted: Vec<(String, String, u32)> = all_lines.iter().enumerate().map(|(i, line)| {
         let tokens = highlight_line(line, language);
-        let line_num = format!("{:>width$} ", i + 1, width = gutter_w);
+        let line_num = format!("{:>width$}", i + 1, width = gutter_w);
         let code_text: String = tokens.iter().map(|t| t.text.as_str()).collect();
         let color = tokens.iter()
             .find(|t| t.color != 0xc5c8c6 && t.color != 0x969896)
             .map(|t| t.color)
             .unwrap_or(0xc5c8c6);
-        (format!("{}{}", line_num, code_text), color)
+        (line_num, code_text, color)
     }).collect();
     PreviewElement::CodeBlock {
         language: language.to_string(),
@@ -597,9 +819,30 @@ pub fn render_preview_panel(
     state: &PreviewState,
     content_w: f32,
     content_h: f32,
+    preview_search: Option<&crate::preview_search::PreviewSearchState>,
+    scroll_handle: gpui::UniformListScrollHandle,
+    list_state: Option<gpui::ListState>,
+    toc: Option<&crate::preview_toc::TocPickerState>,
+    selection_ctx: Option<crate::preview_selection::SelectionRenderCtx>,
     cx: &mut gpui::Context<GpuiShellView>,
 ) -> AnyElement {
     let copy_path = state.file_path.clone();
+    // Only render the search bar / highlight when the search state
+    // belongs to *this* preview — stale state from a previous preview
+    // tab never bleeds through (see PreviewSearchState::path for the
+    // rationale). We take the state by reference from the caller
+    // instead of re-reading the view entity here: reading the entity
+    // during `Render::render` double-leases it and panics.
+    let search_for_this = preview_search
+        .filter(|s| s.path == state.file_path)
+        .cloned();
+    let highlight_line = search_for_this
+        .as_ref()
+        .and_then(|s| s.current_line());
+    // Likewise, the TOC overlay only paints if its stored path
+    // matches this preview. Switching tabs away and back would
+    // otherwise pop the overlay up on the wrong document.
+    let toc_for_this = toc.filter(|s| s.path == state.file_path).cloned();
     div()
         .id("preview-panel")
         .flex()
@@ -657,6 +900,48 @@ pub fn render_preview_panel(
                         .items_center()
                         .gap_1()
                         .flex_shrink_0()
+                        // TOC button — visible only when the doc has
+                        // headings. Mirrors pressing `o`.
+                        .when(!state.headings.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .id("preview-toc-btn")
+                                    .text_xs()
+                                    .text_color(rgb(crate::theme::TEXT_DIM))
+                                    .px(px(5.0))
+                                    .py(px(2.0))
+                                    .rounded(px(3.0))
+                                    .cursor_pointer()
+                                    .hover(|d| d.text_color(rgb(crate::theme::ACCENT)).bg(rgb(crate::theme::SURFACE_RAISED)))
+                                    .child("TOC")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.preview_toc_open(cx);
+                                    }))
+                            )
+                        })
+                        // Find button — only for code-file previews
+                        // where the search path is wired. Clicking it
+                        // opens the same `/` search bar.
+                        .when(
+                            matches!(state.elements.as_slice(), [PreviewElement::CodeBlock { .. }]),
+                            |d| {
+                                d.child(
+                                    div()
+                                        .id("preview-find-btn")
+                                        .text_xs()
+                                        .text_color(rgb(crate::theme::TEXT_DIM))
+                                        .px(px(5.0))
+                                        .py(px(2.0))
+                                        .rounded(px(3.0))
+                                        .cursor_pointer()
+                                        .hover(|d| d.text_color(rgb(crate::theme::ACCENT)).bg(rgb(crate::theme::SURFACE_RAISED)))
+                                        .child("Find")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.preview_search_open(cx);
+                                        }))
+                                )
+                            },
+                        )
                         // Copy button
                         .child(
                             div()
@@ -677,22 +962,408 @@ pub fn render_preview_panel(
                         )
                 )
         )
-        // Content area (scrollable)
+        // Content area. Two paths:
+        //
+        // * Pure code file (single CodeBlock element): render via
+        //   `uniform_list` so only the visible viewport slice is
+        //   materialized as DOM. Removes the historical 300-line cap
+        //   without tanking frame time on long files.
+        //
+        // * Markdown / mixed content: keep the flat-scroll path that
+        //   can lay out heterogeneous elements (headings, lists,
+        //   tables, prose). Markdown is capped at 20 MB at load
+        //   time, which bounds element count.
+        .child(
+            match state.elements.as_slice() {
+                [PreviewElement::CodeBlock { language, formatted_lines, total_lines }] => {
+                    render_code_block_fullscreen(
+                        language.clone(),
+                        formatted_lines.clone(),
+                        *total_lines,
+                        scroll_handle,
+                        highlight_line,
+                    )
+                }
+                _ => render_markdown_body(state, list_state, selection_ctx, cx),
+            }
+        )
+        // Bottom strip: either the active search bar or a persistent
+        // shortcuts hint (discoverability for keys like `[` / `]` /
+        // `o` / `/` / `Y`). Exactly one of the two is visible at a
+        // time — the search bar takes over when `/` opens.
+        .child(match search_for_this {
+            Some(search) => render_preview_search_bar(&search),
+            None => render_preview_hint_bar(state),
+        })
+        ) // end content column
+        // TOC overlay paints on top of the content column when open.
+        // Absolute-positioned, covers the panel, its own backdrop
+        // dismisses on click-outside.
+        .when_some(toc_for_this, |d, toc_state| {
+            d.child(crate::preview_toc::render_toc_overlay(&toc_state, state, cx))
+        })
+        .into_any_element()
+}
+
+/// Persistent shortcut-hint strip at the bottom of the preview
+/// panel. Replaced by the search bar while `/` search is active
+/// (see the call site). Content adapts to the preview kind — the
+/// hints we show only list shortcuts that *work* on the active
+/// document, so users don't get taught `/` on a markdown (where
+/// search is currently scoped to code files only) or `o` on a `.rs`
+/// file that has no headings.
+///
+/// This bar is the main discoverability surface for the preview
+/// shortcut set. Without it users have no way to learn `[` / `]` /
+/// `o` / `/` exist — no tooltips or menu entries expose them today.
+#[cfg(feature = "gpui")]
+fn render_preview_hint_bar(state: &PreviewState) -> AnyElement {
+    let is_code_only = matches!(
+        state.elements.as_slice(),
+        [PreviewElement::CodeBlock { .. }]
+    );
+    let has_headings = !state.headings.is_empty();
+    // Build the hint string from what this doc actually supports.
+    // Keeping each group to `key  action` with a middle-dot
+    // separator matches the existing search-bar hint style for
+    // visual consistency.
+    let hint = match (is_code_only, has_headings) {
+        (true, _) => "/  find    n / N  next / prev    Y  copy all    c  copy block",
+        (false, true) => "[ ]  prev / next heading    o  toc    Y  copy all",
+        (false, false) => "Y  copy all",
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py(px(4.0))
+        .bg(rgb(crate::theme::SURFACE_DIM))
+        .border_t_1()
+        .border_color(rgb(crate::theme::SURFACE_RAISED))
+        .flex_shrink_0()
+        .text_xs()
+        .text_color(rgb(crate::theme::TEXT_DIM))
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .child(hint)
+        .into_any_element()
+}
+
+/// Bottom bar showing the `/` search query, match counter, and hint
+/// keys. Mirrors mdterm's bottom-of-screen search input layout.
+#[cfg(feature = "gpui")]
+fn render_preview_search_bar(search: &crate::preview_search::PreviewSearchState) -> AnyElement {
+    let total = search.matches.len();
+    // Human-indexed counter: 1-based so the user sees "3/12" not
+    // "2/12" for the third match. Zero-match case shows "0/0" so
+    // the UI doesn't collapse while the user is typing partial
+    // queries with no hits yet.
+    let counter = if total == 0 {
+        "0/0".to_string()
+    } else {
+        format!("{}/{}", search.current_idx + 1, total)
+    };
+    let hint = if search.input_active {
+        "Enter commit · Esc close"
+    } else {
+        "n next · N prev · Esc close"
+    };
+    let query_display = if search.query.is_empty() && search.input_active {
+        "_".to_string()
+    } else {
+        // Trailing cursor marker when in input mode, so the user can
+        // see where the next character will land.
+        if search.input_active {
+            format!("{}_", search.query)
+        } else {
+            search.query.clone()
+        }
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py(px(4.0))
+        .bg(rgb(crate::theme::SURFACE_DIM))
+        .border_t_1()
+        .border_color(rgb(crate::theme::SURFACE_RAISED))
+        .flex_shrink_0()
+        .text_xs()
         .child(
             div()
-                .id(gpui::ElementId::Name("preview-content".into()))
-                .flex_1()
-                .overflow_y_scroll()
-                .px(px(20.0))
-                .py(px(16.0))
-                .children(state.elements.iter().map(|el| render_element(el)))
+                .text_color(rgb(crate::theme::ACCENT))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("/"),
         )
-        ) // end content column
+        .child(
+            div()
+                .flex_1()
+                .text_color(rgb(crate::theme::TEXT))
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .child(query_display),
+        )
+        .child(
+            div()
+                .text_color(rgb(crate::theme::TEXT_DIM))
+                .child(counter),
+        )
+        .child(
+            div()
+                .text_color(rgb(crate::theme::TEXT_DIM))
+                .child(hint),
+        )
+        .into_any_element()
+}
+
+/// Render the markdown / mixed-element body via `gpui::list`. The
+/// list element virtualizes variable-height children and exposes a
+/// `scroll_to_reveal_item(idx)` method we use for TOC-driven and `[`
+/// / `]` navigation. The markdown element count is bounded by the
+/// 20 MB load cap, so the work of feeding `list` is cheap per frame.
+///
+/// If `list_state` is `None` (edge case: element count changed
+/// between `sync_preview_list_states` and this render — shouldn't
+/// happen in practice, but the borrow chain is lossy), we fall back
+/// to the old flat `overflow_y_scroll` layout so the user still sees
+/// content instead of a blank pane.
+#[cfg(feature = "gpui")]
+fn render_markdown_body(
+    state: &PreviewState,
+    list_state: Option<gpui::ListState>,
+    selection_ctx: Option<crate::preview_selection::SelectionRenderCtx>,
+    cx: &mut gpui::Context<GpuiShellView>,
+) -> AnyElement {
+    use gpui_component::ElementExt;
+
+    // `on_prepaint` captures the body's window-space bounds each
+    // frame into the view's `preview_body_bounds` cache — mouse
+    // handlers read from there to convert window coords into content
+    // coords. The prepaint body uses `view_entity.update(cx, ...)`
+    // because `on_prepaint` hands us `&mut App`, not `&mut
+    // Context<View>`.
+    let view_entity = cx.entity().clone();
+    let on_prepaint_body = move |bounds: gpui::Bounds<gpui::Pixels>,
+                                 _w: &mut gpui::Window,
+                                 cx: &mut gpui::App| {
+        let _ = view_entity.update(cx, |this, _| {
+            this.preview_body_bounds = Some(bounds);
+        });
+    };
+    let on_mouse_down = cx.listener(|this, event: &gpui::MouseDownEvent, _w, cx| {
+        this.preview_selection_mouse_down(event.position, cx);
+    });
+    let on_mouse_move = cx.listener(|this, event: &gpui::MouseMoveEvent, _w, cx| {
+        this.preview_selection_mouse_move(event.position, cx);
+    });
+    let on_mouse_up = cx.listener(|this, _event: &gpui::MouseUpEvent, _w, cx| {
+        this.preview_selection_mouse_up(cx);
+    });
+
+    let Some(list_state) = list_state else {
+        // Fallback path: no list_state means the view hasn't synced
+        // one yet (rare — first frame, or an edge-case race). Wire
+        // selection into the `overflow_y_scroll` div directly.
+        return div()
+            .id(gpui::ElementId::Name("preview-content".into()))
+            .flex_1()
+            .overflow_y_scroll()
+            .px(px(20.0))
+            .py(px(16.0))
+            .on_prepaint(on_prepaint_body)
+            .on_mouse_down(gpui::MouseButton::Left, on_mouse_down)
+            .on_mouse_move(on_mouse_move)
+            .on_mouse_up(gpui::MouseButton::Left, on_mouse_up)
+            .children(
+                state.elements.iter().enumerate()
+                    .map(|(idx, el)| render_element(el, idx, selection_ctx.as_ref())),
+            )
+            .into_any_element();
+    };
+    // The render closure runs for each visible item and must be
+    // `'static`, so it captures an owned snapshot of the elements.
+    // Cloning once per frame is cheap in normal use (markdown element
+    // counts are in the hundreds, not millions) and keeps the data
+    // model simple — no Arc on `PreviewState.elements`.
+    let elements: std::sync::Arc<[PreviewElement]> = state.elements.clone().into();
+    // Clone the selection ctx into the render closure. It's tiny
+    // (3 f32s + an Hsla), so the per-item clone cost is negligible.
+    let selection_ctx_for_items = selection_ctx.clone();
+    let render_item = move |idx: usize, _w: &mut gpui::Window, _a: &mut gpui::App| -> AnyElement {
+        let el = &elements[idx];
+        // Padding lives on each item because `list` doesn't accept a
+        // padding style that would show between items *and* at the
+        // edges the way a simple `.px().py()` on a scroll container
+        // does. Horizontal padding per item matches the old layout's
+        // `px_5`-equivalent indent.
+        div()
+            .px(px(20.0))
+            .child(render_element(el, idx, selection_ctx_for_items.as_ref()))
+            .into_any_element()
+    };
+    // Wrap the list in a flex-col div so we have a place to hang the
+    // mouse handlers + prepaint bounds capture. `list` is not an
+    // InteractiveElement so it can't carry handlers directly. The
+    // wrapper must itself be a flex container (`.flex().flex_col()`)
+    // because the inner `list` uses `.flex_1()` to claim remaining
+    // height — without a flex parent that flex_1 is a no-op and the
+    // list renders at zero height (blank markdown body).
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .on_prepaint(on_prepaint_body)
+        .on_mouse_down(gpui::MouseButton::Left, on_mouse_down)
+        .on_mouse_move(on_mouse_move)
+        .on_mouse_up(gpui::MouseButton::Left, on_mouse_up)
+        .child(
+            list(list_state, render_item)
+                .flex_1()
+                .py(px(16.0)),
+        )
+        .into_any_element()
+}
+
+/// Render a single top-level code block as a virtualized, full-panel
+/// viewer. `uniform_list` only materializes the lines actually in the
+/// viewport, so this stays O(viewport) even for 100k-line logs.
+///
+/// Why not reuse `render_element`: the embedded-code path (code
+/// blocks inside a rendered markdown document) needs the block's
+/// height to be bounded by its own content, so it flows naturally
+/// between preceding and following markdown elements. The full-file
+/// path needs the block to fill the remaining panel height and own
+/// its own scroll. Two different layout constraints — two render
+/// paths.
+#[cfg(feature = "gpui")]
+fn render_code_block_fullscreen(
+    language: String,
+    formatted_lines: Vec<(String, String, u32)>,
+    total_lines: usize,
+    scroll_handle: gpui::UniformListScrollHandle,
+    highlight_line: Option<usize>,
+) -> AnyElement {
+    let lines: Arc<[(String, String, u32)]> = Arc::from(formatted_lines);
+    // Gutter width in pixels: we size it once here from the first
+    // row's character count and pass it to every row. Without a
+    // fixed pixel width, each row independently measures its own
+    // gutter text, and GPUI's per-row text shaping produces sub-pixel
+    // variance in the measured width — the `1px` divider that sits
+    // flex-next drifts horizontally by fractions of a pixel from row
+    // to row, and the stacked dividers visually form a wavy line
+    // instead of a ruler. Fixing the gutter width pins every row's
+    // divider at the exact same x.
+    //
+    // `7.5` is an over-estimate of monospace advance at `text_xs`
+    // (12 px) — Menlo/Monaco/Cascadia all sit around 7.2 px. Over-
+    // estimating by 0.3 px per digit leaves a small gap to the
+    // divider and absorbs any remaining measurement jitter.
+    let gutter_chars = lines.first().map(|(n, _, _)| n.chars().count()).unwrap_or(2);
+    let gutter_px = px(gutter_chars as f32 * 7.5 + 16.0);
+    let list_lines = lines.clone();
+
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .bg(rgb(crate::theme::SURFACE_DIM))
+        // Language + line-count header (shown only when non-empty)
+        .when(!language.is_empty() || total_lines > 0, |d| {
+            d.child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .px_3()
+                    .py(px(3.0))
+                    .bg(rgb(crate::theme::SURFACE_DIM))
+                    .border_b_1()
+                    .border_color(rgb(crate::theme::SURFACE_RAISED))
+                    .text_xs()
+                    .text_color(rgb(crate::theme::TEXT_DIM))
+                    .flex_shrink_0()
+                    .child(if language.is_empty() { "text".to_string() } else { language.clone() })
+                    .child(format!("{} lines", total_lines))
+            )
+        })
+        .child(
+            uniform_list(
+                "preview-code-body",
+                lines.len(),
+                move |range, _window, _cx| {
+                    let lines = list_lines.clone();
+                    range.map(move |i| {
+                        let (num, text, color) = &lines[i];
+                        let is_match = Some(i) == highlight_line;
+                        build_code_row(num, text, *color, gutter_px, is_match)
+                    }).collect()
+                },
+            )
+            .flex_1()
+            .py(px(4.0))
+            .track_scroll(&scroll_handle)
+        )
+        .into_any_element()
+}
+
+/// Build a single virtualized code row: `[gutter | 1px divider | text]`.
+/// Stacked flush, these rows' per-row dividers line up into the
+/// continuous vertical rule — this only stays true if every row's
+/// gutter has the **exact same pixel width**, which is why the caller
+/// computes `gutter_px` once and threads it through.
+#[cfg(feature = "gpui")]
+fn build_code_row(
+    num: &str,
+    text: &str,
+    color: u32,
+    gutter_px: gpui::Pixels,
+    is_match: bool,
+) -> AnyElement {
+    // `is_match`: the row holds the currently-selected search match.
+    // We tint the whole row so the eye finds it even on long lines
+    // where the match text is off-screen. Per-character inline
+    // highlighting is a Tranche C refinement.
+    div()
+        .flex()
+        .text_xs()
+        .when(is_match, |d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(gutter_px)
+                .pr(px(8.0))
+                .text_right()
+                .text_color(rgb(crate::theme::TEXT_DIM))
+                .whitespace_nowrap()
+                .child(num.to_string())
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(1.0))
+                .bg(rgb(crate::theme::BORDER))
+        )
+        .child(
+            div()
+                .flex_1()
+                .pl(px(10.0))
+                .pr(px(8.0))
+                .text_color(rgb(color))
+                .whitespace_nowrap()
+                .child(text.to_string())
+        )
         .into_any_element()
 }
 
 #[cfg(feature = "gpui")]
-fn render_element(el: &PreviewElement) -> AnyElement {
+fn render_element(
+    el: &PreviewElement,
+    element_idx: usize,
+    selection_ctx: Option<&crate::preview_selection::SelectionRenderCtx>,
+) -> AnyElement {
+    use crate::preview_selection::{SelectableText, TextLocation};
     match el {
         PreviewElement::Heading { level, text } => {
             let (size, color, mt) = match level {
@@ -709,7 +1380,13 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                         .text_size(px(size))
                         .font_weight(FontWeight::BOLD)
                         .text_color(rgb(color))
-                        .child(text.clone())
+                        .child(
+                            SelectableText::new(
+                                TextLocation::new(element_idx, 0),
+                                text.clone(),
+                            )
+                            .with_selection_ctx(selection_ctx.cloned()),
+                        )
                 )
                 .when(*level <= 2, |d| {
                     d.child(
@@ -722,13 +1399,20 @@ fn render_element(el: &PreviewElement) -> AnyElement {
         PreviewElement::Paragraph { spans } => {
             div()
                 .mb(px(10.0))
-                .child(render_spans(spans))
+                .child(render_spans(spans, TextLocation::new(element_idx, 0), selection_ctx))
                 .into_any_element()
         }
 
         PreviewElement::CodeBlock { language, formatted_lines, total_lines } => {
+            // This path renders code blocks **inside** markdown
+            // documents (fenced `````lang` blocks). The pure-code-file
+            // path lives in `render_code_block_fullscreen` and uses
+            // virtualization. Here we lay out every line directly
+            // because embedded code blocks must size to their content
+            // so they flow between surrounding markdown elements —
+            // `uniform_list` needs a bounded scroll container which
+            // would disrupt that flow.
             let lang_label = if language.is_empty() { None } else { Some(language.clone()) };
-            let truncated = formatted_lines.len() < *total_lines;
 
             div()
                 .mb(px(10.0))
@@ -756,31 +1440,61 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                 })
                 .child(
                     div()
-                        .px_2()
-                        .py(px(4.0))
+                        .flex()
                         .text_xs()
-                        // Pre-formatted lines: zero computation per frame
-                        .children(formatted_lines.iter().map(|(text, color)| {
+                        // Gutter: line numbers, right-aligned
+                        .child(
                             div()
-                                .text_color(rgb(*color))
-                                .whitespace_nowrap()
-                                .child(text.clone())
-                                .into_any_element()
-                        }))
+                                .flex()
+                                .flex_col()
+                                .flex_shrink_0()
+                                .py(px(4.0))
+                                .pl(px(8.0))
+                                .pr(px(8.0))
+                                .text_color(rgb(crate::theme::TEXT_DIM))
+                                .children(formatted_lines.iter().map(|(num, _, _)| {
+                                    div()
+                                        .text_right()
+                                        .whitespace_nowrap()
+                                        .child(num.clone())
+                                        .into_any_element()
+                                }))
+                        )
+                        // Separator: continuous 1px vertical line
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .w(px(1.0))
+                                .bg(rgb(crate::theme::BORDER))
+                        )
+                        // Code: syntax-highlighted content. One
+                        // SelectableText per line — sub_idx encodes
+                        // the line index so the extractor can slice
+                        // code block ranges cleanly at newlines.
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .py(px(4.0))
+                                .pl(px(10.0))
+                                .pr(px(8.0))
+                                .overflow_hidden()
+                                .children(formatted_lines.iter().enumerate().map(|(line_idx, (_, text, color))| {
+                                    div()
+                                        .text_color(rgb(*color))
+                                        .whitespace_nowrap()
+                                        .child(
+                                            SelectableText::new(
+                                                TextLocation::new(element_idx, line_idx),
+                                                text.clone(),
+                                            )
+                                            .with_selection_ctx(selection_ctx.cloned()),
+                                        )
+                                        .into_any_element()
+                                }))
+                        )
                 )
-                .when(truncated, |d| {
-                    d.child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .text_xs()
-                            .text_color(rgb(crate::theme::TEXT_DIM))
-                            .bg(rgb(crate::theme::SURFACE_DIM))
-                            .border_t_1()
-                            .border_color(rgb(crate::theme::SURFACE_RAISED))
-                            .child(format!("... {} more lines", total_lines - formatted_lines.len()))
-                    )
-                })
                 .into_any_element()
         }
 
@@ -795,6 +1509,11 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                     _ => "▪".to_string(),
                 }
             };
+            // Bullet text deliberately NOT selectable — it's a
+            // rendering artifact, not part of the source markdown.
+            // A `SelectableText` wrap on the bullet would let users
+            // copy "•" tokens into their paste, which is almost
+            // never what they want.
             div()
                 .mb(px(3.0))
                 .pl(px(indent))
@@ -805,7 +1524,7 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                         .flex_shrink_0()
                         .child(bullet)
                 )
-                .child(render_spans(spans))
+                .child(render_spans(spans, TextLocation::new(element_idx, 0), selection_ctx))
                 .into_any_element()
         }
 
@@ -829,12 +1548,15 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                         .text_sm()
                         .text_color(rgb(crate::theme::TEXT_DIM))
                         .italic()
-                        .child(render_spans(spans))
+                        .child(render_spans(spans, TextLocation::new(element_idx, 0), selection_ctx))
                 )
                 .into_any_element()
         }
 
         PreviewElement::Table { headers, rows } => {
+            // Flatten (row, col) to sub_idx via `row * col_count + col`,
+            // with the header row at row=0. Extraction depends on this
+            // encoding — see TextLocation's doc for the invariant.
             let col_count = headers.len();
             div()
                 .mb(px(12.0))
@@ -850,7 +1572,7 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                         .bg(rgb(crate::theme::SURFACE_RAISED))
                         .border_b_1()
                         .border_color(rgb(crate::theme::BORDER))
-                        .children(headers.iter().map(|cell_spans| {
+                        .children(headers.iter().enumerate().map(|(col_idx, cell_spans)| {
                             div()
                                 .flex_1()
                                 .px_2()
@@ -862,7 +1584,11 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                                 .border_color(rgb(crate::theme::BORDER))
                                 .overflow_hidden()
                                 .whitespace_nowrap()
-                                .child(render_spans(cell_spans))
+                                .child(render_spans(
+                                    cell_spans,
+                                    TextLocation::new(element_idx, col_idx),
+                                    selection_ctx,
+                                ))
                                 .into_any_element()
                         }))
                 )
@@ -875,7 +1601,9 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                         .when(row_idx + 1 < rows.len(), |d| {
                             d.border_b_1().border_color(rgb(crate::theme::SURFACE_RAISED))
                         })
-                        .children(row.iter().map(|cell_spans| {
+                        .children(row.iter().enumerate().map(|(col_idx, cell_spans)| {
+                            // +1 offset on the row index because sub_idx=0..col_count is reserved for the header row.
+                            let sub_idx = (row_idx + 1) * col_count + col_idx;
                             div()
                                 .flex_1()
                                 .px_2()
@@ -885,7 +1613,11 @@ fn render_element(el: &PreviewElement) -> AnyElement {
                                 .border_r_1()
                                 .border_color(rgb(crate::theme::SURFACE_RAISED))
                                 .overflow_hidden()
-                                .child(render_spans(cell_spans))
+                                .child(render_spans(
+                                    cell_spans,
+                                    TextLocation::new(element_idx, sub_idx),
+                                    selection_ctx,
+                                ))
                                 .into_any_element()
                         }))
                         // Pad missing cells if row has fewer columns than header
@@ -904,42 +1636,78 @@ fn render_element(el: &PreviewElement) -> AnyElement {
 }
 
 #[cfg(feature = "gpui")]
-fn render_spans(spans: &[TextSpan]) -> AnyElement {
-    // Merge adjacent plain-text spans (same style) to reduce div count
-    // For simplicity, just render each unique-styled span as one div
-    // but concatenate adjacent spans with identical styling
+fn render_spans(
+    spans: &[TextSpan],
+    location: crate::preview_selection::TextLocation,
+    selection_ctx: Option<&crate::preview_selection::SelectionRenderCtx>,
+) -> AnyElement {
+    use crate::preview_selection::SelectableText;
+    use gpui::{FontStyle, HighlightStyle, Hsla};
+
+    // Concatenate every span into a single `SelectableText`. Per-span
+    // styling becomes a HighlightStyle run over a byte range, so the
+    // whole paragraph/list-item/blockquote/cell is one text layout
+    // from gpui's perspective. That layout is what lets us ask
+    // "what byte is at (x, y)?" in Step 4 — a per-span stack of divs
+    // would give us per-span layouts that don't compose.
+    //
+    // Styling trade-off vs the previous per-span divs: we lose the
+    // inline-code `bg + rounded + px + py` chip look because
+    // HighlightStyle doesn't expose corner radius or padding. Code
+    // spans still stand out via `background_color + color`, which is
+    // the part users actually rely on to spot them. Full chip styling
+    // would require a per-span sub-element and break selection
+    // continuity, so we trade pixel-perfect chips for selectable
+    // text.
+    let mut text = String::new();
+    let mut runs: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
+    for span in spans {
+        let start = text.len();
+        text.push_str(&span.text);
+        let end = text.len();
+
+        let mut style = HighlightStyle::default();
+        let mut styled = false;
+        if span.bold {
+            style.font_weight = Some(FontWeight::BOLD);
+            styled = true;
+        }
+        if span.italic {
+            style.font_style = Some(FontStyle::Italic);
+            styled = true;
+        }
+        if span.code {
+            style.color = Some(Hsla::from(rgb(crate::theme::DANGER)));
+            style.background_color = Some(Hsla::from(rgb(crate::theme::SURFACE_RAISED)));
+            styled = true;
+        }
+        if span.link_url.is_some() {
+            style.color = Some(Hsla::from(rgb(crate::theme::ACCENT)));
+            // Underline to hint clickability even without a hover —
+            // the previous div-based render relied on color alone,
+            // but now that we're inside a single text layout, an
+            // underline reads as part of the text, not as an extra
+            // div, so we can afford it.
+            style.underline = Some(gpui::UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(Hsla::from(rgb(crate::theme::ACCENT))),
+                wavy: false,
+            });
+            styled = true;
+        }
+        if styled && end > start {
+            runs.push((start..end, style));
+        }
+    }
+
     div()
         .text_sm()
         .text_color(rgb(crate::theme::TEXT))
-        .children(spans.iter().map(|span| {
-            let mut d = div().child(span.text.clone());
-
-            if span.bold {
-                d = d.font_weight(FontWeight::BOLD);
-            }
-            if span.italic {
-                d = d.italic();
-            }
-            if span.code {
-                d = d
-                    .bg(rgb(crate::theme::SURFACE_RAISED))
-                    .rounded(px(3.0))
-                    .px(px(4.0))
-                    .py(px(1.0))
-                    .text_xs()
-                    .text_color(rgb(crate::theme::DANGER));
-            }
-            if span.link_url.is_some() {
-                d = d.text_color(rgb(crate::theme::ACCENT));
-            }
-
-            // Only use inline display for styled spans, plain text flows naturally
-            if span.bold || span.italic || span.code || span.link_url.is_some() {
-                d = d.flex_shrink_0();
-            }
-
-            d.into_any_element()
-        }))
+        .child(
+            SelectableText::new(location, text)
+                .with_highlights(runs)
+                .with_selection_ctx(selection_ctx.cloned()),
+        )
         .into_any_element()
 }
 
@@ -947,16 +1715,30 @@ fn render_spans(spans: &[TextSpan]) -> AnyElement {
 
 #[cfg(feature = "gpui")]
 impl FilePickerState {
-    pub fn new(cwd: Option<String>) -> Self {
-        // Scan once on open, cache the full file list and base dir
-        let all_files = Self::scan_all_files(cwd.clone());
-        let matches = Self::filter_files(&all_files, "", 20);
+    /// Empty picker shown synchronously while `scan_all_files` runs
+    /// on a background thread. The caller fills it in via
+    /// `apply_scan` once the walk completes. Exists so Ctrl+P opens
+    /// on the same frame as the keystroke instead of stalling the
+    /// render thread for the full recursive `read_dir`.
+    pub fn loading(cwd: Option<String>) -> Self {
         Self {
             query: String::new(),
-            all_files,
-            matches,
+            all_files: Vec::new(),
+            matches: Vec::new(),
             selected_index: 0,
             base_dir: cwd,
+        }
+    }
+
+    /// Replace the cached file list with a freshly-scanned one and
+    /// re-run the current query filter. Preserves `query` and
+    /// `selected_index` if they still make sense so a user who
+    /// started typing during the scan doesn't lose their input.
+    pub fn apply_scan(&mut self, all_files: Vec<(String, std::time::SystemTime)>) {
+        self.all_files = all_files;
+        self.matches = Self::filter_files(&self.all_files, &self.query, 20);
+        if self.selected_index >= self.matches.len() {
+            self.selected_index = 0;
         }
     }
 
@@ -967,41 +1749,77 @@ impl FilePickerState {
         self.selected_index = 0;
     }
 
-    /// Filter cached file list by query (fast, in-memory only)
-    fn filter_files(all_files: &[String], query: &str, max: usize) -> Vec<String> {
+    /// Filter cached file list by query. `all_files` is kept sorted
+    /// by `scan_all_files` under the display rule (markdown first,
+    /// then mtime desc, then path asc), so filtering here is a
+    /// straight `filter().take()` — the first `max` matches are
+    /// already the right ones in the right order.
+    fn filter_files(
+        all_files: &[(String, std::time::SystemTime)],
+        query: &str,
+        max: usize,
+    ) -> Vec<String> {
         let query_lower = query.to_lowercase();
-        let mut results: Vec<String> = if query.is_empty() {
-            all_files.iter().take(max * 3).cloned().collect()
+        if query.is_empty() {
+            all_files.iter()
+                .take(max)
+                .map(|(p, _)| p.clone())
+                .collect()
         } else {
             all_files.iter()
-                .filter(|p| p.to_lowercase().contains(&query_lower))
-                .take(max * 3)
-                .cloned()
+                .filter(|(p, _)| p.to_lowercase().contains(&query_lower))
+                .take(max)
+                .map(|(p, _)| p.clone())
                 .collect()
-        };
-        // Sort: .md files first, then by path
-        results.sort_by(|a, b| {
-            let a_md = a.ends_with(".md") || a.ends_with(".markdown");
-            let b_md = b.ends_with(".md") || b.ends_with(".markdown");
-            b_md.cmp(&a_md).then_with(|| a.cmp(b))
-        });
-        results.truncate(max);
-        results
+        }
     }
 
-    /// Scan filesystem once, return all previewable files
-    fn scan_all_files(cwd: Option<String>) -> Vec<String> {
+    /// Scan filesystem once, return all previewable files paired with
+    /// their last-modified time, **pre-sorted** by the same rule
+    /// `filter_files` uses for display:
+    ///
+    /// 1. Markdown (`.md` / `.markdown`) first — highest-signal
+    ///    preview target in this app.
+    /// 2. Within each group, most-recently-modified first.
+    /// 3. Path asc as a deterministic tie-breaker.
+    ///
+    /// Sorting here (not at display time) is load-bearing: the 200-
+    /// item cap in `walk_dir` stops scanning the moment it fills, so
+    /// if we sorted only at display time, any markdown file sitting
+    /// past the 200th filesystem-order entry would be invisible.
+    /// Sorting at scan time **after** the walk also doesn't help
+    /// because `filter_files` used to `take(max * 3)` in filesystem
+    /// order before sorting — same effective truncation. Sort once
+    /// here so every downstream consumer sees the right order.
+    ///
+    /// Blocking — call from a background thread for Ctrl+P. The
+    /// mtime is captured during the walk so the UI path never
+    /// has to `stat`.
+    pub fn scan_all_files(cwd: Option<String>) -> Vec<(String, std::time::SystemTime)> {
         let cwd = cwd.map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let mut results = Vec::new();
-        Self::walk_dir(&cwd, &cwd, &mut results, 200, 0);
+        // Walk cap is generous (5000) so the sort below sees every
+        // markdown file in the tree. The old 200 cap truncated in
+        // filesystem order before sorting, which meant markdown files
+        // buried past inode 200 were invisible regardless of the
+        // sort rule. Depth limit + ignore list still bound total
+        // work; 5000 items sort in microseconds.
+        Self::walk_dir(&cwd, &cwd, &mut results, 5000, 0);
+        results.sort_by(|a, b| {
+            let a_md = a.0.ends_with(".md") || a.0.ends_with(".markdown");
+            let b_md = b.0.ends_with(".md") || b.0.ends_with(".markdown");
+            b_md.cmp(&a_md)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
         results
     }
 
     fn walk_dir(
         base: &std::path::Path,
         dir: &std::path::Path,
-        results: &mut Vec<String>,
+        results: &mut Vec<(String, std::time::SystemTime)>,
         max: usize,
         depth: usize,
     ) {
@@ -1040,7 +1858,14 @@ impl FilePickerState {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-                results.push(rel_path);
+                // Fall back to UNIX_EPOCH so files whose mtime can't
+                // be read (unusual FS, permissions) sort to the
+                // bottom of their group instead of being dropped.
+                let mtime = entry.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+
+                results.push((rel_path, mtime));
             }
         }
     }
@@ -1159,7 +1984,7 @@ pub fn render_file_picker(
                                         .child(icon.to_string())
                                         .child(path.clone())
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            crate::preview_open::open_preview_from_picker(this, i);
+                                            crate::preview_open::open_preview_from_picker(this, cx, i);
                                             cx.notify();
                                         }))
                                         .into_any_element()
@@ -1180,4 +2005,87 @@ pub fn render_file_picker(
                 )
         )
         .into_any_element()
+}
+
+#[cfg(all(test, feature = "gpui"))]
+mod tests {
+    use super::*;
+
+    fn h(level: u8, text: &str) -> PreviewElement {
+        PreviewElement::Heading { level, text: text.into() }
+    }
+    fn p(text: &str) -> PreviewElement {
+        PreviewElement::Paragraph {
+            spans: vec![TextSpan {
+                text: text.into(),
+                bold: false,
+                italic: false,
+                code: false,
+                link_url: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn headings_collected_in_document_order() {
+        let els = vec![h(1, "A"), p("a body"), h(2, "A.1"), h(1, "B")];
+        let idx = build_headings_index(&els);
+        assert_eq!(idx.len(), 3);
+        assert_eq!(idx[0].text, "A");
+        assert_eq!(idx[0].level, 1);
+        assert_eq!(idx[0].element_idx, 0);
+        assert_eq!(idx[1].text, "A.1");
+        assert_eq!(idx[1].element_idx, 2);
+        assert_eq!(idx[2].text, "B");
+        assert_eq!(idx[2].element_idx, 3);
+    }
+
+    #[test]
+    fn section_end_respects_heading_levels() {
+        // H1 A  → section extends until next H1 (B), past H2 children.
+        // H2 A.1 → section extends until next H1-or-H2 (B).
+        // H1 B  → last, runs to end.
+        let els = vec![
+            h(1, "A"),          // 0
+            p("intro"),         // 1
+            h(2, "A.1"),        // 2
+            p("body of A.1"),   // 3
+            h(3, "A.1.1"),      // 4
+            p("deeper"),        // 5
+            h(1, "B"),          // 6
+            p("B body"),        // 7
+        ];
+        let idx = build_headings_index(&els);
+        assert_eq!(idx.len(), 4);
+        // A spans 0..6 (up to but not including H1 B).
+        assert_eq!(idx[0].element_idx, 0);
+        assert_eq!(idx[0].section_end_idx, 6);
+        // A.1 spans 2..6 (up to B; H3 A.1.1 is a child, doesn't terminate).
+        assert_eq!(idx[1].element_idx, 2);
+        assert_eq!(idx[1].section_end_idx, 6);
+        // A.1.1 spans 4..6 (H1 B terminates it).
+        assert_eq!(idx[2].element_idx, 4);
+        assert_eq!(idx[2].section_end_idx, 6);
+        // B runs to end of document.
+        assert_eq!(idx[3].element_idx, 6);
+        assert_eq!(idx[3].section_end_idx, 8);
+    }
+
+    #[test]
+    fn content_text_concatenates_section_elements() {
+        let els = vec![h(1, "Title"), p("first para"), p("second para")];
+        let idx = build_headings_index(&els);
+        // content_text is the joined plain text of the section —
+        // used later for fuzzy match against body content, not just
+        // heading titles.
+        assert!(idx[0].content_text.contains("Title"));
+        assert!(idx[0].content_text.contains("first para"));
+        assert!(idx[0].content_text.contains("second para"));
+    }
+
+    #[test]
+    fn no_headings_yields_empty_index() {
+        let els = vec![p("just a paragraph")];
+        assert!(build_headings_index(&els).is_empty());
+    }
 }

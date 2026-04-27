@@ -26,6 +26,19 @@ use crate::state::{
     ContextMenuState, ScrollbarHit, SearchMode, SelectionAutoScrollState,
 };
 
+/// Format a u64 token count into a human-readable string.
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M tk", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{}K tk", n / 1_000)
+    } else if n > 0 {
+        format!("{} tk", n)
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(feature = "gpui")]
 impl Render for GpuiShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -916,10 +929,15 @@ impl Render for GpuiShellView {
                                 })
                                 // Sidebar body: workspace list or agents view
                                 .child(if self.sidebar_state.mode == SidebarMode::Agents {
-                                    // Agents view: collect agent items from terminal manager
+                                    // Agents view: only show panes where a known
+                                    // VibeCoding tool (Claude Code, OpenCode, Codex,
+                                    // Aider, Gemini, Copilot) was detected via
+                                    // terminal-title matching. Regular terminals,
+                                    // browser tabs and preview tabs are excluded.
                                     let agent_items: Vec<AgentSidebarItem> = self.terminal_manager()
                                         .pane_list()
                                         .into_iter()
+                                        .filter(|info| info.agent_kind.is_some())
                                         .map(|info| {
                                             let (icon, color) = match info.agent_status.as_deref() {
                                                 Some("thinking...") => ("*".to_string(), 0x81a2beu32),
@@ -928,6 +946,7 @@ impl Render for GpuiShellView {
                                                 Some("error")       => ("!".to_string(), 0xf38ba8),
                                                 _                   => ("-".to_string(), 0x969896),
                                             };
+                                            let session = info.agent_session.as_ref();
                                             AgentSidebarItem {
                                                 pane_id: info.pane_id.0.clone(),
                                                 tab_title: info.tab_title,
@@ -935,6 +954,17 @@ impl Render for GpuiShellView {
                                                 agent_status: info.agent_status,
                                                 status_icon: icon,
                                                 status_color: color,
+                                                session_tool: session
+                                                    .and_then(|s| s.tool_label()),
+                                                session_tokens: session
+                                                    .map(|s| s.total_tokens())
+                                                    .filter(|t| *t > 0),
+                                                session_subagents: session
+                                                    .map_or(0, |s| s.subagent_count),
+                                                session_todo_done: session
+                                                    .map_or(0, |s| s.todo_progress().0),
+                                                session_todo_total: session
+                                                    .map_or(0, |s| s.todo_progress().1),
                                             }
                                         })
                                         .collect();
@@ -966,7 +996,14 @@ impl Render for GpuiShellView {
                                                 .px_3().py_2()
                                                 .text_xs()
                                                 .text_color(rgb(crate::theme::TEXT_DIM))
-                                                .child("No panes in workspace"),
+                                                .child("No AI agents detected"),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_3().pb_2()
+                                                .text_xs()
+                                                .text_color(rgb(crate::theme::TEXT_DIM))
+                                                .child("Start Claude Code, OpenCode, or Codex in a terminal pane"),
                                         );
                                     }
                                     for (key, icon, label, color) in &group_meta {
@@ -986,6 +1023,14 @@ impl Render for GpuiShellView {
                                                 let icon_color = agent.status_color;
                                                 let title_c = agent.tab_title.clone();
                                                 let kind_c = agent.agent_kind.clone().unwrap_or_default();
+                                                let tool_c = agent.session_tool.clone().unwrap_or_default();
+                                                let tokens_c = agent.session_tokens.map(|t| format_tokens(t));
+                                                let sub_c = if agent.session_subagents > 0 {
+                                                    Some(agent.session_subagents)
+                                                } else { None };
+                                                let todo_c = if agent.session_todo_total > 0 {
+                                                    Some(format!("{}/{}", agent.session_todo_done, agent.session_todo_total))
+                                                } else { None };
                                                 let pane_short = if agent.pane_id.len() > 8 {
                                                     agent.pane_id[agent.pane_id.len() - 6..].to_string()
                                                 } else {
@@ -994,17 +1039,38 @@ impl Render for GpuiShellView {
                                                 col = col.child(
                                                     div()
                                                         .id(gpui::ElementId::Name(format!("agent-{}", agent.pane_id).into()))
-                                                        .flex().items_center().gap(px(6.0))
+                                                        .flex_col()
                                                         .px_3().py(px(5.0)).mx_1()
                                                         .rounded(px(4.0))
                                                         .cursor_pointer()
                                                         .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
-                                                        .child(div().text_xs().text_color(rgb(icon_color)).child(icon_c))
-                                                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_sm().text_color(rgb(crate::theme::TEXT)).child(title_c))
-                                                        .when(!kind_c.is_empty(), move |d| {
-                                                            d.child(div().text_xs().text_color(rgb(crate::theme::TEXT_DIM)).child(kind_c))
+                                                        .child(
+                                                            div().flex().items_center().gap(px(6.0))
+                                                                .child(div().text_xs().text_color(rgb(icon_color)).child(icon_c))
+                                                                .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_sm().text_color(rgb(crate::theme::TEXT)).child(title_c))
+                                                                .when(!kind_c.is_empty(), move |d| {
+                                                                    d.child(div().text_xs().text_color(rgb(crate::theme::TEXT_DIM)).child(kind_c))
+                                                                })
+                                                                .child(div().text_xs().text_color(rgb(crate::theme::SURFACE_RAISED)).child(pane_short))
+                                                        )
+                                                        // Session detail line: tool | tokens | sub-agents | todos
+                                                        .when(!tool_c.is_empty() || tokens_c.is_some() || sub_c.is_some() || todo_c.is_some(), move |d| {
+                                                            d.child(
+                                                                div().flex().items_center().gap(px(8.0)).pt(px(2.0))
+                                                                    .when(!tool_c.is_empty(), move |d2| {
+                                                                        d2.child(div().text_xs().text_color(rgb(0x81a2be)).child(tool_c))
+                                                                    })
+                                                                    .when_some(tokens_c, |d2, t| {
+                                                                        d2.child(div().text_xs().text_color(rgb(crate::theme::TEXT_DIM)).child(t))
+                                                                    })
+                                                                    .when_some(sub_c, |d2, n| {
+                                                                        d2.child(div().text_xs().text_color(rgb(0xcba6f7)).child(format!("{} sub", n)))
+                                                                    })
+                                                                    .when_some(todo_c, |d2, p| {
+                                                                        d2.child(div().text_xs().text_color(rgb(0xa6e3a1)).child(p))
+                                                                    })
+                                                            )
                                                         })
-                                                        .child(div().text_xs().text_color(rgb(crate::theme::SURFACE_RAISED)).child(pane_short))
                                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                                             let pid = amux_platform::terminal::manager::PaneId(pane_id_click.clone());
                                                             this.terminal_manager_mut().set_active_pane(&pid);

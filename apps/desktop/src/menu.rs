@@ -187,7 +187,7 @@ pub(crate) fn dispatch(
         "Edit Startup Script..." => view.edit_startup_file(),
         "Open Selection as File" => {
             if let Some(path) = selection_path {
-                crate::preview_open::open_preview_file(view, &path);
+                crate::preview_open::open_preview_file(view, cx, &path);
             }
         }
         "Copy" => view.copy_selection(cx),

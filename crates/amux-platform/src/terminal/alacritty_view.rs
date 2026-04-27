@@ -4,16 +4,19 @@
 //! VT100/xterm escape sequence support.
 
 use std::collections::HashMap;
+use std::sync::mpsc::{Receiver as StdReceiver, Sender as StdSender, channel as std_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use alacritty_terminal::event::{Event as AlacrittyEvent, EventListener, Notify, WindowSize};
+use alacritty_terminal::event::{Event as AlacrittyEvent, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, Notifier};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::term::Term;
-use alacritty_terminal::tty;
+use alacritty_terminal::tty::{self, ChildEvent, EventedPty, EventedReadWrite};
+
+use crate::terminal::osc_intercept::{OscEvent, OscInterceptor};
 
 /// Event listener that bridges alacritty events to our system
 #[derive(Clone)]
@@ -23,6 +26,20 @@ pub struct AmuEventProxy {
     pub child_exited: Arc<std::sync::atomic::AtomicBool>,
     /// Set true when PTY has new output — cleared by `take_dirty()`
     pub dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// Set true when OSC 0/2 sets a new window title — cleared by
+    /// `take_title_changed()`. Used as a proxy for "the shell just
+    /// printed a new prompt" to trigger CWD cache refresh.
+    pub title_changed: Arc<std::sync::atomic::AtomicBool>,
+    /// Sender cloned into the `FilterPty` reader. Each OSC 7 / 133
+    /// sequence the interceptor extracts from the PTY stream is
+    /// pushed here. The main thread drains via `take_osc_events()`.
+    ///
+    /// `Arc<Mutex<Sender>>` rather than a bare `Sender` because
+    /// `AmuEventProxy` is `Clone` (alacritty needs it cheap-to-clone
+    /// for internal plumbing) and `Sender` is already cheaply clonable
+    /// but we want the option of replacing the channel if we ever
+    /// need to (e.g. in tests). Wrapping is cheap.
+    pub osc_event_tx: StdSender<OscEvent>,
 }
 
 impl EventListener for AmuEventProxy {
@@ -32,6 +49,7 @@ impl EventListener for AmuEventProxy {
                 if let Ok(mut t) = self.title.lock() {
                     *t = Some(title);
                 }
+                self.title_changed.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             AlacrittyEvent::Bell => {
                 self.bell.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -87,6 +105,19 @@ pub struct AlacrittyTerminal {
     rows: u16,
     cell_width: u16,
     cell_height: u16,
+    /// Receiver for OSC events produced by the `FilterPty` reader.
+    /// Drained on every `take_osc_events` call from the main thread.
+    /// On Windows the filter path is skipped, so this receiver never
+    /// produces any events (interceptor is Unix-only for now).
+    osc_event_rx: StdReceiver<OscEvent>,
+    // On Unix the event loop handle's pty type is FilterPty; on
+    // Windows we fall through to raw tty::Pty. Boxing lets both
+    // variants share a single struct field without a platform-
+    // specific Self type. The Box erases the pty type to keep the
+    // field signature identical across platforms.
+    #[cfg(unix)]
+    event_loop_handle: Option<JoinHandle<(EventLoop<FilterPty, AmuEventProxy>, alacritty_terminal::event_loop::State)>>,
+    #[cfg(not(unix))]
     event_loop_handle: Option<JoinHandle<(EventLoop<tty::Pty, AmuEventProxy>, alacritty_terminal::event_loop::State)>>,
     /// Channel sender to signal shutdown to the event loop
     event_loop_sender: EventLoopSender,
@@ -136,11 +167,21 @@ impl AlacrittyTerminal {
         scrollback_lines: usize,
         extra_env: &HashMap<String, String>,
     ) -> Result<Self, String> {
+        // OSC event channel: FilterPty's reader pushes events to the
+        // sender stored on AmuEventProxy; AlacrittyTerminal holds the
+        // receiver and drains via take_osc_events(). Unbounded —
+        // realistic OSC rates are small (≤1 per prompt cycle) so
+        // backpressure isn't a concern, and we must never block the
+        // reader thread (spec §9 "Never").
+        let (osc_event_tx, osc_event_rx) = std_channel::<OscEvent>();
+
         let event_proxy = AmuEventProxy {
             title: Arc::new(Mutex::new(None)),
             bell: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             child_exited: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             dirty: Arc::new(std::sync::atomic::AtomicBool::new(true)), // dirty on creation
+            title_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            osc_event_tx,
         };
 
         let size = TermSize { cols, rows, cell_width, cell_height };
@@ -171,15 +212,20 @@ impl AlacrittyTerminal {
         );
         // Pass terminal env vars through to WSL sessions via WSLENV.
         // Append to existing WSLENV if set, so user values aren't lost.
-        let wslenv_extra = "LS_COLORS:TERM:COLORTERM:TERM_PROGRAM:AMUX_PANE_ID:AMUX_WORKSPACE:AMUX_VERSION";
+        let wslenv_extra = "LS_COLORS:TERM:COLORTERM:TERM_PROGRAM:AMUX:AMUX_PANE_ID:AMUX_WORKSPACE:AMUX_VERSION";
         let wslenv = match std::env::var("WSLENV") {
             Ok(existing) if !existing.is_empty() => format!("{}:{}", existing, wslenv_extra),
             _ => wslenv_extra.to_string(),
         };
         env.insert("WSLENV".to_string(), wslenv);
 
-        // Inject AMUX_* environment variables for agent bridge
+        // Inject AMUX_* environment variables for agent bridge.
+        // AMUX=1 prevents nested multiplexer instances.
+        // AMUX_SOCKET_PATH enables external tools to send notifications.
+        env.insert("AMUX".to_string(), "1".to_string());
         env.insert("AMUX_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string());
+        let socket_path = crate::socket_notify::socket_path();
+        env.insert("AMUX_SOCKET_PATH".to_string(), socket_path.to_string_lossy().to_string());
         for (k, v) in extra_env {
             env.insert(k.clone(), v.clone());
         }
@@ -203,14 +249,32 @@ impl AlacrittyTerminal {
         #[cfg(target_os = "windows")]
         let child_pid: Option<u32> = pty.child_watcher().pid().map(|p| p.get());
 
-        // Spawn the event loop
+        // On Unix, wrap the Pty in FilterPty so reads route through
+        // the OSC interceptor. On Windows the filter path isn't
+        // implemented yet (see spec §10 risk register); we pass the
+        // raw Pty through and osc_event_rx stays dormant.
+        #[cfg(unix)]
+        let event_loop = {
+            let filter_pty = FilterPty::new(pty, event_proxy.osc_event_tx.clone())
+                .map_err(|e| format!("failed to wrap pty with OSC filter: {}", e))?;
+            EventLoop::new(
+                term.clone(),
+                event_proxy.clone(),
+                filter_pty,
+                pty_config.drain_on_exit,
+                false,
+            )
+            .map_err(|e| format!("failed to create event loop: {}", e))?
+        };
+        #[cfg(not(unix))]
         let event_loop = EventLoop::new(
             term.clone(),
             event_proxy.clone(),
             pty,
             pty_config.drain_on_exit,
             false,
-        ).map_err(|e| format!("failed to create event loop: {}", e))?;
+        )
+        .map_err(|e| format!("failed to create event loop: {}", e))?;
 
         let sender = event_loop.channel();
         let notifier = Notifier(sender.clone());
@@ -224,6 +288,7 @@ impl AlacrittyTerminal {
             rows,
             cell_width,
             cell_height,
+            osc_event_rx,
             event_loop_handle: Some(handle),
             event_loop_sender: sender,
             child_pid,
@@ -296,6 +361,14 @@ impl AlacrittyTerminal {
     /// Check and clear dirty flag (true = PTY had new output since last check)
     pub fn take_dirty(&self) -> bool {
         self.event_proxy.dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Check and clear title-changed flag. True means the shell set a
+    /// new window title (OSC 0/2) since the last check — in most shell
+    /// configs this fires at every prompt, making it a reliable proxy
+    /// for "the user just got a new prompt, CWD may have changed."
+    pub fn take_title_changed(&self) -> bool {
+        self.event_proxy.title_changed.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Check if child process has exited
@@ -499,5 +572,239 @@ impl AlacrittyTerminal {
             result.reverse(); // return in top-to-bottom order
             result
         })
+    }
+
+    /// Drain any OSC events (OSC 7 / OSC 133) that the filter
+    /// recorded since the last call. The caller — typically
+    /// `TerminalManager::poll_activity` — routes these to the
+    /// appropriate tab state (cwd cache, shell integration phase).
+    ///
+    /// Non-blocking. Safe to call every render tick.
+    pub fn take_osc_events(&self) -> Vec<OscEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.osc_event_rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+}
+
+// ─── PTY wrapper with OSC interception ─────────────────────────
+//
+// The spec (`plans/osc-integration-spec.md` §4) calls for inserting an
+// OSC byte-filter between the PTY read and alacritty's VTE parser.
+// Rather than rewriting the full read loop, we wrap alacritty's
+// `tty::Pty` in a thin `FilterPty` that:
+//
+// * delegates `register / reregister / deregister / next_child_event`
+//   and writer access to the inner Pty unchanged;
+// * replaces the inner Pty's reader with a `FilterReader` that owns a
+//   duplicated file descriptor, runs `OscInterceptor::process` over
+//   every read, pushes extracted events through a channel, and
+//   returns only the filtered bytes to alacritty.
+//
+// This keeps alacritty's event loop, resize handling, and child exit
+// plumbing untouched. The only behavioral change is that
+// `reader().read()` returns shorter byte slices when OSC 7 / 133
+// sequences are present.
+
+/// Duplicate a file descriptor into a fresh `File`. Used to hand a
+/// second reader over the PTY master to the `FilterReader` so reads
+/// via the wrapper consume from the same kernel buffer as the inner
+/// Pty would, without borrowing through the Pty.
+///
+/// On Windows the equivalent is obtained via `try_clone` on the
+/// handle (not currently needed — amux only goes through this path
+/// on Unix). For Windows we fall back to passing through unmodified
+/// (OSC interception is ignored on Windows in this iteration).
+#[cfg(unix)]
+fn dup_file(file: &std::fs::File) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let fd = unsafe { libc::dup(file.as_raw_fd()) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+/// Reader that runs every byte chunk through `OscInterceptor` before
+/// handing it to alacritty. Owns its own duped File on the PTY
+/// master; reads from the kernel's shared buffer for that fd.
+#[cfg(unix)]
+pub struct FilterReader {
+    inner: std::fs::File,
+    filter: OscInterceptor,
+    event_tx: StdSender<OscEvent>,
+    /// Bytes filtered from a previous read that couldn't all fit in
+    /// the caller's buffer. Drained first on the next read before we
+    /// touch the kernel again.
+    pending: Vec<u8>,
+    pending_pos: usize,
+}
+
+#[cfg(unix)]
+impl FilterReader {
+    fn new(
+        inner: std::fs::File,
+        event_tx: StdSender<OscEvent>,
+    ) -> Self {
+        Self {
+            inner,
+            filter: OscInterceptor::new(),
+            event_tx,
+            pending: Vec::new(),
+            pending_pos: 0,
+        }
+    }
+
+    fn drain_pending(&mut self, buf: &mut [u8]) -> usize {
+        if self.pending_pos >= self.pending.len() {
+            return 0;
+        }
+        let available = &self.pending[self.pending_pos..];
+        let n = available.len().min(buf.len());
+        buf[..n].copy_from_slice(&available[..n]);
+        self.pending_pos += n;
+        if self.pending_pos >= self.pending.len() {
+            // Everything drained — reset for reuse.
+            self.pending.clear();
+            self.pending_pos = 0;
+        }
+        n
+    }
+}
+
+#[cfg(unix)]
+impl std::io::Read for FilterReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Hot path: leftover from a previous call.
+        let drained = self.drain_pending(buf);
+        if drained > 0 {
+            return Ok(drained);
+        }
+
+        // Nothing queued — pull from the inner PTY. The buffer size
+        // matches alacritty's `READ_BUFFER_SIZE` ceiling behavior:
+        // we fill whatever the caller asked for, not more.
+        //
+        // Scratch is on the stack so we don't allocate per read.
+        // 8 KB covers typical PTY chunks; anything larger will loop
+        // on the caller's side.
+        let mut scratch = [0u8; 8192];
+        let to_read = buf.len().min(scratch.len());
+        let got = match self.inner.read(&mut scratch[..to_read]) {
+            Ok(0) => return Ok(0),
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+
+        let (filtered, events) = self.filter.process(&scratch[..got]);
+
+        // Forward every OSC event to the main-thread drain channel.
+        // Channel full / disconnected is silently ignored — the
+        // reader thread must never block on event routing per
+        // `plans/osc-integration-spec.md` §9 "Never".
+        for event in events {
+            let _ = self.event_tx.send(event);
+        }
+
+        if filtered.is_empty() {
+            // Entire chunk was OSC — nothing for alacritty to parse
+            // right now. Ok(0) here tells alacritty's read loop
+            // "nothing more for now" (see alacritty's `event_loop.rs`
+            // comment on Ok(0)). Next poll cycle picks up if the PTY
+            // has more data.
+            return Ok(0);
+        }
+
+        if filtered.len() <= buf.len() {
+            buf[..filtered.len()].copy_from_slice(&filtered);
+            Ok(filtered.len())
+        } else {
+            // Rare: filtered output larger than caller's buffer.
+            // (Can happen when inner read was bigger than buf and
+            // everything passed through.) Fill buf and stash the
+            // rest for the next call.
+            buf.copy_from_slice(&filtered[..buf.len()]);
+            self.pending = filtered[buf.len()..].to_vec();
+            self.pending_pos = 0;
+            Ok(buf.len())
+        }
+    }
+}
+
+/// Wrapper around `tty::Pty` that reroutes reads through the OSC
+/// interceptor. Delegates everything else untouched — register,
+/// reregister, deregister, writer, child event, resize.
+#[cfg(unix)]
+pub struct FilterPty {
+    inner: tty::Pty,
+    filter_reader: FilterReader,
+}
+
+#[cfg(unix)]
+impl FilterPty {
+    pub fn new(
+        mut pty: tty::Pty,
+        event_tx: StdSender<OscEvent>,
+    ) -> std::io::Result<Self> {
+        // Duplicate the master fd so the filter reader owns its own
+        // `File` handle. Both handles point to the same kernel fd;
+        // reads on either advance the shared kernel buffer.
+        let duped = dup_file(pty.reader())?;
+        Ok(Self {
+            inner: pty,
+            filter_reader: FilterReader::new(duped, event_tx),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl EventedReadWrite for FilterPty {
+    type Reader = FilterReader;
+    type Writer = std::fs::File;
+
+    unsafe fn register(
+        &mut self,
+        poll: &Arc<polling::Poller>,
+        interest: polling::Event,
+        poll_opts: polling::PollMode,
+    ) -> std::io::Result<()> {
+        unsafe { self.inner.register(poll, interest, poll_opts) }
+    }
+
+    fn reregister(
+        &mut self,
+        poll: &Arc<polling::Poller>,
+        interest: polling::Event,
+        poll_opts: polling::PollMode,
+    ) -> std::io::Result<()> {
+        self.inner.reregister(poll, interest, poll_opts)
+    }
+
+    fn deregister(&mut self, poll: &Arc<polling::Poller>) -> std::io::Result<()> {
+        self.inner.deregister(poll)
+    }
+
+    fn reader(&mut self) -> &mut FilterReader {
+        &mut self.filter_reader
+    }
+
+    fn writer(&mut self) -> &mut std::fs::File {
+        self.inner.writer()
+    }
+}
+
+#[cfg(unix)]
+impl EventedPty for FilterPty {
+    fn next_child_event(&mut self) -> Option<ChildEvent> {
+        self.inner.next_child_event()
+    }
+}
+
+#[cfg(unix)]
+impl OnResize for FilterPty {
+    fn on_resize(&mut self, window_size: WindowSize) {
+        self.inner.on_resize(window_size);
     }
 }

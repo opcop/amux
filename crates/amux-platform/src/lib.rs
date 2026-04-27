@@ -1,3 +1,5 @@
+pub mod agent_monitor;
+pub mod ai_usage;
 pub mod capabilities;
 pub mod common;
 pub mod dirs;
@@ -8,6 +10,7 @@ pub mod path_mapper;
 pub mod process;
 pub mod services;
 pub mod shell;
+pub mod socket_notify;
 pub mod sys_metrics;
 pub mod terminal;
 pub mod terminal_output;

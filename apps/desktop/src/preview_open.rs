@@ -30,6 +30,8 @@
 
 #![cfg(feature = "gpui")]
 
+use gpui::Context;
+
 use crate::gpui_entry::GpuiShellView;
 
 // ─── Pure helpers ──────────────────────────────────────────────
@@ -273,34 +275,46 @@ pub(crate) fn extract_cwd_from_active_title(view: &GpuiShellView) -> Option<Stri
 ///   3. Live process cwd (sysinfo on Windows, /proc on Linux).
 ///   4. Saved spawn-time cwd from the tab (stale after `cd`).
 pub(crate) fn resolve_active_cwd(view: &GpuiShellView) -> Option<String> {
-    if let Some(cwd) = extract_cwd_from_active_title(view) {
-        let resolved = maybe_convert_wsl_path(view, &cwd);
+    let title_raw = extract_cwd_from_active_title(view);
+    if let Some(ref cwd) = title_raw {
+        let resolved = maybe_convert_wsl_path(view, cwd);
         if std::path::Path::new(&resolved).is_dir() {
+            eprintln!("[amux-cwd] resolved via TITLE: {resolved}");
             return Some(resolved);
         }
     }
 
-    if let Some(cwd) = extract_cwd_from_prompt(view) {
-        let resolved = maybe_convert_wsl_path(view, &cwd);
+    let prompt_raw = extract_cwd_from_prompt(view);
+    if let Some(ref cwd) = prompt_raw {
+        let resolved = maybe_convert_wsl_path(view, cwd);
         if std::path::Path::new(&resolved).is_dir() {
+            eprintln!("[amux-cwd] resolved via PROMPT: {resolved}");
             return Some(resolved);
         }
     }
 
-    if let Some(cwd) = view.terminal_manager().active_process_cwd() {
-        let resolved = maybe_convert_wsl_path(view, &cwd);
+    let process_raw = view.terminal_manager().active_process_cwd();
+    if let Some(ref cwd) = process_raw {
+        let resolved = maybe_convert_wsl_path(view, cwd);
         if std::path::Path::new(&resolved).is_dir() {
+            eprintln!("[amux-cwd] resolved via PROCESS: {resolved}");
             return Some(resolved);
         }
     }
 
-    if let Some(cwd) = view.terminal_manager().active_saved_cwd() {
-        let resolved = maybe_convert_wsl_path(view, &cwd);
+    let saved_raw = view.terminal_manager().active_saved_cwd();
+    if let Some(ref cwd) = saved_raw {
+        let resolved = maybe_convert_wsl_path(view, cwd);
         if std::path::Path::new(&resolved).is_dir() {
+            eprintln!("[amux-cwd] resolved via SAVED: {resolved}");
             return Some(resolved);
         }
     }
 
+    eprintln!(
+        "[amux-cwd] all sources failed. title={:?} prompt={:?} process={:?} saved={:?}",
+        title_raw, prompt_raw, process_raw, saved_raw
+    );
     None
 }
 
@@ -310,19 +324,25 @@ pub(crate) fn resolve_active_cwd(view: &GpuiShellView) -> Option<String> {
 pub(crate) fn resolve_best_cwd(view: &GpuiShellView) -> Option<String> {
     if let Some(cwd) = resolve_active_cwd(view) {
         if std::path::Path::new(&cwd).join(".git").exists() {
+            eprintln!("[amux-cwd] best: cwd itself is git root: {cwd}");
             return Some(cwd);
         }
         let mut dir = std::path::PathBuf::from(&cwd);
         for _ in 0..10 {
             if dir.join(".git").exists() {
-                return Some(dir.to_string_lossy().to_string());
+                let r = dir.to_string_lossy().to_string();
+                eprintln!("[amux-cwd] best: walked up to git root: {r} (from {cwd})");
+                return Some(r);
             }
             if !dir.pop() { break; }
         }
+        eprintln!("[amux-cwd] best: no git root found, using raw cwd: {cwd}");
+        return Some(cwd);
     }
 
     // Fallback: GUI process CWD (often the launch folder).
     if let Ok(gui_cwd) = std::env::current_dir() {
+        eprintln!("[amux-cwd] best: falling back to GUI process cwd: {}", gui_cwd.display());
         if gui_cwd.join(".git").exists() {
             return Some(gui_cwd.to_string_lossy().to_string());
         }
@@ -1253,24 +1273,61 @@ fn scan_quoted(row: &[char], col: usize) -> Option<(usize, usize)> {
 // ─── File picker + preview launch ──────────────────────────────
 
 /// Open the file picker (Ctrl+P, right-click, `amux preview`).
-pub(crate) fn open_file_picker(view: &mut GpuiShellView) {
+///
+/// Inserts an empty `loading` picker synchronously so Ctrl+P pops
+/// open on the same frame as the keystroke, then kicks off the
+/// recursive directory walk on a background thread via
+/// `smol::unblock`. When the scan completes, `apply_scan` fills in
+/// the cached file list on whichever picker is currently open —
+/// preserving any query the user started typing during the scan,
+/// and silently doing nothing if the user has already closed it.
+pub(crate) fn open_file_picker(view: &mut GpuiShellView, cx: &mut Context<GpuiShellView>) {
     let cwd = resolve_best_cwd(view);
-    view.file_picker = Some(crate::gpui_preview::FilePickerState::new(cwd));
+    spawn_file_picker(view, cx, cwd);
 }
 
 /// Open the file picker scoped to a specific CWD, falling back to
 /// `resolve_best_cwd` if the supplied path isn't a directory.
-pub(crate) fn open_file_picker_with_cwd(view: &mut GpuiShellView, cwd: Option<String>) {
+pub(crate) fn open_file_picker_with_cwd(
+    view: &mut GpuiShellView,
+    cx: &mut Context<GpuiShellView>,
+    cwd: Option<String>,
+) {
     let cwd = cwd.map(|p| maybe_convert_wsl_path(view, &p))
         .filter(|p| std::path::Path::new(p).is_dir())
         .or_else(|| resolve_best_cwd(view));
-    view.file_picker = Some(crate::gpui_preview::FilePickerState::new(cwd));
+    spawn_file_picker(view, cx, cwd);
+}
+
+/// Shared tail of the two `open_file_picker*` entry points:
+/// mount an empty picker, spawn the scan, fill in results on return.
+fn spawn_file_picker(
+    view: &mut GpuiShellView,
+    cx: &mut Context<GpuiShellView>,
+    cwd: Option<String>,
+) {
+    view.file_picker = Some(crate::gpui_preview::FilePickerState::loading(cwd.clone()));
+    cx.spawn(async move |this, cx| {
+        let files = smol::unblock(move || {
+            crate::gpui_preview::FilePickerState::scan_all_files(cwd)
+        }).await;
+        let _ = this.update(cx, |view: &mut GpuiShellView, cx| {
+            if let Some(picker) = view.file_picker.as_mut() {
+                picker.apply_scan(files);
+                cx.notify();
+            }
+        });
+    }).detach();
 }
 
 /// Open a file for preview from the currently-open file picker,
 /// resolving the picker's captured `base_dir` against relative
 /// paths so the result matches the file list the user saw.
-pub(crate) fn open_preview_from_picker(view: &mut GpuiShellView, index: usize) {
+pub(crate) fn open_preview_from_picker(
+    view: &mut GpuiShellView,
+    cx: &mut Context<GpuiShellView>,
+    index: usize,
+) {
     let (path, base_dir) = if let Some(ref picker) = view.file_picker {
         (picker.matches.get(index).cloned(), picker.base_dir.clone())
     } else {
@@ -1285,14 +1342,25 @@ pub(crate) fn open_preview_from_picker(view: &mut GpuiShellView, index: usize) {
         } else {
             path
         };
-        open_preview_file(view, &full_path);
+        open_preview_file(view, cx, &full_path);
     }
 }
 
 /// Open a file for preview by path. Resolves relative paths
 /// against the active pane's CWD, then loads the preview state
 /// and adds a preview tab to the active pane.
-pub(crate) fn open_preview_file(view: &mut GpuiShellView, path: &str) {
+///
+/// The tab + a "Loading…" placeholder are inserted synchronously so
+/// the UI reacts immediately; the actual file read + markdown /
+/// syntax parse runs on a background thread via `smol::unblock` and
+/// replaces the placeholder when it finishes. Without this split,
+/// opening a large markdown file stalls the render thread for the
+/// full pulldown-cmark + highlighter pass.
+pub(crate) fn open_preview_file(
+    view: &mut GpuiShellView,
+    cx: &mut Context<GpuiShellView>,
+    path: &str,
+) {
     let full_path = if std::path::Path::new(path).is_absolute() {
         path.to_string()
     } else {
@@ -1300,15 +1368,48 @@ pub(crate) fn open_preview_file(view: &mut GpuiShellView, path: &str) {
             .map(|cwd| std::path::PathBuf::from(cwd).join(path).to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string())
     };
-    if let Some(state) = crate::gpui_preview::PreviewState::load(&full_path) {
-        let active_pid = view.terminal_manager().active_pane_id().cloned();
-        if let Some(ref pid) = active_pid {
-            if let Some(pane) = view.terminal_manager_mut().get_pane_mut(pid) {
-                pane.add_preview_tab(&full_path);
-            }
+
+    // Register the tab + placeholder synchronously so the user sees
+    // the preview panel update on the same frame as the click.
+    let active_pid = view.terminal_manager().active_pane_id().cloned();
+    if let Some(ref pid) = active_pid {
+        if let Some(pane) = view.terminal_manager_mut().get_pane_mut(pid) {
+            pane.add_preview_tab(&full_path);
         }
-        view.preview_tabs.insert(full_path, state);
     }
+    view.preview_tabs.insert(
+        full_path.clone(),
+        crate::gpui_preview::PreviewState::loading_placeholder(&full_path),
+    );
+    // Attach the filesystem watcher eagerly, not after the background
+    // load finishes. A user who saves the file in the few hundred ms
+    // between `open_preview_file` and the first parse would otherwise
+    // miss that first event — the watcher has to be installed before
+    // the edit happens, not after.
+    view.preview_watch_path(&full_path);
+
+    let task_path = full_path.clone();
+    cx.spawn(async move |this, cx| {
+        let loaded = smol::unblock(move || {
+            crate::gpui_preview::PreviewState::load(&task_path)
+        }).await;
+        let _ = this.update(cx, move |view: &mut GpuiShellView, cx| {
+            match loaded {
+                Some(state) => {
+                    view.preview_tabs.insert(full_path, state);
+                }
+                None => {
+                    // Read or parse failed — drop the placeholder so
+                    // the tab doesn't stay stuck on "Loading…". Also
+                    // drop the watch, since there's nothing left to
+                    // reload into.
+                    view.preview_tabs.remove(&full_path);
+                    view.preview_unwatch_path(&full_path);
+                }
+            }
+            cx.notify();
+        });
+    }).detach();
 }
 
 /// Open a preview for a path that may be relative to a specific
@@ -1317,6 +1418,7 @@ pub(crate) fn open_preview_file(view: &mut GpuiShellView, path: &str) {
 /// `resolve_active_cwd` if the supplied CWD isn't a directory.
 pub(crate) fn open_preview_file_with_cwd(
     view: &mut GpuiShellView,
+    cx: &mut Context<GpuiShellView>,
     path: &str,
     cwd: Option<&str>,
 ) {
@@ -1330,7 +1432,7 @@ pub(crate) fn open_preview_file_with_cwd(
             .map(|cwd| std::path::PathBuf::from(cwd).join(path).to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string())
     };
-    open_preview_file(view, &full_path);
+    open_preview_file(view, cx, &full_path);
 }
 
 /// Handle a Cmd/Ctrl+click at a terminal cell. Delegates to
@@ -1342,12 +1444,17 @@ pub(crate) fn open_preview_file_with_cwd(
 /// Returns `true` iff a hit was found and dispatched. Callers use
 /// the return to decide whether to consume the click or fall
 /// through to normal selection.
-pub(crate) fn try_preview_path_at(view: &mut GpuiShellView, col: usize, row: usize) -> bool {
+pub(crate) fn try_preview_path_at(
+    view: &mut GpuiShellView,
+    cx: &mut Context<GpuiShellView>,
+    col: usize,
+    row: usize,
+) -> bool {
     let Some(term) = view.terminal_manager().active_terminal_ref() else { return false; };
     let Some(hit) = resolve_click_at_term(term, view, col, row) else { return false; };
     match hit.kind {
         ClickKind::File(absolute) => {
-            open_preview_file(view, &absolute);
+            open_preview_file(view, cx, &absolute);
         }
         ClickKind::Url(url) => {
             open_url_external(&url);

@@ -113,10 +113,25 @@ impl PtySession {
             .map_err(|e| format!("failed to write to PTY: {}", e))
     }
 
-    /// Drain all pending output from the reader thread (never blocks)
+    /// Drain all pending output from the reader thread (never blocks).
+    ///
+    /// Degrades gracefully on mutex poison: if the reader thread
+    /// panicked while holding `output_buf`, returning an empty Vec
+    /// here lets the main thread keep running and servicing other
+    /// sessions instead of propagating the panic through the render
+    /// loop. The panic hook has already written a crash log.
     fn drain_output(&self) -> Vec<u8> {
-        let mut buf = self.output_buf.lock().unwrap();
-        std::mem::take(&mut *buf)
+        match self.output_buf.lock() {
+            Ok(mut buf) => std::mem::take(&mut *buf),
+            Err(poisoned) => {
+                // Recover the inner buffer anyway — the data in it is
+                // valid bytes, only the lock's "some thread panicked
+                // while holding me" bit is set. Clear it so future
+                // drains behave normally.
+                let mut buf = poisoned.into_inner();
+                std::mem::take(&mut *buf)
+            }
+        }
     }
 
     fn stop_reader(&mut self) {

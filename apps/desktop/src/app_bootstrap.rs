@@ -548,6 +548,30 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                                 }
                                 this.terminal_manager_mut().clear_active_activity();
                             }
+
+                            // Drain socket notifications from external tools
+                            if let Some(ref rx) = this.socket_notify_rx {
+                                while let Ok(notif) = rx.try_recv() {
+                                    let color = match notif.kind.as_str() {
+                                        "error" => 0xf38ba8u32,
+                                        "agent_status" => 0x81a2be,
+                                        _ => 0xf9e2af,
+                                    };
+                                    let msg = if notif.body.is_empty() {
+                                        notif.title.clone()
+                                    } else {
+                                        format!("{} — {}", notif.title, notif.body)
+                                    };
+                                    this.toasts.push(crate::state::ToastNotification {
+                                        message: msg,
+                                        color,
+                                        frame_created: frame,
+                                        pane_id: amux_platform::terminal::manager::PaneId(notif.pane_id),
+                                        tab_index: 0,
+                                    });
+                                }
+                            }
+
                             // Expire toasts older than ~3 seconds
                             this.toasts.retain(|t| {
                                 frame.wrapping_sub(t.frame_created) < 180
@@ -567,7 +591,11 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                 })
                 .detach();
 
-                GpuiShellView::new(app, model, config, cx)
+                let mut view = GpuiShellView::new(app, model, config, cx);
+                // Start the Unix socket notification listener so external
+                // tools (Claude Code hooks, etc.) can push notifications.
+                view.socket_notify_rx = amux_platform::socket_notify::start_listener();
+                view
             });
             // Wrap in gpui-component Root (required for Input component)
             cx.new(|cx| gpui_component::Root::new(view, window, cx))

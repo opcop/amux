@@ -601,7 +601,16 @@ impl GpuiShellView {
         if let Ok(env) = serde_json::from_str::<LayoutsEnvelope>(&data) {
             return env.layouts;
         }
-        serde_json::from_str(&data).unwrap_or_default()
+        match serde_json::from_str(&data) {
+            Ok(map) => map,
+            Err(e) => {
+                eprintln!(
+                    "amux: failed to parse {} as layouts envelope or legacy map ({e}); starting with empty layouts",
+                    path.display()
+                );
+                std::collections::HashMap::new()
+            }
+        }
     }
 }
 

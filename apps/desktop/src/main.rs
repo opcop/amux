@@ -62,6 +62,17 @@ fn main() {
     crash::install(crash::crash_log_dir());
     metrics::startup_phase("crash_hook_installed");
 
+    // Prevent nested multiplexer: running amux inside amux would
+    // re-inject AMUX into child processes recursively and break
+    // terminal state. Exit early with a clear message.
+    if std::env::var("AMUX").is_ok() {
+        eprintln!("amux: already running inside an amux session (AMUX=1 is set).");
+        eprintln!("amux: nested multiplexers are not supported. Use Ctrl+Shift+N");
+        eprintln!("amux: to open a new workspace in the existing session, or");
+        eprintln!("amux: run `amux --workspace <path>` from outside amux.");
+        std::process::exit(1);
+    }
+
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let parsed = parse_cli(&raw_args);
 
