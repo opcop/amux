@@ -427,12 +427,27 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                             if any_dirty {
                                 this.last_dirty_frame = this.cursor_blink_frame;
                             }
-                            // Visual bell: flash the terminal background briefly
-                            if let Some(tm) = this.workspace_terminals.get(&this.active_workspace_id) {
-                                for term in tm.all_terminals() {
-                                    if term.take_bell() {
-                                        this.bell_flash_frame = Some(this.cursor_blink_frame);
-                                        break;
+                            // Visual bell: flash the terminal background briefly.
+                            // Cooldown prevents rapid re-flashing from shells that
+                            // emit BEL on every input error (tab-complete failure,
+                            // backspace at bol, etc.). ~500ms = ~8 frames at 16ms.
+                            this.bell_cooldown = this.bell_cooldown.saturating_sub(1);
+                            if this.bell_cooldown == 0 {
+                                if let Some(tm) = this.workspace_terminals.get(&this.active_workspace_id) {
+                                    for term in tm.all_terminals() {
+                                        if term.take_bell() {
+                                            this.bell_flash_frame = Some(this.cursor_blink_frame);
+                                            this.bell_cooldown = 30;
+                                            break;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Drain any pending bell during cooldown so it
+                                // doesn't flash right after cooldown expires.
+                                if let Some(tm) = this.workspace_terminals.get(&this.active_workspace_id) {
+                                    for term in tm.all_terminals() {
+                                        term.take_bell();
                                     }
                                 }
                             }

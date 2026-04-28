@@ -43,6 +43,12 @@ pub(crate) struct GpuiShellView {
     /// Frame when the last terminal bell (BEL) occurred. None = no bell.
     /// Used to render a brief visual flash when the bell rings.
     pub(crate) bell_flash_frame: Option<u32>,
+    /// Cooldown counter for bell flash. Set to ~30 frames after each
+    /// flash to prevent rapid re-triggering from shells that emit BEL
+    /// on every input boundary error (tab-complete failure, backspace
+    /// at bol, etc.). Only a single distinct bell per cooldown period
+    /// produces a flash.
+    pub(crate) bell_cooldown: u32,
     pub(crate) renaming_workspace:
         Option<(String, gpui::Entity<gpui_component::input::InputState>)>,
     pub(crate) renaming_tab: Option<(
@@ -526,6 +532,7 @@ impl GpuiShellView {
             cursor_blink_frame: 0,
             last_dirty_frame: 0,
             bell_flash_frame: None,
+            bell_cooldown: 0,
             renaming_workspace: None,
             renaming_tab: None,
             search_state: None,
