@@ -182,7 +182,9 @@ impl gpui::EntityInputHandler for GpuiShellView {
         // Clear IME preedit (composition committed)
         self.ime_preedit = None;
         // Reset cursor blink so cursor is visible immediately after typing
+        // and cancel any pending bell flash (typing should suppress the flash)
         self.cursor_blink_frame = 0;
+        self.bell_flash_frame = None;
         cx.notify();
     }
 

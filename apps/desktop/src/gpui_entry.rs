@@ -1661,8 +1661,9 @@ Environment variables available: $AMUX_PANE_ID, $AMUX_WORKSPACE, $AMUX_VERSION"#
 
     /// Handle key input for the terminal
     pub fn handle_terminal_input(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // Reset cursor blink on any terminal input
+        // Reset cursor blink on any terminal input and cancel any pending bell flash
         self.cursor_blink_frame = 0;
+        self.bell_flash_frame = None;
         use amux_platform::terminal::keys;
         
         // GPUI sends lowercase keys but to_pty expects title case

@@ -430,7 +430,8 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                             // Visual bell: flash the terminal background briefly.
                             // Cooldown prevents rapid re-flashing from shells that
                             // emit BEL on every input error (tab-complete failure,
-                            // backspace at bol, etc.). ~500ms = ~8 frames at 16ms.
+                            // backspace at bol, ↓ at bottom of history, etc.).
+                            // 60 frames ≈ 1s at 60fps.
                             this.bell_cooldown = this.bell_cooldown.saturating_sub(1);
                             if this.bell_cooldown == 0 {
                                 if let Some(tm) = this.workspace_terminals.get(&this.active_workspace_id) {

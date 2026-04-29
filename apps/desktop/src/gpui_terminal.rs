@@ -570,7 +570,7 @@ pub fn render_alacritty_terminal(
     bell_flash_on: bool,
 ) -> impl IntoElement {
     // Tint the background yellow briefly when the bell rings.
-    // Linear interpolation: bg → yellow (0xb58900), 25% blend.
+    // Linear interpolation: bg → yellow (0xb58900), 50% blend.
     let mut bell_theme = if bell_flash_on {
         let mut t = theme.clone();
         let bg = theme.bg;
