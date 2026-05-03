@@ -17,8 +17,8 @@ use crate::gpui_entry::{
     SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
 use crate::gpui_layout_renderer::{
-    render_agent_picker, render_context_menu, render_layout, render_new_tab_picker,
-    render_pane_picker, render_template_picker,
+    render_agent_picker, render_ai_profile_picker, render_api_key_input, render_context_menu,
+    render_help_overlay, render_layout, render_new_tab_picker, render_pane_picker, render_template_picker,
 };
 use crate::gpui_status_bar::{render_status_bar, AgentSummary, StatusBarData};
 use crate::gpui_workspace_sidebar::{AgentSidebarItem, SidebarMode};
@@ -47,6 +47,12 @@ impl Render for GpuiShellView {
         // push); the formatted snapshot is only materialized below if
         // AMUX_DEBUG_STATS=1.
         let _frame_guard = crate::metrics::FrameGuard::start();
+
+        // Check if "About Amux" menu item was clicked
+        if crate::app_bootstrap::ABOUT_REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.show_help = !self.show_help;
+            cx.notify();
+        }
 
         // Input latency: if a keystroke arrived since the last
         // frame, compute its latency so the HUD can display it.
@@ -86,10 +92,10 @@ impl Render for GpuiShellView {
             //   - Click terminal  → root's track_focus + focus_parent()
             //   - Click URL Input → Input's track_focus (with prevent_default)
             //   - Click WebView2  → WebView2 gets OS focus, GPUI does nothing
-        } else if self.renaming_workspace.is_some() || self.renaming_tab.is_some() {
-            // Rename active: leave focus on the Input. Re-grabbing
-            // the root handle here races the focus `on_next_frame`
-            // the rename helper just scheduled.
+        } else if self.renaming_workspace.is_some() || self.renaming_tab.is_some() || self.api_key_input.is_some() {
+            // Rename / API key input active: leave focus on the Input.
+            // Re-grabbing the root handle here races the focus
+            // `on_next_frame` the rename/input helper just scheduled.
         } else {
             // No browser, no rename — safe to ensure terminal
             // always has focus.
@@ -98,7 +104,7 @@ impl Render for GpuiShellView {
             }
         }
 
-        // Sync URL bar when navigation changed the page address.
+        // Sync URL bar and tab title when navigation changed the page address.
         // Only update when the Input is NOT focused (don't overwrite user's editing).
         if let Some(url) = self.pending_url_bar_update.take() {
             let child_input_focused = self.active_browser_entry()
@@ -109,11 +115,15 @@ impl Render for GpuiShellView {
                 .unwrap_or(false);
             if child_input_focused {
                 self.pending_url_bar_update = Some(url);
-            } else if let Some((_, entry)) = self.active_browser_entry() {
-                let input = entry.url_input.clone();
-                input.update(cx, |state, cx| {
-                    state.set_value(url, window, cx);
-                });
+            } else {
+                // Update the tab title in TerminalManager to show the domain
+                self.terminal_manager_mut().update_active_browser_url(&url);
+                if let Some((_, entry)) = self.active_browser_entry() {
+                    let input = entry.url_input.clone();
+                    input.update(cx, |state, cx| {
+                        state.set_value(url, window, cx);
+                    });
+                }
             }
         }
 
@@ -155,12 +165,12 @@ impl Render for GpuiShellView {
             let sidebar_w = self.sidebar_width();
             let vp = window.viewport_size();
             let content_w = vp.width.as_f32() - sidebar_w;
-            let status_bar_h = 34.0_f32;
+            let status_bar_h = crate::theme::STATUS_BAR_H;
             // macOS transparent titlebar uses pt(28px) on the root div,
             // which eats into the viewport but isn't accounted for by
             // status_bar_h alone. Without subtracting it, the terminal
             // computes 1-2 extra rows that get clipped at the bottom.
-            let titlebar_h = if cfg!(target_os = "macos") { 28.0_f32 } else { 0.0 };
+            let titlebar_h = if cfg!(target_os = "macos") { crate::theme::TITLEBAR_H } else { 0.0 };
             let content_h = vp.height.as_f32() - status_bar_h - titlebar_h;            if let Some(zpid) = self.zoomed_pane.clone() {
                 // Zoom mode: give the zoomed pane the full content area
                 self.terminal_manager_mut().resize_pane_terminals(
@@ -1189,7 +1199,9 @@ impl Render for GpuiShellView {
                                             let ws_name = item.name.clone();
                                             let drag_name = item.name.clone();
                                             let ws_id_del = item.id.clone();
+                                            let ws_id_confirm = ws_id_del.clone();
                                             let can_delete = workspaces.len() > 1;
+                                            let is_confirming = self.confirming_delete_ws.as_ref() == Some(&ws_id_del);
                                             let is_renaming = self.renaming_workspace.as_ref()
                                                 .map(|(id, _)| id == &item.id)
                                                 .unwrap_or(false);
@@ -1234,6 +1246,7 @@ impl Render for GpuiShellView {
                                                                 cx,
                                                             );
                                                         } else if this.renaming_workspace.is_none() {
+                                                            this.confirming_delete_ws = None;
                                                             let _ = this.app.activate_workspace(&ws_id);
                                                             this.switch_workspace_terminal(&ws_id);
                                                             this.refresh_model();
@@ -1305,22 +1318,35 @@ impl Render for GpuiShellView {
                                                                     .px(px(3.0))
                                                                     .rounded(px(3.0))
                                                                     .text_xs()
-                                                                    .text_color(rgb(crate::theme::SURFACE_DIM))
-                                                                    .group_hover(&group_name, |d| {
-                                                                        d.text_color(rgb(crate::theme::TEXT_DIM))
+                                                                    .when(is_confirming, |d| {
+                                                                        d.text_color(rgb(crate::theme::DANGER))
+                                                                            .bg(rgb(crate::theme::DANGER_BG))
                                                                     })
-                                                                    .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::DANGER)))
-                                                                    .child("✕")
+                                                                    .when(!is_confirming, |d| {
+                                                                        d.text_color(rgb(crate::theme::SURFACE_DIM))
+                                                                            .group_hover(&group_name, |d| {
+                                                                                d.text_color(rgb(crate::theme::TEXT_DIM))
+                                                                            })
+                                                                            .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::DANGER)))
+                                                                    })
+                                                                    .child(if is_confirming { "Delete?" } else { "✕" })
                                                                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                                                                        let _ = this.app.run_command(&format!("workspace close {}", ws_id_del));
-                                                                        this.workspace_terminals.remove(&ws_id_del);
-                                                                        this.workspace_order.retain(|id| id != &ws_id_del);
-                                                                        this.refresh_model();
-                                                                        if this.active_workspace_id == ws_id_del {
-                                                                            if let Some(first) = this.model.workspace_items.first() {
-                                                                                let new_id = first.id.clone();
-                                                                                this.switch_workspace_terminal(&new_id);
+                                                                        if this.confirming_delete_ws.as_ref() == Some(&ws_id_confirm) {
+                                                                            // Second click: actually delete
+                                                                            this.confirming_delete_ws = None;
+                                                                            let _ = this.app.run_command(&format!("workspace close {}", ws_id_confirm));
+                                                                            this.workspace_terminals.remove(&ws_id_confirm);
+                                                                            this.workspace_order.retain(|id| id != &ws_id_confirm);
+                                                                            this.refresh_model();
+                                                                            if this.active_workspace_id == ws_id_confirm {
+                                                                                if let Some(first) = this.model.workspace_items.first() {
+                                                                                    let new_id = first.id.clone();
+                                                                                    this.switch_workspace_terminal(&new_id);
+                                                                                }
                                                                             }
+                                                                        } else {
+                                                                            // First click: enter confirmation state
+                                                                            this.confirming_delete_ws = Some(ws_id_confirm.clone());
                                                                         }
                                                                         cx.notify();
                                                                     }))
@@ -1496,9 +1522,9 @@ impl Render for GpuiShellView {
                                 let sidebar_w = self.sidebar_width();
                                 let vp = window.viewport_size();
                                 let content_w = vp.width.as_f32() - sidebar_w;
-                                let status_bar_h = 34.0_f32;
+                                let status_bar_h = crate::theme::STATUS_BAR_H;
                                 // Must match the resize calculation exactly.
-                                let titlebar_h = if cfg!(target_os = "macos") { 28.0_f32 } else { 0.0 };
+                                let titlebar_h = if cfg!(target_os = "macos") { crate::theme::TITLEBAR_H } else { 0.0 };
                                 let content_h = vp.height.as_f32() - status_bar_h - titlebar_h;
                                 // Cursor blinks: visible for 30 frames, hidden for 30 frames (~500ms each at 60fps)
                                 let cursor_blink_on = (self.cursor_blink_frame % 60) < 30;
@@ -1596,14 +1622,20 @@ impl Render for GpuiShellView {
                     },
                     agents: self.terminal_manager().agent_summaries()
                         .into_iter()
-                        .map(|(name, icon, color)| AgentSummary {
+                        .map(|(name, icon, color, pane_id, tab_index)| AgentSummary {
                             name,
                             status_icon: icon,
                             color,
+                            pane_id,
+                            tab_index,
                         })
                         .collect(),
                     crash_notice: self.crash_notice,
                     debug_stats: crate::metrics::snapshot(),
+                    // Show per-pane profile if set, otherwise workspace-level
+                    active_ai_profile: self.terminal_manager().active_pane_id()
+                        .and_then(|pid| self.terminal_manager().pane_profile_id(pid).map(|s| s.to_string()))
+                        .or_else(|| self.active_ai_profile.clone()),
                 },
                 cx,
             ))
@@ -1746,7 +1778,7 @@ impl Render for GpuiShellView {
                     // match content coordinates. On Windows/Linux there's no
                     // titlebar padding, so no offset is needed.
                     #[cfg(target_os = "macos")]
-                    let titlebar_inset = 28.0_f32;
+                    let titlebar_inset = crate::theme::TITLEBAR_H;
                     #[cfg(not(target_os = "macos"))]
                     let titlebar_inset = 0.0_f32;
                     Some((ox + pad + col as f32 * m.width, oy + row as f32 * m.height + titlebar_inset))
@@ -1777,6 +1809,14 @@ impl Render for GpuiShellView {
             .when_some(self.agent_picker.clone(), |this, picker| {
                 this.child(render_agent_picker(&picker, cx))
             })
+            // AI profile picker overlay
+            .when_some(self.ai_profile_picker.clone(), |this, picker| {
+                this.child(render_ai_profile_picker(&picker, &self.active_ai_profile, cx))
+            })
+            // API key input overlay (for preset activation)
+            .when_some(self.api_key_input.clone(), |this, input| {
+                this.child(render_api_key_input(&input, cx))
+            })
             // New-tab dropdown picker (from +▾ button)
             .when_some(self.new_tab_picker.clone(), |this, picker| {
                 this.child(render_new_tab_picker(&picker, cx))
@@ -1788,6 +1828,10 @@ impl Render for GpuiShellView {
             // Pane picker overlay (Send to Pane)
             .when_some(self.pane_picker.clone(), |this, picker| {
                 this.child(render_pane_picker(&picker, cx))
+            })
+            // Help overlay (F1)
+            .when(self.show_help, |this| {
+                this.child(render_help_overlay(cx))
             })
             // Agent toast notifications (bottom-right)
             .when(!self.toasts.is_empty(), |this| {
@@ -1811,8 +1855,10 @@ impl Render for GpuiShellView {
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.terminal_manager_mut().set_active_pane(&pane_id);
                             this.terminal_manager_mut().set_active_tab_in_pane(tab_idx);
-                            // Dismiss all toasts on click
-                            this.toasts.clear();
+                            // Dismiss only the clicked toast
+                            if i < this.toasts.len() {
+                                this.toasts.remove(i);
+                            }
                             cx.notify();
                         }))
                         .into_any_element()

@@ -276,6 +276,14 @@ impl GpuiShellView {
             return;
         }
 
+        // Help overlay: consume all keys except Escape (handled later)
+        if self.show_help {
+            let keystr = event.keystroke.key.as_str();
+            if keystr != "escape" {
+                return;
+            }
+        }
+
         // If a gpui-component Input has focus, let it handle keys.
         // Only intercept Escape (return focus to terminal).
         if let Some((_, entry)) = self.active_browser_entry() {
@@ -597,6 +605,61 @@ impl GpuiShellView {
             return;
         }
 
+        // AI profile picker handling
+        if self.ai_profile_picker.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.ai_profile_picker = None;
+                }
+                "enter" => {
+                    self.execute_ai_profile_picker(window, cx);
+                }
+                "up" | "arrowup" => {
+                    if let Some(ref mut p) = self.ai_profile_picker {
+                        if p.selected_index > 0 { p.selected_index -= 1; }
+                    }
+                }
+                "down" | "arrowdown" => {
+                    if let Some(ref mut p) = self.ai_profile_picker {
+                        if p.selected_index + 1 < p.items.len() { p.selected_index += 1; }
+                    }
+                }
+                k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
+                    let n = (k.as_bytes()[0] - b'0') as usize;
+                    let len = self.ai_profile_picker.as_ref().map(|p| p.items.len()).unwrap_or(0);
+                    if n >= 1 && n <= len {
+                        if let Some(ref mut picker) = self.ai_profile_picker {
+                            picker.selected_index = n - 1;
+                        }
+                        self.execute_ai_profile_picker(window, cx);
+                    }
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
+
+        // API key input handling — the Input component handles text
+        // input via ElementInputHandler, so we only intercept Escape
+        // and Enter here. All other keys pass through to the Input.
+        if self.api_key_input.is_some() {
+            match keystr.as_str() {
+                "escape" => {
+                    self.api_key_input = None;
+                    cx.notify();
+                    return;
+                }
+                "enter" => {
+                    self.execute_api_key_input(cx);
+                    cx.notify();
+                    return;
+                }
+                _ => {}
+            }
+            // Don't return — let the Input component handle the key
+        }
+
         // New-tab picker handling (+▾ dropdown)
         if self.new_tab_picker.is_some() {
             match keystr.as_str() {
@@ -795,6 +858,12 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
+                "ctrl+shift+i" => {
+                    // Open AI profile picker
+                    self.open_ai_profile_picker();
+                    cx.notify();
+                    return;
+                }
                 "ctrl+shift+n" => {
                     self.prompt_open_local_workspace(cx);
                     cx.notify();
@@ -817,6 +886,23 @@ impl GpuiShellView {
                     cx.notify();
                     return;
                 }
+                "ctrl+shift+h" => {
+                    self.show_help = !self.show_help;
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+=" | "ctrl+shift++" => {
+                    let _ = self.app.run_command("font increase");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
+                "ctrl+shift+-" => {
+                    let _ = self.app.run_command("font decrease");
+                    self.refresh_model();
+                    cx.notify();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -834,9 +920,7 @@ impl GpuiShellView {
                     // through to the terminal's existing logic so the
                     // user doesn't lose Ctrl+C = SIGINT when the
                     // preview tab is focused but no text is selected.
-                    if self.active_preview_path().is_some()
-                        && !self.preview_selection_ranges.borrow().is_empty()
-                    {
+                    if self.has_preview_text_selection() {
                         self.copy_preview_selection(cx);
                         cx.notify();
                         return;
@@ -904,19 +988,6 @@ impl GpuiShellView {
                 }
                 "ctrl+q" => {
                     cx.quit();
-                    return;
-                }
-                // Font size
-                "ctrl+=" | "ctrl++" => {
-                    let _ = self.app.run_command("font increase");
-                    self.refresh_model();
-                    cx.notify();
-                    return;
-                }
-                "ctrl+-" => {
-                    let _ = self.app.run_command("font decrease");
-                    self.refresh_model();
-                    cx.notify();
                     return;
                 }
                 "ctrl+0" => {
@@ -1036,6 +1107,11 @@ impl GpuiShellView {
 
         // Terminal special keys (non-modifier or with any modifier)
         match keystr.as_str() {
+            "escape" if self.show_help => {
+                self.show_help = false;
+                cx.notify();
+                return;
+            }
             "enter" | "tab" | "backspace" | "escape" => {
                 self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
                 cx.notify();

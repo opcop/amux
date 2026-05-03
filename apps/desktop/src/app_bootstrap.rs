@@ -35,6 +35,11 @@ use crate::gpui_config::AmuxConfig;
 #[cfg(feature = "gpui")]
 use crate::gpui_entry::GpuiShellView;
 
+/// Global flag set by the "About Amux" menu item. The GpuiShellView
+/// checks and clears this each render frame to toggle the help overlay.
+pub(crate) static ABOUT_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Version tag for the squircle generation pipeline. Bump when
 /// the algorithm changes (radius, inner-square ratio, AA band,
 /// filter choice, ...) so stale on-disk caches are invalidated
@@ -342,9 +347,10 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
             cx.on_action(|_: &ShowAll, cx| {
                 cx.unhide_other_apps();
             });
-            // About — just a no-op for now; a future iteration can
-            // show a modal with version / build info.
-            cx.on_action(|_: &AboutAmux, _cx| {});
+            // About — toggles the help overlay on the GpuiShellView.
+            cx.on_action(|_: &AboutAmux, _cx| {
+                ABOUT_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
         }
         crate::metrics::startup_phase("macos_menubar_done");
 

@@ -74,6 +74,12 @@ pub(crate) struct GpuiShellView {
     pub(crate) template_picker: Option<TemplatePickerState>,
     /// Agent launcher picker
     pub(crate) agent_picker: Option<AgentPickerState>,
+    /// AI profile picker for switching model providers
+    pub(crate) ai_profile_picker: Option<AiProfilePickerState>,
+    /// API key input overlay for preset activation
+    pub(crate) api_key_input: Option<ApiKeyInputState>,
+    /// Active AI profile name (persisted per workspace via env_profile_id)
+    pub(crate) active_ai_profile: Option<String>,
     /// New-tab dropdown picker (from `+▾` button on tab bar)
     pub(crate) new_tab_picker: Option<NewTabPickerState>,
     /// IME preedit text (composition in progress)
@@ -178,6 +184,10 @@ pub(crate) struct GpuiShellView {
     /// `SocketNotification` messages; the 1 Hz poll loop drains them
     /// and creates toast notifications.
     pub(crate) socket_notify_rx: Option<std::sync::mpsc::Receiver<amux_platform::socket_notify::SocketNotification>>,
+    /// Help overlay showing keyboard shortcuts and commands.
+    pub(crate) show_help: bool,
+    /// Workspace pending delete confirmation (first click sets this, second click deletes)
+    pub(crate) confirming_delete_ws: Option<String>,
 }
 
 /// Per-row visual segment of a hovered file link: `(row, start_col,
@@ -201,9 +211,10 @@ pub(crate) struct HoverLinkState {
 // comment for scope policy. Imported here for internal use only.
 #[cfg(feature = "gpui")]
 pub(crate) use crate::state::{
-    AgentPickerState, ContextMenuState, NewTabPickerState, PanePickerState,
-    ResizeDragState, ScrollbarDragState, ScrollbarHit, SearchState,
-    SelectionAutoScrollState, TemplatePickerState, ToastNotification,
+    AgentPickerState, AiProfilePickerState, ApiKeyInputState, ContextMenuState,
+    NewTabPickerState, PanePickerState, ResizeDragState, ScrollbarDragState,
+    ScrollbarHit, SearchState, SelectionAutoScrollState, TemplatePickerState,
+    ToastNotification,
 };
 
 // Drag ghost views (`DragTab`, `DragWorkspace`) live in
@@ -502,6 +513,39 @@ impl GpuiShellView {
                 TerminalManager::with_scrollback(config.scrollback)
             };
             tm.set_workspace_name(&ws.name);
+            // Restore active AI profile from persisted layout
+            if let Some(profile_name) = tm.env_profile_id() {
+                let presets = crate::gpui_config::builtin_presets();
+                let profile_env = presets.iter()
+                    .find(|p| p.name == profile_name)
+                    .map(|p| {
+                        let key = config.ai_keys.get(p.name).cloned().unwrap_or_default();
+                        (p.env)(&key)
+                    })
+                    .or_else(|| {
+                        config.ai_profiles.iter()
+                            .find(|p| p.name == profile_name)
+                            .map(|p| p.env.clone())
+                    });
+                if let Some(env) = profile_env {
+                    tm.set_profile_env(env);
+                }
+            }
+            // Resolve per-pane profile IDs to env vars
+            let presets = crate::gpui_config::builtin_presets();
+            let ai_profiles = config.ai_profiles.clone();
+            let ai_keys = config.ai_keys.clone();
+            tm.resolve_pane_profiles(|profile_id| {
+                // Check built-in presets first
+                if let Some(preset) = presets.iter().find(|p| p.name == profile_id) {
+                    let key = ai_keys.get(preset.name).cloned().unwrap_or_default();
+                    return Some((preset.env)(&key));
+                }
+                // Then check custom profiles
+                ai_profiles.iter()
+                    .find(|p| p.name == profile_id)
+                    .map(|p| p.env.clone())
+            });
             tm.heal_layout();
             workspace_terminals.insert(ws.id.clone(), tm);
         }
@@ -511,6 +555,14 @@ impl GpuiShellView {
             workspace_terminals.insert(active_ws_id.clone(), tm);
         }
         // PTY processes will be spawned on the first render frame (deferred for fast startup)
+
+        // Restore active AI profile for the active pane (per-pane or workspace-level)
+        let active_ai_profile = workspace_terminals.get(&active_ws_id)
+            .and_then(|tm| {
+                tm.active_pane_id()
+                    .and_then(|pid| tm.pane_profile_id(pid).map(|s| s.to_string()))
+                    .or_else(|| tm.env_profile_id().map(|s| s.to_string()))
+            });
 
         let ws_order: Vec<String> = model.workspace_items.iter().map(|w| w.id.clone()).collect();
         let (preview_reload_tx, preview_reload_rx) = std::sync::mpsc::channel();
@@ -549,6 +601,9 @@ impl GpuiShellView {
             pane_picker: None,
             template_picker: None,
             agent_picker: None,
+            ai_profile_picker: None,
+            api_key_input: None,
+            active_ai_profile,
             new_tab_picker: None,
             ime_preedit: None,
             scroll_accumulator: 0.0,
@@ -578,6 +633,8 @@ impl GpuiShellView {
             preview_body_bounds: None,
             preview_selection_ranges: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             socket_notify_rx: None,
+            show_help: false,
+            confirming_delete_ws: None,
         }
     }
 

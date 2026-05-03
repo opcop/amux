@@ -1,22 +1,17 @@
 //! In-document search for the preview panel (`/`, `n`, `N`).
 //!
-//! Scope: **code-file previews only** for now. Markdown previews skip
-//! this path — their layout is element-based and we don't yet have a
-//! scroll handle on the flat-markdown render path, so a search that
-//! finds matches but can't scroll to them would be a worse experience
-//! than no search at all.
+//! Supports both code-file and markdown previews.
 //!
 //! Workflow:
-//! * `/` while a code preview is active → open the search bar at the
+//! * `/` while a preview is active → open the search bar at the
 //!   bottom of the panel. The bar is modal: typed chars build up the
 //!   query, Enter commits, Escape closes.
-//! * On commit, we compute all matches line-by-line (case-insensitive
-//!   literal match against the raw code text) and center the first
-//!   hit via `UniformListScrollHandle::scroll_to_item(_, Center)`.
-//! * `n` / `N` cycle through matches, re-scrolling each time.
+//! * On commit, we compute all matches (case-insensitive literal match)
+//!   and for code files center the first hit via scroll. For markdown,
+//!   matches are counted and the user scrolls manually.
+//! * `n` / `N` cycle through matches.
 //!
-//! Literal-only for now (no regex). Regex + mdterm-style auto-detect
-//! is easy to add on top once the UX shape is locked.
+//! Literal-only for now (no regex).
 
 #[cfg(feature = "gpui")]
 use gpui::Context;
@@ -26,15 +21,14 @@ use crate::gpui_entry::GpuiShellView;
 #[cfg(feature = "gpui")]
 use crate::gpui_preview::{PreviewElement, PreviewState};
 
-/// A single match within a code-preview line.
+/// A single match within a preview.
 #[cfg(feature = "gpui")]
 #[derive(Clone, Debug)]
 pub struct PreviewMatch {
-    /// Index into `CodeBlock::formatted_lines`.
+    /// Index into `CodeBlock::formatted_lines` (code) or
+    /// `PreviewState.elements` (markdown).
     pub line_idx: usize,
-    /// Character offsets into the raw code text of that line. Kept
-    /// for later inline-highlight work; the current render only uses
-    /// `line_idx` to paint the whole matching row.
+    /// Character offsets into the text of that line/element.
     #[allow(dead_code)]
     pub char_start: usize,
     #[allow(dead_code)]
@@ -73,35 +67,47 @@ impl PreviewSearchState {
     }
 
     /// Recompute matches against the current query. Called after
-    /// every edit to the query string.
+    /// every edit to the query string. Works for both code and markdown.
     pub fn rebuild(&mut self, preview: &PreviewState) {
         self.matches.clear();
         self.current_idx = 0;
         if self.query.is_empty() {
             return;
         }
-        let Some(code_lines) = code_lines_of(preview) else { return };
         let query_lower = self.query.to_lowercase();
-        for (line_idx, code) in code_lines.iter().enumerate() {
-            let text_lower = code.to_lowercase();
-            // Byte-level search over the lowered string. Convert the
-            // byte offsets of each hit back to character offsets so
-            // the stored match is stable under future inline-
-            // highlight rendering, which will slice by `char_indices`.
-            let mut pos = 0usize;
-            while pos < text_lower.len() {
-                let Some(found) = text_lower[pos..].find(&query_lower) else { break };
-                let byte_start = pos + found;
-                let byte_end = byte_start + query_lower.len();
-                let char_start = text_lower[..byte_start].chars().count();
-                let char_end = text_lower[..byte_end].chars().count();
-                self.matches.push(PreviewMatch {
-                    line_idx,
-                    char_start,
-                    char_end,
-                });
-                pos = byte_end;
+
+        // Try code-file path first (single CodeBlock element)
+        if let Some(code_lines) = code_lines_of(preview) {
+            for (line_idx, code) in code_lines.iter().enumerate() {
+                self.find_in_text(code, line_idx, &query_lower);
             }
+            return;
+        }
+
+        // Markdown path: search each element's text content
+        for (el_idx, el) in preview.elements.iter().enumerate() {
+            let text = element_text(el);
+            if !text.is_empty() {
+                self.find_in_text(&text, el_idx, &query_lower);
+            }
+        }
+    }
+
+    fn find_in_text(&mut self, text: &str, idx: usize, query_lower: &str) {
+        let text_lower = text.to_lowercase();
+        let mut pos = 0usize;
+        while pos < text_lower.len() {
+            let Some(found) = text_lower[pos..].find(query_lower) else { break };
+            let byte_start = pos + found;
+            let byte_end = byte_start + query_lower.len();
+            let char_start = text_lower[..byte_start].chars().count();
+            let char_end = text_lower[..byte_end].chars().count();
+            self.matches.push(PreviewMatch {
+                line_idx: idx,
+                char_start,
+                char_end,
+            });
+            pos = byte_end;
         }
     }
 
@@ -142,17 +148,50 @@ pub fn code_lines_of(preview: &PreviewState) -> Option<Vec<&str>> {
     }
 }
 
+/// Extract plain text from a single preview element for search.
+#[cfg(feature = "gpui")]
+fn element_text(el: &PreviewElement) -> String {
+    let mut out = String::new();
+    match el {
+        PreviewElement::Heading { text, .. } => {
+            out.push_str(text);
+        }
+        PreviewElement::Paragraph { spans } | PreviewElement::Blockquote { spans } => {
+            for s in spans { out.push_str(&s.text); }
+        }
+        PreviewElement::CodeBlock { formatted_lines, .. } => {
+            for (_, text, _) in formatted_lines {
+                out.push_str(text);
+                out.push('\n');
+            }
+        }
+        PreviewElement::ListItem { spans, .. } => {
+            for s in spans { out.push_str(&s.text); }
+        }
+        PreviewElement::Table { headers, rows } => {
+            for row in headers { for span in row { out.push_str(&span.text); out.push(' '); } }
+            for row in rows { for cell in row { for span in cell { out.push_str(&span.text); } out.push(' '); } }
+        }
+        PreviewElement::HorizontalRule => {}
+    }
+    out
+}
+
+/// Whether a preview has any searchable text content.
+#[cfg(feature = "gpui")]
+pub fn is_searchable(preview: &PreviewState) -> bool {
+    !preview.elements.is_empty()
+}
+
 #[cfg(feature = "gpui")]
 impl GpuiShellView {
-    /// Open (or re-open) search on the active preview. No-op if the
-    /// active tab isn't a searchable preview — markdown previews are
-    /// skipped for the reason in the file header.
+    /// Open (or re-open) search on the active preview.
     pub(crate) fn preview_search_open(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.active_preview_path() else { return };
         let searchable = self
             .preview_tabs
             .get(&path)
-            .map(|s| code_lines_of(s).is_some())
+            .map(|s| is_searchable(s))
             .unwrap_or(false);
         if !searchable {
             return;

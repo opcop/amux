@@ -2,12 +2,12 @@
 //! and new-tab-type dropdown menu. Extracted from gpui_entry.rs.
 
 #[cfg(feature = "gpui")]
-use gpui::{Context, Window};
+use gpui::{AppContext, Context, Window};
 
 #[cfg(feature = "gpui")]
 use crate::gpui_entry::GpuiShellView;
 #[cfg(feature = "gpui")]
-use crate::state::{AgentPickerState, NewTabPickerItem, NewTabPickerState, TemplatePickerState};
+use crate::state::{AgentPickerState, AiProfilePickerState, AiProfilePickerItem, AiProfileKind, NewTabPickerItem, NewTabPickerState, TemplatePickerState};
 
 #[cfg(feature = "gpui")]
 impl GpuiShellView {
@@ -103,6 +103,152 @@ impl GpuiShellView {
                 }
             }
         }
+    }
+
+    pub(crate) fn open_ai_profile_picker(&mut self) {
+        let mut items = vec![AiProfilePickerItem {
+            label: "None".to_string(),
+            kind: AiProfileKind::None,
+        }];
+
+        let presets = crate::gpui_config::builtin_presets();
+        for preset in &presets {
+            let has_key = self.config.ai_keys.contains_key(preset.name);
+            items.push(AiProfilePickerItem {
+                label: preset.name.to_string(),
+                kind: if has_key { AiProfileKind::ActivePreset } else { AiProfileKind::PresetNeedsKey },
+            });
+        }
+
+        for profile in &self.config.ai_profiles {
+            items.push(AiProfilePickerItem {
+                label: profile.name.clone(),
+                kind: AiProfileKind::Custom,
+            });
+        }
+
+        // Use per-pane profile if available, otherwise workspace-level
+        let active_profile = self.terminal_manager().active_pane_id()
+            .and_then(|pid| self.terminal_manager().pane_profile_id(pid).map(|s| s.to_string()))
+            .or_else(|| self.active_ai_profile.clone());
+
+        let selected = match &active_profile {
+            Some(name) => items.iter().position(|item| item.label == *name).unwrap_or(0),
+            None => 0,
+        };
+
+        self.ai_profile_picker = Some(AiProfilePickerState {
+            items,
+            selected_index: selected,
+        });
+    }
+
+    pub(crate) fn execute_ai_profile_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(picker) = self.ai_profile_picker.take() {
+            if let Some(item) = picker.items.get(picker.selected_index) {
+                let pane_id = self.terminal_manager().active_pane_id().cloned();
+                match item.kind {
+                    AiProfileKind::None => {
+                        if let Some(pid) = &pane_id {
+                            self.terminal_manager_mut().set_pane_profile(pid, None, None);
+                        }
+                        self.terminal_manager_mut().set_env_profile_id(None);
+                        self.terminal_manager_mut().set_profile_env(std::collections::HashMap::new());
+                        self.active_ai_profile = None;
+                        self.save_all_layouts();
+                    }
+                    AiProfileKind::ActivePreset => {
+                        let preset_name = item.label.clone();
+                        let key = self.config.ai_keys.get(&preset_name).cloned().unwrap_or_default();
+                        let presets = crate::gpui_config::builtin_presets();
+                        let profile_env = presets.iter()
+                            .find(|p| p.name == preset_name)
+                            .map(|p| (p.env)(&key))
+                            .unwrap_or_default();
+                        if let Some(pid) = &pane_id {
+                            self.terminal_manager_mut().set_pane_profile(
+                                pid,
+                                Some(preset_name.clone()),
+                                Some(profile_env.clone()),
+                            );
+                        }
+                        self.terminal_manager_mut().set_env_profile_id(Some(preset_name.clone()));
+                        self.terminal_manager_mut().set_profile_env(profile_env);
+                        self.active_ai_profile = Some(preset_name);
+                        self.save_all_layouts();
+                    }
+                    AiProfileKind::PresetNeedsKey => {
+                        let preset_name = item.label.clone();
+                        let presets = crate::gpui_config::builtin_presets();
+                        let key_hint = presets.iter()
+                            .find(|p| p.name == preset_name)
+                            .map(|p| p.api_key_hint.to_string())
+                            .unwrap_or_default();
+                        self.ai_profile_picker = Some(picker);
+                        let input = cx.new(|cx| {
+                            gpui_component::input::InputState::new(window, cx)
+                                .placeholder(&format!("Enter API key (e.g. {})", key_hint))
+                        });
+                        let input_for_focus = input.clone();
+                        window.on_next_frame(move |window, cx| {
+                            input_for_focus.update(cx, |state, cx| state.focus(window, cx));
+                        });
+                        self.api_key_input = Some(crate::state::ApiKeyInputState {
+                            preset_name,
+                            key_hint,
+                            input,
+                        });
+                    }
+                    AiProfileKind::Custom => {
+                        let profile_name = item.label.clone();
+                        let profile_env = self.config.ai_profiles.iter()
+                            .find(|p| p.name == profile_name)
+                            .map(|p| p.env.clone())
+                            .unwrap_or_default();
+                        if let Some(pid) = &pane_id {
+                            self.terminal_manager_mut().set_pane_profile(
+                                pid,
+                                Some(profile_name.clone()),
+                                Some(profile_env.clone()),
+                            );
+                        }
+                        self.terminal_manager_mut().set_env_profile_id(Some(profile_name.clone()));
+                        self.terminal_manager_mut().set_profile_env(profile_env);
+                        self.active_ai_profile = Some(profile_name);
+                        self.save_all_layouts();
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn execute_api_key_input(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = self.api_key_input.take() {
+            let key = input.input.read(cx).value().to_string();
+            if !key.is_empty() {
+                self.config.ai_keys.insert(input.preset_name.clone(), key.clone());
+                self.config.save_ai_keys();
+
+                let presets = crate::gpui_config::builtin_presets();
+                let profile_env = presets.iter()
+                    .find(|p| p.name == input.preset_name)
+                    .map(|p| (p.env)(&key))
+                    .unwrap_or_default();
+                let pane_id = self.terminal_manager().active_pane_id().cloned();
+                if let Some(pid) = &pane_id {
+                    self.terminal_manager_mut().set_pane_profile(
+                        pid,
+                        Some(input.preset_name.clone()),
+                        Some(profile_env.clone()),
+                    );
+                }
+                self.terminal_manager_mut().set_env_profile_id(Some(input.preset_name.clone()));
+                self.terminal_manager_mut().set_profile_env(profile_env);
+                self.active_ai_profile = Some(input.preset_name);
+                self.save_all_layouts();
+            }
+        }
+        self.ai_profile_picker = None;
     }
 
     pub(crate) fn open_new_tab_picker(

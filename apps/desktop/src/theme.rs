@@ -117,6 +117,17 @@ pub const RADIUS_SM: f32 = 3.0;
 pub const RADIUS_MD: f32 = 6.0;
 pub const RADIUS_LG: f32 = 8.0;
 
+// ─── Layout constants ────────────────────────────────────────────
+
+/// Status bar height in pixels (26px content + 8px top padding)
+pub const STATUS_BAR_H: f32 = 34.0;
+/// macOS transparent titlebar inset height
+pub const TITLEBAR_H: f32 = 28.0;
+/// Tab strip height per pane
+pub const TAB_STRIP_H: f32 = 28.0;
+/// Split resize handle thickness
+pub const SPLIT_HANDLE_W: f32 = 10.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

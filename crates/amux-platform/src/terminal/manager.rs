@@ -236,6 +236,13 @@ pub struct PaneTab {
     pub agent_status: Option<AgentStatus>,
     /// Last known cursor line (for activity detection)
     last_cursor_line: i32,
+    /// Per-pane AI profile ID (e.g. "DeepSeek V4", "MiMo", or a custom profile name).
+    /// When set, this pane's terminal is spawned with the profile's env vars
+    /// instead of the workspace-level profile_env.
+    pub env_profile_id: Option<String>,
+    /// Resolved env vars for the per-pane profile. Set alongside env_profile_id
+    /// so spawn_in_pane doesn't need access to the config.
+    pub env_profile_env: Option<HashMap<String, String>>,
 }
 
 /// A pane with its own tab strip (like limux)
@@ -264,6 +271,8 @@ impl TerminalPane {
                 agent_kind: None,
                 agent_status: None,
                 last_cursor_line: 0,
+                env_profile_id: None,
+            env_profile_env: None,
             }],
             active_tab: 0,
         }
@@ -342,8 +351,15 @@ impl TerminalPane {
         self.add_tab_with_kind(filename, TabKind::Preview { path: path.to_string() })
     }
 
-    /// Add a tab with a specific kind
+    /// Add a tab with a specific kind. Inherits the profile from the active tab.
     fn add_tab_with_kind(&mut self, title: String, kind: TabKind) -> usize {
+        // Inherit profile from the active tab so new tabs use the same model
+        let (inherit_id, inherit_env) = self.tabs.get(self.active_tab)
+            .map(|t| (t.env_profile_id.clone(), t.env_profile_env.clone()))
+            .unwrap_or((None, None));
+        eprintln!("[amux] add_tab_with_kind: inheriting from active_tab={} profile={:?} env_keys={:?}",
+            self.active_tab, inherit_id,
+            inherit_env.as_ref().map(|e| e.keys().collect::<Vec<_>>()));
         // Terminal is spawned separately after tab creation
         self.tabs.push(PaneTab {
             title,
@@ -360,6 +376,8 @@ impl TerminalPane {
             agent_kind: None,
             agent_status: None,
             last_cursor_line: 0,
+            env_profile_id: inherit_id,
+            env_profile_env: inherit_env,
         });
         self.active_tab = self.tabs.len() - 1;
         self.active_tab
@@ -407,6 +425,7 @@ impl TerminalPane {
                         TabKind::Terminal => {
                             t.terminal.as_ref()
                                 .and_then(|term| term.title())
+                                .filter(|t| !t.is_empty())
                                 .unwrap_or_else(|| t.title.clone())
                         }
                         TabKind::Browser { url, .. } => {
@@ -590,6 +609,9 @@ struct SavedTab {
     /// Shell program and args (e.g. ["wsl.exe", "--cd", "/path"]) for restoring WSL tabs
     #[serde(default)]
     shell_cmd: Option<(String, Vec<String>)>,
+    /// Per-tab AI profile ID (e.g. "DeepSeek V4", "MiMo")
+    #[serde(default)]
+    env_profile_id: Option<String>,
 }
 
 impl SavedTab {
@@ -612,6 +634,9 @@ struct LayoutState {
     /// Per-pane tab state (None for backward compat with old layouts.json)
     #[serde(default)]
     pane_states: Option<HashMap<String, SavedPane>>,
+    /// Active AI profile name (None for backward compat)
+    #[serde(default)]
+    env_profile_id: Option<String>,
 }
 
 /// Terminal manager — layout tree of panes, each pane has its own tabs
@@ -629,6 +654,11 @@ pub struct TerminalManager {
     /// Navigation history for focus back/forward across panes and tabs.
     nav_back: Vec<(PaneId, usize)>,
     nav_forward: Vec<(PaneId, usize)>,
+    /// Environment variables from the active AI profile, injected into
+    /// every spawned terminal alongside AMUX_PANE_ID / AMUX_WORKSPACE.
+    profile_env: HashMap<String, String>,
+    /// Active AI profile name for persistence.
+    env_profile_id: Option<String>,
 }
 
 impl TerminalManager {
@@ -652,6 +682,8 @@ impl TerminalManager {
             agent_monitor: crate::agent_monitor::AgentSessionMonitor::new(),
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
+            profile_env: HashMap::new(),
+            env_profile_id: None,
         }
     }
 
@@ -688,12 +720,63 @@ impl TerminalManager {
             agent_monitor: crate::agent_monitor::AgentSessionMonitor::new(),
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
+            profile_env: HashMap::new(),
+            env_profile_id: None,
         }
     }
 
     /// Set the workspace name for env var injection into spawned terminals.
     pub fn set_workspace_name(&mut self, name: &str) {
         self.workspace_name = Some(name.to_string());
+    }
+
+    /// Set the active AI profile env vars. These are merged into the
+    /// environment of every subsequently spawned terminal.
+    pub fn set_profile_env(&mut self, env: HashMap<String, String>) {
+        self.profile_env = env;
+    }
+
+    /// Set the active AI profile name for persistence.
+    pub fn set_env_profile_id(&mut self, id: Option<String>) {
+        self.env_profile_id = id;
+    }
+
+    /// Get the active AI profile name.
+    pub fn env_profile_id(&self) -> Option<&str> {
+        self.env_profile_id.as_deref()
+    }
+
+    /// Set per-pane AI profile. When a pane has its own profile,
+    /// its terminals use the pane's env vars instead of the workspace-level ones.
+    pub fn set_pane_profile(
+        &mut self,
+        pane_id: &PaneId,
+        profile_id: Option<String>,
+        profile_env: Option<HashMap<String, String>>,
+    ) {
+        if let Some(pane) = self.panes.get_mut(pane_id) {
+            if let Some(tab) = pane.tabs.get_mut(pane.active_tab) {
+                eprintln!("[amux] set_pane_profile: pane={:?} tab={} profile={:?} env_keys={:?}",
+                    pane_id, pane.active_tab, profile_id,
+                    profile_env.as_ref().map(|e| e.keys().collect::<Vec<_>>()));
+                tab.env_profile_id = profile_id;
+                tab.env_profile_env = profile_env;
+            }
+        }
+    }
+
+    /// Get the per-pane AI profile ID for the active pane's active tab.
+    pub fn pane_profile_id(&self, pane_id: &PaneId) -> Option<&str> {
+        self.panes.get(pane_id)
+            .and_then(|p| p.tabs.get(p.active_tab))
+            .and_then(|t| t.env_profile_id.as_deref())
+    }
+
+    /// Get the effective AI profile ID for the active pane (per-pane or workspace-level).
+    pub fn effective_profile_id(&self, pane_id: &PaneId) -> Option<String> {
+        self.pane_profile_id(pane_id)
+            .map(|s| s.to_string())
+            .or_else(|| self.env_profile_id.clone())
     }
 
     /// Capture the current layout as a reusable template.
@@ -762,7 +845,7 @@ impl TerminalManager {
     pub fn active_terminal_title(&self) -> Option<String> {
         let pane = self.panes.get(&self.active_pane)?;
         let tab = pane.tabs.get(pane.active_tab)?;
-        tab.terminal.as_ref()?.title()
+        tab.terminal.as_ref()?.title().filter(|t| !t.is_empty())
     }
 
     /// Iterate over all terminals across all panes and tabs (immutable)
@@ -876,6 +959,40 @@ impl TerminalManager {
         self.panes.get_mut(pane_id)
     }
 
+    /// Update the active browser tab's URL and title after navigation.
+    /// Called from the render loop when the WebView reports a new URL.
+    pub fn update_active_browser_url(&mut self, url: &str) {
+        let pane_id = match self.active_pane_id().cloned() {
+            Some(id) => id,
+            None => return,
+        };
+        let pane = match self.panes.get_mut(&pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let tab = match pane.tabs.get_mut(pane.active_tab) {
+            Some(t) => t,
+            None => return,
+        };
+        if let TabKind::Browser { url: ref mut tab_url, .. } = tab.kind {
+            *tab_url = url.to_string();
+            // Show domain as title (e.g. "github.com" not the full URL)
+            tab.title = Self::browser_title_from_url(url);
+        }
+    }
+
+    /// Extract a short display title from a browser URL.
+    /// "https://github.com/user/repo" → "github.com"
+    /// "about:blank" → "about:blank"
+    fn browser_title_from_url(url: &str) -> String {
+        let stripped = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .unwrap_or(url);
+        // Take just the host portion (up to first / or end)
+        stripped.split('/').next().unwrap_or(stripped).to_string()
+    }
+
     // === Resize terminals ===
 
     pub fn resize_pane_terminals(&mut self, pane_id: &PaneId, width_px: f32, height_px: f32, cell_w: f32, cell_h: f32) {
@@ -908,7 +1025,7 @@ impl TerminalManager {
         match layout {
             PaneLayout::Single(id) => vec![(id.clone(), w, h)],
             PaneLayout::Horizontal { left, right, ratio } => {
-                let handle = 6.0_f32;
+                let handle = 10.0_f32;
                 let usable = (w - handle).max(0.0);
                 let lw = usable * ratio;
                 let rw = usable * (1.0 - ratio);
@@ -917,7 +1034,7 @@ impl TerminalManager {
                 sizes
             }
             PaneLayout::Vertical { top, bottom, ratio } => {
-                let handle = 6.0_f32;
+                let handle = 10.0_f32;
                 let usable = (h - handle).max(0.0);
                 let th = usable * ratio;
                 let bh = usable * (1.0 - ratio);
@@ -978,6 +1095,22 @@ impl TerminalManager {
         extra_env.insert("AMUX_PANE_ID".to_string(), pane_id.0.clone());
         if let Some(ref ws) = self.workspace_name {
             extra_env.insert("AMUX_WORKSPACE".to_string(), ws.clone());
+        }
+        // Per-pane profile takes precedence over workspace-level profile
+        if let Some(ref pane_env) = tab.env_profile_env {
+            eprintln!("[amux] spawn_in_pane: pane has per-pane profile {:?}, injecting {} env vars", tab.env_profile_id, pane_env.len());
+            for (k, v) in pane_env {
+                eprintln!("[amux]   env {}={}", k, &v[..v.len().min(20)]);
+                extra_env.insert(k.clone(), v.clone());
+            }
+        } else if !self.profile_env.is_empty() {
+            eprintln!("[amux] spawn_in_pane: no per-pane profile, using workspace-level profile_env ({} vars)", self.profile_env.len());
+            for (k, v) in &self.profile_env {
+                eprintln!("[amux]   env {}={}", k, &v[..v.len().min(20)]);
+                extra_env.insert(k.clone(), v.clone());
+            }
+        } else {
+            eprintln!("[amux] spawn_in_pane: no profile env at all (pane={:?}, workspace={:?})", tab.env_profile_id, self.env_profile_id);
         }
         match Self::create_terminal_with_fallback(shell, args, cwd, self.scrollback_lines, &extra_env) {
             Ok((term, actual_cwd)) => {
@@ -1399,6 +1532,7 @@ impl TerminalManager {
                                 tab.has_activity = true;
                                 let title = tab.terminal.as_ref()
                                     .and_then(|t| t.title())
+                                    .filter(|t| !t.is_empty())
                                     .unwrap_or_else(|| tab.title.clone());
                                 notifications.push(AgentNotification {
                                     pane_id: pane_id.clone(),
@@ -1452,17 +1586,17 @@ impl TerminalManager {
 
     /// Collect summary of all detected agents across all panes/tabs.
     /// Returns (short_name, status_icon, color_rgb) for each agent tab.
-    pub fn agent_summaries(&self) -> Vec<(String, &'static str, u32)> {
+    pub fn agent_summaries(&self) -> Vec<(String, &'static str, u32, PaneId, usize)> {
         let mut out = Vec::new();
-        for pane in self.panes.values() {
-            for tab in &pane.tabs {
+        for (pane_id, pane) in &self.panes {
+            for (tab_idx, tab) in pane.tabs.iter().enumerate() {
                 if let (Some(kind), Some(status)) = (&tab.agent_kind, &tab.agent_status) {
                     let name = if tab.custom_title {
                         tab.title.clone()
                     } else {
                         format!("{:?}", kind)
                     };
-                    out.push((name, status.icon(), status.color_rgb()));
+                    out.push((name, status.icon(), status.color_rgb(), pane_id.clone(), tab_idx));
                 }
             }
         }
@@ -1719,6 +1853,7 @@ impl TerminalManager {
                 kind: t.kind.clone(),
                 cwd: t.cwd.clone(),
                 shell_cmd: t.shell_cmd.clone(),
+                env_profile_id: t.env_profile_id.clone(),
             }).collect();
             pane_states.insert(id.0.clone(), SavedPane {
                 tabs,
@@ -1730,6 +1865,7 @@ impl TerminalManager {
             active_pane: self.active_pane.clone(),
             next_pane_num: self.next_pane_num,
             pane_states: Some(pane_states),
+            env_profile_id: self.env_profile_id.clone(),
         };
         serde_json::to_string(&state).unwrap_or_else(|e| {
             eprintln!("[amux] save_layout serialization failed: {}", e);
@@ -1775,12 +1911,14 @@ impl TerminalManager {
                         exited: false,
                         cwd: st.cwd.clone(),
                         cached_cwd: None,
-                shell_reported_cwd: None,
-                shell_integration_phase: CommandPhase::Unknown,
+                        shell_reported_cwd: None,
+                        shell_integration_phase: CommandPhase::Unknown,
                         shell_cmd: st.shell_cmd.clone(),
                         agent_kind: None,
                         agent_status: None,
                         last_cursor_line: 0,
+                        env_profile_id: st.env_profile_id.clone(),
+                        env_profile_env: None, // Resolved when spawning terminals
                     }).collect();
                     let active_tab = if saved.active_tab < tabs.len() { saved.active_tab } else { 0 };
                     if tabs.is_empty() {
@@ -1812,7 +1950,26 @@ impl TerminalManager {
             agent_monitor: crate::agent_monitor::AgentSessionMonitor::new(),
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
+            profile_env: HashMap::new(),
+            env_profile_id: state.env_profile_id,
         })
+    }
+
+    /// Resolve per-pane profile IDs to env vars using the provided profile lookup.
+    /// Call this after restore_layout with the config's builtin presets and custom profiles.
+    pub fn resolve_pane_profiles<F>(&mut self, resolve: F)
+    where
+        F: Fn(&str) -> Option<HashMap<String, String>>,
+    {
+        for pane in self.panes.values_mut() {
+            for tab in &mut pane.tabs {
+                if tab.env_profile_env.is_none() {
+                    if let Some(ref profile_id) = tab.env_profile_id {
+                        tab.env_profile_env = resolve(profile_id);
+                    }
+                }
+            }
+        }
     }
 
     // ── Bridge API (Phase 1.1) ──────────────────────────────────────────
@@ -1825,7 +1982,7 @@ impl TerminalManager {
                 if t.custom_title {
                     t.title.clone()
                 } else if let Some(ref term) = t.terminal {
-                    term.title().unwrap_or_else(|| t.title.clone())
+                    term.title().filter(|t| !t.is_empty()).unwrap_or_else(|| t.title.clone())
                 } else {
                     t.title.clone()
                 }
@@ -2122,6 +2279,8 @@ mod tests {
             agent_kind: None,
             agent_status: None,
             last_cursor_line: 0,
+            env_profile_id: None,
+            env_profile_env: None,
         });
         pane.active_tab = 1;
         assert_eq!(pane.active_tab_live_cwd().as_deref(), Some("/tab1-spawn"));

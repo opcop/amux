@@ -47,6 +47,8 @@ mod gpui_workspace_persistence;
 #[cfg(feature = "gpui")]
 mod gpui_status_bar;
 #[cfg(feature = "gpui")]
+mod gpui_keyboard_shortcuts;
+#[cfg(feature = "gpui")]
 mod gpui_terminal;
 #[cfg(feature = "gpui")]
 mod gpui_workspace_sidebar;

@@ -509,6 +509,13 @@ impl crate::gpui_entry::GpuiShellView {
         self.active_preview_path()
     }
 
+    /// True when the active pane shows a preview tab with a non-empty
+    /// text selection recorded by the most recent paint pass.
+    pub(crate) fn has_preview_text_selection(&self) -> bool {
+        self.active_preview_path().is_some()
+            && !self.preview_selection_ranges.borrow().is_empty()
+    }
+
     /// Mouse-down handler for the markdown preview body. Starts a
     /// fresh selection at the click point, discarding any previous
     /// one. Called from the root body div's `on_mouse_down` listener.
@@ -524,6 +531,33 @@ impl crate::gpui_entry::GpuiShellView {
             return;
         }
         let Some(path) = self.selection_active_preview_path() else { return };
+        // Ensure the pane holding this preview tab is focused so that
+        // Cmd+C routes through the copy handler (which checks the
+        // active pane's active tab).
+        let active_is_preview = {
+            let tm = self.terminal_manager();
+            tm.active_pane_id()
+                .and_then(|pid| tm.get_pane(pid))
+                .and_then(|p| p.active_tab_kind())
+                .map(|k| matches!(k, amux_platform::terminal::manager::TabKind::Preview { path } if path == &*path))
+                .unwrap_or(false)
+        };
+        if !active_is_preview {
+            // Find the pane that has this preview as its active tab and focus it.
+            let target: Option<amux_platform::terminal::manager::PaneId> = {
+                let tm = self.terminal_manager();
+                tm.pane_iter()
+                    .find_map(|(id, pane)| {
+                        match pane.active_tab_kind() {
+                            Some(amux_platform::terminal::manager::TabKind::Preview { path: p }) if p == &path => Some(id.clone()),
+                            _ => None,
+                        }
+                    })
+            };
+            if let Some(pid) = target {
+                self.terminal_manager_mut().set_active_pane(&pid);
+            }
+        }
         let Some(bounds) = self.preview_body_bounds else {
             // Bounds not yet captured (first frame). Drop the click.
             // The next frame will have bounds set and the user can

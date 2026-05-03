@@ -157,7 +157,7 @@ pub(crate) fn render_layout(
         TabLayout::Single(pane_id) => {
             // Record this pane's screen bounds for mouse hit-testing.
             // Tab strip (28px) is at the top; terminal content starts below it.
-            let tab_strip_h = 28.0_f32;
+            let tab_strip_h = crate::theme::TAB_STRIP_H;
             pane_bounds.insert(pane_id.0.clone(), (origin_x, origin_y + tab_strip_h, avail_w, (avail_h - tab_strip_h).max(0.0)));
             let is_active = active_pane_id == Some(pane_id);
 
@@ -187,7 +187,6 @@ pub(crate) fn render_layout(
                         let pid_close_tab = pid_for_tabs.clone();
                         let pid_drag = pid_for_tabs.clone();
                         let pid_tab_drop = pid_for_tabs.clone();
-                        let can_close_tab = tab_count > 1;
                         let drag_title = title.clone();
                         // Skip tab width clamps during rename so the row
                         // grows with typed content instead of locking at 180px.
@@ -357,41 +356,44 @@ pub(crate) fn render_layout(
                                     tab_content.into_any_element()
                                 }
                             })
-                            .when(can_close_tab, |d| {
-                                d.child(
-                                    div()
-                                        .id(gpui::ElementId::Name(
-                                            format!("{}-tab-{}-close", pid_close_tab.0, idx).into(),
-                                        ))
-                                        .px(px(2.0))
-                                        .rounded(px(3.0))
-                                        .text_color(rgb(crate::theme::TEXT_DIM))
-                                        .hover(|d| d.bg(rgb(crate::theme::BORDER)).text_color(rgb(crate::theme::DANGER)))
-                                        .child("×")
-                                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                                            this.terminal_manager_mut().set_active_pane(&pid_close_tab);
-                                            // If closing a browser tab, clean up its WebView2 state
-                                            // Clean up tab-specific state before closing
-                                            let tab_kind = this.terminal_manager().get_pane(&pid_close_tab)
-                                                .and_then(|p| p.tabs.get(idx))
-                                                .map(|t| t.kind.clone());
-                                            match tab_kind.as_ref() {
-                                                Some(amux_platform::terminal::manager::TabKind::Browser { browser_id, .. }) => {
-                                                    this.browser_tabs.remove(browser_id);
-                                                }
-                                                Some(amux_platform::terminal::manager::TabKind::Preview { path }) => {
-                                                    this.preview_tabs.remove(path);
-                                                    this.preview_unwatch_path(path);
-                                                }
-                                                _ => {}
+                            .child(
+                                div()
+                                    .id(gpui::ElementId::Name(
+                                        format!("{}-tab-{}-close", pid_close_tab.0, idx).into(),
+                                    ))
+                                    .px(px(2.0))
+                                    .rounded(px(3.0))
+                                    .text_color(rgb(crate::theme::TEXT_DIM))
+                                    .hover(|d| d.bg(rgb(crate::theme::BORDER)).text_color(rgb(crate::theme::DANGER)))
+                                    .child("×")
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.terminal_manager_mut().set_active_pane(&pid_close_tab);
+                                        // If closing a browser tab, clean up its WebView2 state
+                                        // Clean up tab-specific state before closing
+                                        let tab_kind = this.terminal_manager().get_pane(&pid_close_tab)
+                                            .and_then(|p| p.tabs.get(idx))
+                                            .map(|t| t.kind.clone());
+                                        match tab_kind.as_ref() {
+                                            Some(amux_platform::terminal::manager::TabKind::Browser { browser_id, .. }) => {
+                                                this.browser_tabs.remove(browser_id);
                                             }
-                                            if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pid_close_tab) {
-                                                pane.close_tab(idx);
+                                            Some(amux_platform::terminal::manager::TabKind::Preview { path }) => {
+                                                this.preview_tabs.remove(path);
+                                                this.preview_unwatch_path(path);
                                             }
-                                            cx.notify();
-                                        }))
-                                )
-                            })
+                                            _ => {}
+                                        }
+                                        let is_last_tab = this.terminal_manager()
+                                            .get_pane(&pid_close_tab)
+                                            .map_or(false, |p| p.tab_count() <= 1);
+                                        if is_last_tab {
+                                            this.terminal_manager_mut().close_active_pane();
+                                        } else if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pid_close_tab) {
+                                            pane.close_tab(idx);
+                                        }
+                                        cx.notify();
+                                    }))
+                            )
                     }));
 
                 // Right side: action buttons
@@ -548,9 +550,8 @@ pub(crate) fn render_layout(
                             }),
                     );
 
-                // Combine into tab strip (relative container for zoom indicator)
+                // Combine into tab strip
                 let tab_strip = div()
-                    .relative()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -558,48 +559,36 @@ pub(crate) fn render_layout(
                     .border_b_1()
                     .border_color(rgb(crate::theme::SURFACE_RAISED))
                     .child(tabs_row)
-                    .child(actions_row)
-                    // Zoom indicator: absolutely centered over the entire tab strip
+                    // Zoom indicator: inline between tabs and actions
                     .when(is_zoomed, |d| {
                         d.child(
                             div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left_0()
-                                .right_0()
+                                .px_2()
+                                .py(px(2.0))
+                                .rounded(px(8.0))
+                                .bg(rgb(crate::theme::SURFACE))
+                                .border_1()
+                                .border_color(rgb(crate::theme::BORDER))
                                 .flex()
+                                .flex_row()
                                 .items_center()
-                                .justify_center()
-                                // Don't block clicks on tabs/buttons underneath
+                                .gap(px(5.0))
                                 .child(
                                     div()
-                                        .px_2()
-                                        .py(px(2.0))
-                                        .rounded(px(8.0))
-                                        .bg(rgb(crate::theme::SURFACE))
-                                        .border_1()
-                                        .border_color(rgb(crate::theme::BORDER))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(5.0))
-                                        .child(
-                                            div()
-                                                .w(px(6.0))
-                                                .h(px(6.0))
-                                                .rounded(px(3.0))
-                                                .bg(rgb(crate::theme::SUCCESS)) // green for "zoomed" state
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(crate::theme::TEXT_DIM))
-                                                .child("ZOOMED")
-                                        )
+                                        .w(px(6.0))
+                                        .h(px(6.0))
+                                        .rounded(px(3.0))
+                                        .bg(rgb(crate::theme::SUCCESS))
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(crate::theme::TEXT_DIM))
+                                        .child("ZOOMED")
                                 )
                         )
                     })
+                    .child(actions_row)
                     .into_any_element();
 
                 let active_tab_exited = pane.active_tab_exited();
@@ -768,7 +757,7 @@ pub(crate) fn render_layout(
         }
         TabLayout::Horizontal { left, right, ratio } => {
             let r = *ratio;
-            let handle_px = 6.0_f32;
+            let handle_px = crate::theme::SPLIT_HANDLE_W;
             let usable = (avail_w - handle_px).max(0.0);
             let left_w = usable * r;
             let right_w = usable * (1.0 - r);
@@ -829,7 +818,7 @@ pub(crate) fn render_layout(
         }
         TabLayout::Vertical { top, bottom, ratio } => {
             let r = *ratio;
-            let handle_px = 6.0_f32;
+            let handle_px = crate::theme::SPLIT_HANDLE_W;
             let usable = (avail_h - handle_px).max(0.0);
             let top_h = usable * r;
             let bottom_h = usable * (1.0 - r);
@@ -979,6 +968,202 @@ pub(crate) fn render_agent_picker(
                         .border_t_1().border_color(rgb(crate::theme::SURFACE_RAISED))
                         .text_xs().text_color(rgb(crate::theme::TEXT_DIM))
                         .child("↑↓ navigate  1-9 quick select  Enter launch  Esc cancel")
+                )
+        )
+}
+
+pub(crate) fn render_ai_profile_picker(
+    picker: &crate::gpui_entry::AiProfilePickerState,
+    active_profile: &Option<String>,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    let mut list = div().flex().flex_col().gap_px();
+
+    for (i, item) in picker.items.iter().enumerate() {
+        let is_selected = i == picker.selected_index;
+        let is_active = match item.kind {
+            crate::state::AiProfileKind::None => active_profile.is_none(),
+            _ => active_profile.as_deref() == Some(&item.label),
+        };
+        let idx = i;
+        let label = item.label.clone();
+        let kind = item.kind.clone();
+
+        let mut row = div()
+            .id(gpui::ElementId::Name(format!("ai-profile-{}", i).into()))
+            .px_3()
+            .py(px(6.0))
+            .rounded(px(4.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .bg(if is_selected { rgb(crate::theme::SURFACE_RAISED) } else { rgb(crate::theme::SURFACE) })
+            .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
+            .cursor_pointer()
+            .child(
+                div().text_xs().text_color(rgb(crate::theme::ACCENT)).min_w(px(16.0))
+                    .child(format!("{}", i + 1))
+            )
+            .child(
+                div().text_sm()
+                    .text_color(if is_selected { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) })
+                    .child(label)
+            );
+
+        if is_active {
+            row = row.child(
+                div().text_xs().px(px(4.0)).py(px(1.0))
+                    .rounded(px(3.0)).bg(rgb(crate::theme::ACCENT))
+                    .text_color(rgb(crate::theme::SURFACE)).child("active")
+            );
+        } else if kind == crate::state::AiProfileKind::PresetNeedsKey {
+            row = row.child(
+                div().text_xs().px(px(4.0)).py(px(1.0))
+                    .rounded(px(3.0)).bg(rgb(crate::theme::WARNING))
+                    .text_color(rgb(crate::theme::SURFACE)).child("key needed")
+            );
+        }
+
+        list = list.child(
+            row.on_click(cx.listener(move |this, _event, window, cx| {
+                if let Some(ref mut p) = this.ai_profile_picker {
+                    p.selected_index = idx;
+                }
+                this.execute_ai_profile_picker(window, cx);
+                cx.notify();
+            }))
+        );
+    }
+
+    div()
+        .absolute()
+        .top_0().left_0().right_0().bottom_0()
+        .flex().items_center().justify_center()
+        .child(
+            div()
+                .id("ai-profile-picker-backdrop")
+                .absolute()
+                .top_0().left_0().right_0().bottom_0()
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.ai_profile_picker = None;
+                    cx.notify();
+                }))
+        )
+        .child(
+            div()
+                .w(px(320.0))
+                .rounded(px(8.0))
+                .bg(rgb(crate::theme::SURFACE))
+                .border_1()
+                .border_color(rgb(crate::theme::BORDER))
+                .shadow_lg()
+                .flex().flex_col().overflow_hidden()
+                .child(
+                    div().px_3().py(px(8.0))
+                        .border_b_1().border_color(rgb(crate::theme::SURFACE_RAISED))
+                        .child(
+                            div().text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(crate::theme::TEXT))
+                                .child("AI Profile")
+                        )
+                )
+                .child(div().p_1().child(list))
+                .child(
+                    div().px_3().py(px(6.0))
+                        .border_t_1().border_color(rgb(crate::theme::SURFACE_RAISED))
+                        .text_xs().text_color(rgb(crate::theme::TEXT_DIM))
+                        .child("↑↓ navigate  1-9 quick select  Enter select  Esc cancel")
+                )
+        )
+}
+
+/// Render the API key input overlay for preset activation.
+#[cfg(feature = "gpui")]
+pub(crate) fn render_api_key_input(
+    input: &crate::state::ApiKeyInputState,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    // Use the container as the backdrop (click to close)
+    div()
+        .id("api-key-input-backdrop")
+        .absolute()
+        .top_0().left_0().right_0().bottom_0()
+        .flex().items_center().justify_center()
+        .on_click(cx.listener(|this, _event, _window, cx| {
+            this.api_key_input = None;
+            cx.notify();
+        }))
+        .child(
+            // Dialog container - stops click propagation
+            div()
+                .id("api-key-dialog")
+                .w(px(400.0))
+                .rounded(px(8.0))
+                .bg(rgb(crate::theme::SURFACE))
+                .border_1()
+                .border_color(rgb(crate::theme::BORDER))
+                .shadow_lg()
+                .flex().flex_col().overflow_hidden()
+                .on_click(|_event, _window, cx| {
+                    cx.stop_propagation();
+                })
+                .child(
+                    div().px_3().py(px(8.0))
+                        .border_b_1().border_color(rgb(crate::theme::SURFACE_RAISED))
+                        .child(
+                            div().text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(crate::theme::TEXT))
+                                .child(format!("API Key for {}", input.preset_name))
+                        )
+                )
+                .child(
+                    div().p_3().flex().flex_col().gap_2()
+                        .child(
+                            div().text_xs().text_color(rgb(crate::theme::TEXT_DIM))
+                                .child(format!("Enter your API key (e.g. {})", input.key_hint))
+                        )
+                        .child({
+                            use gpui_component::Sizable;
+                            gpui_component::input::Input::new(&input.input)
+                                .small()
+                                .cleanable(false)
+                                .appearance(true)
+                        })
+                )
+                .child(
+                    div().px_3().py(px(6.0))
+                        .border_t_1().border_color(rgb(crate::theme::SURFACE_RAISED))
+                        .flex().justify_end().gap_2()
+                        .child(
+                            div()
+                                .id("api-key-cancel")
+                                .text_xs().px(px(8.0)).py(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(crate::theme::SURFACE_RAISED))
+                                .text_color(rgb(crate::theme::TEXT_DIM))
+                                .cursor_pointer()
+                                .child("Cancel")
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.api_key_input = None;
+                                    cx.notify();
+                                }))
+                        )
+                        .child(
+                            div()
+                                .id("api-key-save")
+                                .text_xs().px(px(8.0)).py(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(crate::theme::ACCENT))
+                                .text_color(rgb(crate::theme::SURFACE))
+                                .cursor_pointer()
+                                .child("Save & Activate")
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.execute_api_key_input(cx);
+                                    cx.notify();
+                                }))
+                        )
                 )
         )
 }
@@ -1405,5 +1590,138 @@ pub(crate) fn render_new_tab_picker(
                 .flex().flex_col().overflow_hidden()
                 .py_1()
                 .child(list)
+        )
+}
+
+/// Render the help overlay (F1) showing keyboard shortcuts and commands.
+#[cfg(feature = "gpui")]
+pub(crate) fn render_help_overlay(cx: &mut Context<GpuiShellView>) -> impl IntoElement {
+    use crate::gpui_keyboard_shortcuts::{all_shortcuts, ShortcutCategory};
+
+    let shortcuts = all_shortcuts();
+
+    // Build shortcut sections by category
+    let categories = [
+        (ShortcutCategory::App, "General"),
+        (ShortcutCategory::Workspace, "Workspace"),
+        (ShortcutCategory::Pane, "Pane & Tabs"),
+        (ShortcutCategory::Terminal, "Terminal"),
+        (ShortcutCategory::Find, "Search"),
+        (ShortcutCategory::Browser, "Browser"),
+    ];
+
+    let mut sections = Vec::new();
+    for (cat, title) in &categories {
+        let items: Vec<_> = shortcuts.iter().filter(|s| s.category == *cat).collect();
+        if items.is_empty() { continue; }
+        let rows: Vec<_> = items.iter().map(|s| {
+            let label = s.display_label();
+            div().flex().justify_between().gap_4()
+                .child(
+                    div().text_sm().text_color(rgb(crate::theme::TEXT))
+                        .child(s.description.clone())
+                )
+                .child(
+                    div().text_sm().text_color(rgb(crate::theme::ACCENT))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(label)
+                )
+        }).collect();
+        sections.push(
+            div().flex().flex_col().gap_1()
+                .child(
+                    div().text_xs().font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(crate::theme::WARNING))
+                        .child(title.to_string())
+                )
+                .children(rows)
+        );
+    }
+
+    // Command palette commands (grouped)
+    let palette_cmds = amux_ui::commands::palette_command_catalog();
+    let palette_categories = [
+        (amux_ui::commands::PaletteCategory::General, "Commands: General"),
+        (amux_ui::commands::PaletteCategory::Workspace, "Commands: Workspace"),
+        (amux_ui::commands::PaletteCategory::Pane, "Commands: Pane"),
+        (amux_ui::commands::PaletteCategory::Agent, "Commands: Agent"),
+        (amux_ui::commands::PaletteCategory::File, "Commands: File"),
+    ];
+    for (cat, title) in &palette_categories {
+        let items: Vec<_> = palette_cmds.iter().filter(|c| c.category == *cat).collect();
+        if items.is_empty() { continue; }
+        let rows: Vec<_> = items.iter().map(|c| {
+            div().flex().justify_between().gap_4()
+                .child(
+                    div().text_sm().text_color(rgb(crate::theme::TEXT))
+                        .child(format!("{} — {}", c.label, c.description))
+                )
+                .child(
+                    div().text_sm().text_color(rgb(crate::theme::TEXT_DIM))
+                        .child(c.command.clone())
+                )
+        }).collect();
+        sections.push(
+            div().flex().flex_col().gap_1()
+                .child(
+                    div().text_xs().font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(crate::theme::INFO))
+                        .child(title.to_string())
+                )
+                .children(rows)
+        );
+    }
+
+    // Backdrop
+    div()
+        .id("help-overlay-backdrop")
+        .absolute().top_0().left_0().right_0().bottom_0()
+        .bg(gpui::rgba(0x000000aa))
+        .flex().items_center().justify_center()
+        .on_click(cx.listener(|this, _event, _window, cx| {
+            this.show_help = false;
+            cx.notify();
+        }))
+        .child(
+            // Modal
+            div()
+                .id("help-overlay-modal")
+                .w(px(560.0))
+                .max_h(px(600.0))
+                .rounded(px(10.0))
+                .bg(rgb(crate::theme::SURFACE_DIM))
+                .border_1()
+                .border_color(rgb(crate::theme::BORDER))
+                .shadow_lg()
+                .flex().flex_col().overflow_hidden()
+                .on_click(|_event, _window, cx| { cx.stop_propagation(); })
+                // Header
+                .child(
+                    div().px_4().py_3()
+                        .border_b_1().border_color(rgb(crate::theme::BORDER))
+                        .flex().justify_between().items_center()
+                        .child(
+                            div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(crate::theme::TEXT))
+                                .child("Keyboard Shortcuts & Commands")
+                        )
+                        .child(
+                            div().text_xs().text_color(rgb(crate::theme::TEXT_DIM))
+                                .child(if cfg!(target_os = "macos") {
+                                    "Cmd+Shift+H / About Amux / Esc to close"
+                                } else {
+                                    "Ctrl+Shift+H / About Amux / Esc to close"
+                                })
+                        )
+                )
+                // Scrollable content
+                .child(
+                    div()
+                        .id("help-overlay-content")
+                        .p_4().flex().flex_col().gap_3()
+                        .overflow_y_scroll()
+                        .flex_1()
+                        .children(sections)
+                )
         )
 }

@@ -205,6 +205,39 @@ pub(crate) struct AgentPickerState {
     pub(crate) selected_index: usize,
 }
 
+/// AI profile picker state for switching model providers.
+#[derive(Clone, Debug)]
+pub(crate) struct AiProfilePickerState {
+    pub(crate) items: Vec<AiProfilePickerItem>,
+    pub(crate) selected_index: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AiProfilePickerItem {
+    pub(crate) label: String,
+    pub(crate) kind: AiProfileKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum AiProfileKind {
+    /// No profile active.
+    None,
+    /// Built-in preset that already has a saved API key.
+    ActivePreset,
+    /// Built-in preset that needs an API key.
+    PresetNeedsKey,
+    /// Custom user-defined profile from config.toml.
+    Custom,
+}
+
+/// API key input overlay state.
+#[derive(Clone, Debug)]
+pub(crate) struct ApiKeyInputState {
+    pub(crate) preset_name: String,
+    pub(crate) key_hint: String,
+    pub(crate) input: gpui::Entity<gpui_component::input::InputState>,
+}
+
 /// New-tab picker state (dropdown from the `+▾` button).
 #[derive(Clone, Debug)]
 pub(crate) struct NewTabPickerState {

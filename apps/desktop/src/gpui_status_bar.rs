@@ -11,6 +11,8 @@ pub struct AgentSummary {
     pub name: String,
     pub status_icon: &'static str,
     pub color: u32,
+    pub pane_id: amux_platform::terminal::manager::PaneId,
+    pub tab_index: usize,
 }
 
 /// Runtime status bar data collected from actual terminal state
@@ -29,6 +31,8 @@ pub struct StatusBarData {
     /// rate). Populated from `metrics::snapshot()` when
     /// `AMUX_DEBUG_STATS=1`; `None` otherwise.
     pub debug_stats: Option<String>,
+    /// Active AI profile name (shown in status bar when set).
+    pub active_ai_profile: Option<String>,
 }
 
 #[cfg(feature = "gpui")]
@@ -47,7 +51,7 @@ pub fn render_status_bar(
         .items_center()
         .px_3()
         .pt(px(8.0)) // breathing room above the bar
-        .h(px(34.0)) // 26px content + 8px top padding
+        .h(px(theme::STATUS_BAR_H))
         .bg(rgb(crate::theme::SURFACE))
         .border_t_1()
         .border_color(rgb(crate::theme::SURFACE_RAISED))
@@ -98,7 +102,25 @@ pub fn render_status_bar(
                             div().text_color(rgb(crate::theme::TEXT_DIM))
                                 .child(format!("{} {}", tab_count, if tab_count == 1 { "tab" } else { "tabs" }))
                         ),
-                ),
+                )
+                // AI profile indicator
+                .children(data.active_ai_profile.as_ref().map(|name| {
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .items_center()
+                        .child(div().w_px().h(px(12.0)).bg(rgb(crate::theme::BORDER)))
+                        .child(
+                            div()
+                                .px(px(6.0))
+                                .py(px(1.0))
+                                .rounded(px(theme::RADIUS_SM))
+                                .bg(rgb(theme::SURFACE_DIM))
+                                .text_color(rgb(theme::INFO))
+                                .child(name.clone())
+                        )
+                        .into_any_element()
+                })),
         )
         // Right section
         .child(
@@ -141,7 +163,7 @@ pub fn render_status_bar(
                             .border_color(rgb(theme::DANGER))
                             .text_color(rgb(theme::DANGER_BRIGHT))
                             .cursor_pointer()
-                            .hover(|d| d.bg(rgb(theme::DANGER)))
+                            .hover(|d| d.bg(rgb(theme::DANGER_BG)).border_color(rgb(theme::DANGER_BRIGHT)))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.reveal_crash_logs();
                                 cx.notify();
@@ -164,19 +186,31 @@ pub fn render_status_bar(
                         div().w_px().h(px(12.0)).bg(rgb(crate::theme::BORDER)).into_any_element(),
                     ];
                     for agent in &data.agents {
+                        let pid = agent.pane_id.clone();
+                        let tab_idx = agent.tab_index;
                         els.push(
                             div()
+                                .id(ElementId::Name(format!("agent-{}", agent.name).into()))
                                 .flex()
                                 .gap(px(4.0))
                                 .items_center()
+                                .px(px(4.0))
+                                .rounded(px(3.0))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(theme::SURFACE_RAISED)))
                                 .child(
                                     div().text_color(rgb(agent.color))
                                         .child(agent.status_icon)
                                 )
                                 .child(
-                                    div().text_color(rgb(crate::theme::TEXT_DIM))
+                                    div().text_color(rgb(theme::TEXT_DIM))
                                         .child(agent.name.clone())
                                 )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.terminal_manager_mut().set_active_pane(&pid);
+                                    this.terminal_manager_mut().set_active_tab_in_pane(tab_idx);
+                                    cx.notify();
+                                }))
                                 .into_any_element(),
                         );
                     }

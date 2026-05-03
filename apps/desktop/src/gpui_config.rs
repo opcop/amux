@@ -4,7 +4,76 @@
 //! if missing or corrupted, defaults are used silently (corrupted files
 //! print a warning to stderr).
 
-use serde::Deserialize;
+use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+
+/// Built-in AI provider preset. Ships with the app — users only need
+/// to supply an API key to activate one. The `env` map is a template:
+/// values containing `{api_key}` are interpolated at runtime.
+#[derive(Clone, Debug)]
+pub(crate) struct AiPreset {
+    pub name: &'static str,
+    pub api_key_hint: &'static str,
+    pub env: fn(api_key: &str) -> HashMap<String, String>,
+}
+
+/// Built-in presets. Order matters — shown in the picker in this order.
+pub(crate) fn builtin_presets() -> Vec<AiPreset> {
+    vec![
+        AiPreset {
+            name: "DeepSeek V4",
+            api_key_hint: "sk-...",
+            env: |key| {
+                let mut m = HashMap::new();
+                m.insert("ANTHROPIC_BASE_URL".into(), "https://api.deepseek.com/anthropic".into());
+                m.insert("ANTHROPIC_AUTH_TOKEN".into(), key.into());
+                m.insert("ANTHROPIC_MODEL".into(), "deepseek-v4-pro[1m]".into());
+                m.insert("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), "deepseek-v4-pro".into());
+                m.insert("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), "deepseek-v4-pro".into());
+                m.insert("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), "deepseek-v4-flash".into());
+                m.insert("CLAUDE_CODE_SUBAGENT_MODEL".into(), "deepseek-v4-pro".into());
+                m.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into());
+                m
+            },
+        },
+        AiPreset {
+            name: "MiMo",
+            api_key_hint: "tp-...",
+            env: |key| {
+                let mut m = HashMap::new();
+                m.insert("ANTHROPIC_BASE_URL".into(), "https://token-plan-cn.xiaomimimo.com/anthropic".into());
+                m.insert("ANTHROPIC_AUTH_TOKEN".into(), key.into());
+                m.insert("ANTHROPIC_MODEL".into(), "mimo-v2.5-pro".into());
+                m.insert("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), "mimo-v2.5-pro".into());
+                m.insert("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), "mimo-v2.5-pro".into());
+                m.insert("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), "mimo-v2.5-pro".into());
+                m
+            },
+        },
+        AiPreset {
+            name: "OpenRouter (Ling)",
+            api_key_hint: "sk-or-...",
+            env: |key| {
+                let mut m = HashMap::new();
+                m.insert("ANTHROPIC_BASE_URL".into(), "https://openrouter.ai/api".into());
+                m.insert("ANTHROPIC_AUTH_TOKEN".into(), key.into());
+                m.insert("ANTHROPIC_API_KEY".into(), "".into());
+                m.insert("ANTHROPIC_MODEL".into(), "inclusionai/ling-2.6-1t:free".into());
+                m.insert("ANTHROPIC_SMALL_FAST_MODEL".into(), "inclusionai/ling-2.6-1t:free".into());
+                m.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into());
+                m
+            },
+        },
+    ]
+}
+
+/// Custom user-defined profile (from config.toml `[[ai_profiles]]`).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct AiProfile {
+    pub name: String,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
 
 /// Application configuration.
 ///
@@ -31,6 +100,14 @@ pub(crate) struct AmuxConfig {
     pub theme: String,
     /// Scrollback buffer size in lines.
     pub scrollback: usize,
+    /// AI model provider profiles for Claude Code integration.
+    /// Each profile defines env vars injected into new terminals.
+    #[serde(default)]
+    pub ai_profiles: Vec<AiProfile>,
+    /// API keys for built-in presets. Maps preset name → API key.
+    /// Stored here so users don't need to edit config.toml manually.
+    #[serde(default)]
+    pub ai_keys: HashMap<String, String>,
 }
 
 impl Default for AmuxConfig {
@@ -53,6 +130,8 @@ impl Default for AmuxConfig {
             line_height: 1.4,
             theme: "tomorrow-night".to_string(),
             scrollback: 10000,
+            ai_profiles: Vec::new(),
+            ai_keys: HashMap::new(),
         }
     }
 }
@@ -86,6 +165,25 @@ impl AmuxConfig {
         self.font_size = self.font_size.clamp(6.0, 72.0);
         self.line_height = self.line_height.clamp(1.0, 3.0);
         self.scrollback = self.scrollback.clamp(100, 100_000);
+    }
+
+    /// Save ai_keys back to config.toml, preserving all other fields.
+    pub fn save_ai_keys(&self) {
+        let path = crate::gpui_workspace_persistence::amux_config_path();
+        // Read existing config to preserve fields we don't touch.
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut doc: toml::Value = existing.parse().unwrap_or(toml::Value::Table(toml::map::Map::new()));
+        // Update the [ai_keys] section.
+        if let Some(table) = doc.as_table_mut() {
+            let keys_table: toml::value::Table = self.ai_keys.iter()
+                .map(|(k, v)| (k.clone(), toml::Value::String(v.clone())))
+                .collect();
+            table.insert("ai_keys".to_string(), toml::Value::Table(keys_table));
+        }
+        match toml::to_string_pretty(&doc) {
+            Ok(output) => { let _ = std::fs::write(&path, output); }
+            Err(e) => eprintln!("amux: failed to serialize config: {}", e),
+        }
     }
 }
 

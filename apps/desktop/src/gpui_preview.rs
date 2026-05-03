@@ -919,28 +919,21 @@ pub fn render_preview_panel(
                                     }))
                             )
                         })
-                        // Find button — only for code-file previews
-                        // where the search path is wired. Clicking it
-                        // opens the same `/` search bar.
-                        .when(
-                            matches!(state.elements.as_slice(), [PreviewElement::CodeBlock { .. }]),
-                            |d| {
-                                d.child(
-                                    div()
-                                        .id("preview-find-btn")
-                                        .text_xs()
-                                        .text_color(rgb(crate::theme::TEXT_DIM))
-                                        .px(px(5.0))
-                                        .py(px(2.0))
-                                        .rounded(px(3.0))
-                                        .cursor_pointer()
-                                        .hover(|d| d.text_color(rgb(crate::theme::ACCENT)).bg(rgb(crate::theme::SURFACE_RAISED)))
-                                        .child("Find")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.preview_search_open(cx);
-                                        }))
-                                )
-                            },
+                        // Find button — works for both code and markdown
+                        .child(
+                            div()
+                                .id("preview-find-btn")
+                                .text_xs()
+                                .text_color(rgb(crate::theme::TEXT_DIM))
+                                .px(px(5.0))
+                                .py(px(2.0))
+                                .rounded(px(3.0))
+                                .cursor_pointer()
+                                .hover(|d| d.text_color(rgb(crate::theme::ACCENT)).bg(rgb(crate::theme::SURFACE_RAISED)))
+                                .child("Find")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.preview_search_open(cx);
+                                }))
                         )
                         // Copy button
                         .child(
@@ -982,6 +975,8 @@ pub fn render_preview_panel(
                         *total_lines,
                         scroll_handle,
                         highlight_line,
+                        selection_ctx,
+                        cx,
                     )
                 }
                 _ => render_markdown_body(state, list_state, selection_ctx, cx),
@@ -1029,8 +1024,8 @@ fn render_preview_hint_bar(state: &PreviewState) -> AnyElement {
     // visual consistency.
     let hint = match (is_code_only, has_headings) {
         (true, _) => "/  find    n / N  next / prev    Y  copy all    c  copy block",
-        (false, true) => "[ ]  prev / next heading    o  toc    Y  copy all",
-        (false, false) => "Y  copy all",
+        (false, true) => "/  find    [ ]  heading    o  toc    Y  copy all",
+        (false, false) => "/  find    Y  copy all",
     };
     div()
         .flex()
@@ -1244,7 +1239,10 @@ fn render_code_block_fullscreen(
     total_lines: usize,
     scroll_handle: gpui::UniformListScrollHandle,
     highlight_line: Option<usize>,
+    selection_ctx: Option<crate::preview_selection::SelectionRenderCtx>,
+    cx: &mut gpui::Context<GpuiShellView>,
 ) -> AnyElement {
+    use gpui_component::ElementExt;
     let lines: Arc<[(String, String, u32)]> = Arc::from(formatted_lines);
     // Gutter width in pixels: we size it once here from the first
     // row's character count and pass it to every row. Without a
@@ -1264,12 +1262,37 @@ fn render_code_block_fullscreen(
     let gutter_px = px(gutter_chars as f32 * 7.5 + 16.0);
     let list_lines = lines.clone();
 
+    // Mouse handlers + prepaint bounds capture — same pattern as
+    // render_markdown_body so text selection works on code previews.
+    let view_entity = cx.entity().clone();
+    let on_prepaint_body = move |bounds: gpui::Bounds<gpui::Pixels>,
+                                 _w: &mut gpui::Window,
+                                 cx: &mut gpui::App| {
+        let _ = view_entity.update(cx, |this, _| {
+            this.preview_body_bounds = Some(bounds);
+        });
+    };
+    let on_mouse_down = cx.listener(|this, event: &gpui::MouseDownEvent, _w, cx| {
+        this.preview_selection_mouse_down(event.position, cx);
+    });
+    let on_mouse_move = cx.listener(|this, event: &gpui::MouseMoveEvent, _w, cx| {
+        this.preview_selection_mouse_move(event.position, cx);
+    });
+    let on_mouse_up = cx.listener(|this, _event: &gpui::MouseUpEvent, _w, cx| {
+        this.preview_selection_mouse_up(cx);
+    });
+    let sel_ctx = selection_ctx.clone();
+
     div()
         .flex_1()
         .flex()
         .flex_col()
         .overflow_hidden()
         .bg(rgb(crate::theme::SURFACE_DIM))
+        .on_prepaint(on_prepaint_body)
+        .on_mouse_down(gpui::MouseButton::Left, on_mouse_down)
+        .on_mouse_move(on_mouse_move)
+        .on_mouse_up(gpui::MouseButton::Left, on_mouse_up)
         // Language + line-count header (shown only when non-empty)
         .when(!language.is_empty() || total_lines > 0, |d| {
             d.child(
@@ -1294,10 +1317,11 @@ fn render_code_block_fullscreen(
                 lines.len(),
                 move |range, _window, _cx| {
                     let lines = list_lines.clone();
+                    let sel = sel_ctx.clone();
                     range.map(move |i| {
                         let (num, text, color) = &lines[i];
                         let is_match = Some(i) == highlight_line;
-                        build_code_row(num, text, *color, gutter_px, is_match)
+                        build_code_row(num, text, *color, gutter_px, is_match, i, sel.as_ref())
                     }).collect()
                 },
             )
@@ -1320,7 +1344,13 @@ fn build_code_row(
     color: u32,
     gutter_px: gpui::Pixels,
     is_match: bool,
+    line_idx: usize,
+    selection_ctx: Option<&crate::preview_selection::SelectionRenderCtx>,
 ) -> AnyElement {
+    use crate::preview_selection::{SelectableText, TextLocation};
+    // element_idx = 0 because a pure code file is a single
+    // CodeBlock element wrapping all lines.
+    let location = TextLocation::new(0, line_idx);
     // `is_match`: the row holds the currently-selected search match.
     // We tint the whole row so the eye finds it even on long lines
     // where the match text is off-screen. Per-character inline
@@ -1352,7 +1382,10 @@ fn build_code_row(
                 .pr(px(8.0))
                 .text_color(rgb(color))
                 .whitespace_nowrap()
-                .child(text.to_string())
+                .child(
+                    SelectableText::new(location, text.to_string())
+                        .with_selection_ctx(selection_ctx.cloned()),
+                )
         )
         .into_any_element()
 }
@@ -1767,7 +1800,7 @@ impl FilePickerState {
                 .collect()
         } else {
             all_files.iter()
-                .filter(|(p, _)| p.to_lowercase().contains(&query_lower))
+                .filter(|(p, _)| fuzzy_match(&p.to_lowercase(), &query_lower))
                 .take(max)
                 .map(|(p, _)| p.clone())
                 .collect()
@@ -2005,6 +2038,23 @@ pub fn render_file_picker(
                 )
         )
         .into_any_element()
+}
+
+/// Simple fuzzy match: all query characters must appear in order in the path.
+/// Also matches substring (fuzzy is a superset). Separators (/ . _ -) in the
+/// query must match literally.
+fn fuzzy_match(path: &str, query: &str) -> bool {
+    if path.contains(query) {
+        return true;
+    }
+    let mut qi = 0usize;
+    let qc: Vec<char> = query.chars().collect();
+    for pc in path.chars() {
+        if qi < qc.len() && pc == qc[qi] {
+            qi += 1;
+        }
+    }
+    qi == qc.len()
 }
 
 #[cfg(all(test, feature = "gpui"))]

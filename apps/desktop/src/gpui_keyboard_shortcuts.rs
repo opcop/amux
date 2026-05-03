@@ -37,6 +37,15 @@ impl Shortcut {
             category,
         }
     }
+
+    /// Platform-aware display label. On macOS, "Ctrl" is shown as "Cmd".
+    pub fn display_label(&self) -> String {
+        if cfg!(target_os = "macos") {
+            self.label.replace("Ctrl+", "Cmd+")
+        } else {
+            self.label.clone()
+        }
+    }
 }
 
 /// Returns all defined shortcuts
@@ -136,15 +145,27 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
             ShortcutCategory::Terminal,
         ),
         Shortcut::new(
-            "ctrl+=",
-            "Ctrl++",
+            "ctrl+shift+=",
+            "Ctrl+Shift++",
             "Increase font size",
+            ShortcutCategory::Terminal,
+        ),
+        Shortcut::new(
+            "ctrl+shift+-",
+            "Ctrl+Shift+-",
+            "Decrease font size",
             ShortcutCategory::Terminal,
         ),
         Shortcut::new(
             "ctrl+-",
             "Ctrl+-",
-            "Decrease font size",
+            "Navigate back",
+            ShortcutCategory::Terminal,
+        ),
+        Shortcut::new(
+            "ctrl+=",
+            "Ctrl+=",
+            "Navigate forward",
             ShortcutCategory::Terminal,
         ),
         Shortcut::new(
@@ -217,9 +238,21 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
             ShortcutCategory::App,
         ),
         Shortcut::new(
+            "ctrl+shift+h",
+            "Ctrl+Shift+H",
+            "Toggle help overlay",
+            ShortcutCategory::App,
+        ),
+        Shortcut::new(
+            "ctrl+shift+i",
+            "Ctrl+Shift+I",
+            "Open AI profile picker",
+            ShortcutCategory::App,
+        ),
+        Shortcut::new(
             "escape",
             "Escape",
-            "Close palette / Cancel",
+            "Close palette / Cancel / Close help",
             ShortcutCategory::App,
         ),
         // Arrow navigation

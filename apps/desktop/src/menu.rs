@@ -66,17 +66,20 @@ impl ContextMenuItem {
 /// no `format!` runs on the render path — this used to allocate
 /// seven+ `String`s per frame when it lived inline.
 pub(crate) fn build_items(view: &GpuiShellView) -> Vec<ContextMenuItem> {
-    let has_selection = view
+    // Check for a selection: terminal selection (alacritty) takes
+    // priority; fallback is a non-empty preview text selection.
+    let has_terminal_selection = view
         .terminal_manager()
         .active_terminal_ref()
         .and_then(|t| t.with_term(|term| term.selection_to_string()))
         .map(|s| !s.is_empty())
         .unwrap_or(false);
+    let has_preview_selection = view.has_preview_text_selection();
+    let has_selection = has_terminal_selection || has_preview_selection;
 
     #[cfg(target_os = "macos")]
     mod shortcut_labels {
         pub const COPY: &str = "⌘⇧C";
-        pub const SELECT_ALL: &str = "⌘A";
         pub const CLEAR: &str = "⌘K";
         pub const SEND: &str = "⌘⇧Enter";
         pub const PASTE: &str = "⌘V";
@@ -89,7 +92,6 @@ pub(crate) fn build_items(view: &GpuiShellView) -> Vec<ContextMenuItem> {
     #[cfg(not(target_os = "macos"))]
     mod shortcut_labels {
         pub const COPY: &str = "Ctrl+Shift+C";
-        pub const SELECT_ALL: &str = "Ctrl+Shift+A";
         pub const CLEAR: &str = "Ctrl+K";
         pub const SEND: &str = "Ctrl+Shift+Enter";
         pub const PASTE: &str = "Ctrl+V";
@@ -122,9 +124,9 @@ pub(crate) fn build_items(view: &GpuiShellView) -> Vec<ContextMenuItem> {
     }
     items.extend([
         ContextMenuItem::action("Copy", Some(COPY), has_selection),
-        ContextMenuItem::action("Select All", Some(SELECT_ALL), true),
+        ContextMenuItem::action("Select All", None, true),
         ContextMenuItem::action("Paste", Some(PASTE), true).separator(),
-        ContextMenuItem::action("Send to Pane", Some(SEND), multi_pane),
+        ContextMenuItem::action("Send to Pane", Some(SEND), multi_pane && has_selection),
         ContextMenuItem::action("Split Right", Some(SPLIT_RIGHT), true),
         ContextMenuItem::action("Split Down", Some(SPLIT_DOWN), true).separator(),
         ContextMenuItem::action("New Tab", Some(NEW_TAB), true),
@@ -190,7 +192,17 @@ pub(crate) fn dispatch(
                 crate::preview_open::open_preview_file(view, cx, &path);
             }
         }
-        "Copy" => view.copy_selection(cx),
+        "Copy" => {
+            // Preview text selection takes precedence (same priority
+            // as the Cmd+C keyboard handler). Without this, right-click
+            // → Copy on a preview silently does nothing because
+            // `copy_selection` only reads terminal selections.
+            if view.has_preview_text_selection() {
+                view.copy_preview_selection(cx);
+            } else {
+                view.copy_selection(cx);
+            }
+        }
         "Select All" => view.select_all_in_terminal(cx),
         "Send to Pane" => view.start_send_to_pane(cx),
         "Paste" => view.paste_clipboard(cx),
@@ -217,7 +229,11 @@ pub(crate) fn dispatch(
         "Zoom Pane" | "Restore Pane" => view.toggle_zoom(),
         "Clear Buffer" => {
             if let Some(term) = view.terminal_manager_mut().active_terminal() {
-                term.clear_buffer();
+                term.with_term_mut(|t| {
+                    use alacritty_terminal::vte::ansi::Handler;
+                    t.clear_screen(alacritty_terminal::vte::ansi::ClearMode::Saved);
+                    t.clear_screen(alacritty_terminal::vte::ansi::ClearMode::All);
+                });
             }
         }
         _ => {}

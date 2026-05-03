@@ -149,10 +149,21 @@ impl GpuiShellView {
     /// Initiate "Send to Pane": grab the current selection and either send
     /// directly (if only one other pane) or open the pane picker.
     pub(crate) fn start_send_to_pane(&mut self, _cx: &mut Context<Self>) {
-        // 1. Get selected text from active terminal
-        let text = self.terminal_manager_mut().active_terminal()
-            .and_then(|term| term.with_term(|t| t.selection_to_string()))
-            .unwrap_or_default();
+        // 1. Get selected text: preview selection takes priority over
+        // terminal selection. Without this, right-click → Send to Pane
+        // on a preview tab silently does nothing because
+        // `selection_to_string` only reads alacritty selections.
+        let text = if self.has_preview_text_selection() {
+            let ranges = self.preview_selection_ranges.borrow();
+            let path = self.active_preview_path().unwrap_or_default();
+            self.preview_tabs.get(&path)
+                .map(|p| crate::preview_selection::extract_selected_text(p, &ranges))
+                .unwrap_or_default()
+        } else {
+            self.terminal_manager_mut().active_terminal()
+                .and_then(|term| term.with_term(|t| t.selection_to_string()))
+                .unwrap_or_default()
+        };
         if text.is_empty() { return; }
 
         // 2. Get list of other panes
