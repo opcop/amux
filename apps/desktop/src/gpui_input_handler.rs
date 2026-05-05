@@ -4,7 +4,7 @@
 //! and the `on_global_key_down` handler extracted from `gpui_entry.rs`.
 
 #[cfg(feature = "gpui")]
-use gpui::{Context, Window, Bounds, Pixels, UTF16Selection};
+use gpui::{Bounds, Context, Pixels, UTF16Selection, Window};
 
 #[cfg(feature = "gpui")]
 use amux_platform::terminal::manager::SplitDirection;
@@ -16,19 +16,29 @@ use crate::gpui_entry::GpuiShellView;
 #[cfg(feature = "gpui")]
 impl gpui::EntityInputHandler for GpuiShellView {
     fn text_for_range(
-        &mut self, _range: std::ops::Range<usize>, _adjusted: &mut Option<std::ops::Range<usize>>,
-        _window: &mut Window, _cx: &mut Context<Self>,
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _adjusted: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) -> Option<String> {
         None
     }
 
     fn selected_text_range(
-        &mut self, _ignore: bool, _window: &mut Window, _cx: &mut Context<Self>,
+        &mut self,
+        _ignore: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         None // Don't report selection — prevents GPUI from drawing a stray text caret
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
         // Return a valid range when IME composition is active so GPUI
         // knows not to dispatch regular key events for the composing
         // keystrokes. Without this, GPUI treats every keystroke as
@@ -48,10 +58,15 @@ impl gpui::EntityInputHandler for GpuiShellView {
     }
 
     fn replace_text_in_range(
-        &mut self, _range: Option<std::ops::Range<usize>>, text: &str,
-        _window: &mut Window, cx: &mut Context<Self>,
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
-        if text.is_empty() { return; }
+        if text.is_empty() {
+            return;
+        }
         // Start the input-latency stopwatch. Paired with
         // `metrics::consume_input_latency()` at the top of
         // `Render::render`.
@@ -60,7 +75,12 @@ impl gpui::EntityInputHandler for GpuiShellView {
         // If browser URL Input is focused, don't intercept text
         if let Some((_, entry)) = self.active_browser_entry() {
             use gpui::Focusable;
-            if entry.url_input.read(cx).focus_handle(cx).is_focused(_window) {
+            if entry
+                .url_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(_window)
+            {
                 return;
             }
         }
@@ -189,8 +209,12 @@ impl gpui::EntityInputHandler for GpuiShellView {
     }
 
     fn replace_and_mark_text_in_range(
-        &mut self, _range: Option<std::ops::Range<usize>>, new_text: &str,
-        _selected: Option<std::ops::Range<usize>>, _window: &mut Window, cx: &mut Context<Self>,
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        _selected: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         // IME composition in progress — show preedit text overlay
         let trimmed = new_text.trim();
@@ -203,8 +227,11 @@ impl gpui::EntityInputHandler for GpuiShellView {
     }
 
     fn bounds_for_range(
-        &mut self, _range: std::ops::Range<usize>, _element_bounds: Bounds<Pixels>,
-        _window: &mut Window, _cx: &mut Context<Self>,
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         // Always return the terminal cursor's screen position so that:
         //   1. GPUI positions its built-in IME composition box ("方框")
@@ -218,13 +245,14 @@ impl gpui::EntityInputHandler for GpuiShellView {
         // window defaulted to the wrong location.
         let metrics = self.cell_metrics.as_ref()?;
         let active_pid = self.terminal_manager().active_pane_id()?.clone();
-        let (cursor_col, cursor_row) = self.terminal_manager().active_terminal_ref()
-            .map(|t| t.with_term(|term| {
+        let (cursor_col, cursor_row) = self.terminal_manager().active_terminal_ref().map(|t| {
+            t.with_term(|term| {
                 let c = term.renderable_content().cursor;
                 let display_offset = term.grid().display_offset() as i32;
                 let viewport_row = (c.point.line.0 + display_offset).max(0) as usize;
                 (c.point.column.0, viewport_row)
-            }))?;
+            })
+        })?;
         let &(origin_x, origin_y, _, _) = self.pane_bounds.get(&active_pid.0)?;
         let pad = crate::gpui_terminal::TERMINAL_LEFT_PADDING;
         let x = origin_x + pad + cursor_col as f32 * metrics.width;
@@ -244,7 +272,10 @@ impl gpui::EntityInputHandler for GpuiShellView {
     }
 
     fn character_index_for_point(
-        &mut self, _point: gpui::Point<Pixels>, _window: &mut Window, _cx: &mut Context<Self>,
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) -> Option<usize> {
         None
     }
@@ -368,7 +399,6 @@ impl GpuiShellView {
             }
         }
 
-
         // (Legacy standalone preview_state removed — preview is now tab-based)
 
         // Swallow keys so rename doesn't leak to the terminal.
@@ -465,11 +495,7 @@ impl GpuiShellView {
                     return;
                 }
                 "backspace" => {
-                    if self
-                        .preview_search
-                        .as_ref()
-                        .is_some_and(|s| s.input_active)
-                    {
+                    if self.preview_search.as_ref().is_some_and(|s| s.input_active) {
                         self.preview_search_backspace(cx);
                     }
                     return;
@@ -484,7 +510,9 @@ impl GpuiShellView {
                 "escape" | "ctrl+f" => {
                     // Clear selection and close search
                     if let Some(term) = self.terminal_manager_mut().active_terminal() {
-                        term.with_term_mut(|t| { t.selection = None; });
+                        term.with_term_mut(|t| {
+                            t.selection = None;
+                        });
                     }
                     self.search_state = None;
                     cx.notify();
@@ -544,17 +572,25 @@ impl GpuiShellView {
                     self.file_picker = None;
                 }
                 "enter" => {
-                    let idx = self.file_picker.as_ref().map(|p| p.selected_index).unwrap_or(0);
+                    let idx = self
+                        .file_picker
+                        .as_ref()
+                        .map(|p| p.selected_index)
+                        .unwrap_or(0);
                     crate::preview_open::open_preview_from_picker(self, cx, idx);
                 }
                 "up" | "arrowup" => {
                     if let Some(ref mut p) = self.file_picker {
-                        if p.selected_index > 0 { p.selected_index -= 1; }
+                        if p.selected_index > 0 {
+                            p.selected_index -= 1;
+                        }
                     }
                 }
                 "down" | "arrowdown" => {
                     if let Some(ref mut p) = self.file_picker {
-                        if p.selected_index + 1 < p.matches.len() { p.selected_index += 1; }
+                        if p.selected_index + 1 < p.matches.len() {
+                            p.selected_index += 1;
+                        }
                     }
                 }
                 "backspace" => {
@@ -581,17 +617,25 @@ impl GpuiShellView {
                 }
                 "up" | "arrowup" => {
                     if let Some(ref mut p) = self.agent_picker {
-                        if p.selected_index > 0 { p.selected_index -= 1; }
+                        if p.selected_index > 0 {
+                            p.selected_index -= 1;
+                        }
                     }
                 }
                 "down" | "arrowdown" => {
                     if let Some(ref mut p) = self.agent_picker {
-                        if p.selected_index + 1 < p.agents.len() { p.selected_index += 1; }
+                        if p.selected_index + 1 < p.agents.len() {
+                            p.selected_index += 1;
+                        }
                     }
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    let len = self.agent_picker.as_ref().map(|p| p.agents.len()).unwrap_or(0);
+                    let len = self
+                        .agent_picker
+                        .as_ref()
+                        .map(|p| p.agents.len())
+                        .unwrap_or(0);
                     if n >= 1 && n <= len {
                         if let Some(ref mut picker) = self.agent_picker {
                             picker.selected_index = n - 1;
@@ -616,17 +660,25 @@ impl GpuiShellView {
                 }
                 "up" | "arrowup" => {
                     if let Some(ref mut p) = self.ai_profile_picker {
-                        if p.selected_index > 0 { p.selected_index -= 1; }
+                        if p.selected_index > 0 {
+                            p.selected_index -= 1;
+                        }
                     }
                 }
                 "down" | "arrowdown" => {
                     if let Some(ref mut p) = self.ai_profile_picker {
-                        if p.selected_index + 1 < p.items.len() { p.selected_index += 1; }
+                        if p.selected_index + 1 < p.items.len() {
+                            p.selected_index += 1;
+                        }
                     }
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    let len = self.ai_profile_picker.as_ref().map(|p| p.items.len()).unwrap_or(0);
+                    let len = self
+                        .ai_profile_picker
+                        .as_ref()
+                        .map(|p| p.items.len())
+                        .unwrap_or(0);
                     if n >= 1 && n <= len {
                         if let Some(ref mut picker) = self.ai_profile_picker {
                             picker.selected_index = n - 1;
@@ -671,12 +723,16 @@ impl GpuiShellView {
                 }
                 "up" | "arrowup" => {
                     if let Some(ref mut p) = self.new_tab_picker {
-                        if p.selected_index > 0 { p.selected_index -= 1; }
+                        if p.selected_index > 0 {
+                            p.selected_index -= 1;
+                        }
                     }
                 }
                 "down" | "arrowdown" => {
                     if let Some(ref mut p) = self.new_tab_picker {
-                        if p.selected_index + 1 < p.items.len() { p.selected_index += 1; }
+                        if p.selected_index + 1 < p.items.len() {
+                            p.selected_index += 1;
+                        }
                     }
                 }
                 _ => {}
@@ -699,17 +755,25 @@ impl GpuiShellView {
                 }
                 "up" | "arrowup" => {
                     if let Some(ref mut p) = self.template_picker {
-                        if p.selected_index > 0 { p.selected_index -= 1; }
+                        if p.selected_index > 0 {
+                            p.selected_index -= 1;
+                        }
                     }
                 }
                 "down" | "arrowdown" => {
                     if let Some(ref mut p) = self.template_picker {
-                        if p.selected_index + 1 < p.templates.len() { p.selected_index += 1; }
+                        if p.selected_index + 1 < p.templates.len() {
+                            p.selected_index += 1;
+                        }
                     }
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    let len = self.template_picker.as_ref().map(|p| p.templates.len()).unwrap_or(0);
+                    let len = self
+                        .template_picker
+                        .as_ref()
+                        .map(|p| p.templates.len())
+                        .unwrap_or(0);
                     if n >= 1 && n <= len {
                         if let Some(ref mut picker) = self.template_picker {
                             picker.selected_index = n - 1;
@@ -734,17 +798,25 @@ impl GpuiShellView {
                 }
                 "up" | "arrowup" => {
                     if let Some(ref mut p) = self.pane_picker {
-                        if p.selected_index > 0 { p.selected_index -= 1; }
+                        if p.selected_index > 0 {
+                            p.selected_index -= 1;
+                        }
                     }
                 }
                 "down" | "arrowdown" => {
                     if let Some(ref mut p) = self.pane_picker {
-                        if p.selected_index + 1 < p.targets.len() { p.selected_index += 1; }
+                        if p.selected_index + 1 < p.targets.len() {
+                            p.selected_index += 1;
+                        }
                     }
                 }
                 k if k.len() == 1 && k.as_bytes()[0] >= b'1' && k.as_bytes()[0] <= b'9' => {
                     let n = (k.as_bytes()[0] - b'0') as usize;
-                    let len = self.pane_picker.as_ref().map(|p| p.targets.len()).unwrap_or(0);
+                    let len = self
+                        .pane_picker
+                        .as_ref()
+                        .map(|p| p.targets.len())
+                        .unwrap_or(0);
                     if n >= 1 && n <= len {
                         if let Some(ref mut picker) = self.pane_picker {
                             picker.selected_index = n - 1;
@@ -773,21 +845,24 @@ impl GpuiShellView {
                 }
                 "ctrl+shift+\\" => {
                     let env = self.capture_active_env();
-                    self.terminal_manager_mut().split_active_pane(SplitDirection::Horizontal);
+                    self.terminal_manager_mut()
+                        .split_active_pane(SplitDirection::Horizontal);
                     self.spawn_with_captured_env(&env);
                     cx.notify();
                     return;
                 }
                 "ctrl+shift+d" => {
                     let env = self.capture_active_env();
-                    self.terminal_manager_mut().split_active_pane(SplitDirection::Vertical);
+                    self.terminal_manager_mut()
+                        .split_active_pane(SplitDirection::Vertical);
                     self.spawn_with_captured_env(&env);
                     cx.notify();
                     return;
                 }
                 "ctrl+shift+t" => {
                     let env = self.capture_active_env();
-                    self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
+                    self.terminal_manager_mut()
+                        .add_tab_to_active_pane("Terminal".into());
                     self.spawn_with_captured_env(&env);
                     cx.notify();
                     return;
@@ -819,7 +894,8 @@ impl GpuiShellView {
                     use crate::gpui_workspace_sidebar::SidebarMode;
                     self.sidebar_state.mode = match self.sidebar_state.mode {
                         SidebarMode::Workspaces => SidebarMode::Agents,
-                        SidebarMode::Agents => SidebarMode::Workspaces,
+                        SidebarMode::Agents => SidebarMode::Workbench,
+                        SidebarMode::Workbench => SidebarMode::Workspaces,
                     };
                     // Ensure sidebar is visible when toggling mode
                     if self.sidebar_state.collapsed {
@@ -933,9 +1009,11 @@ impl GpuiShellView {
                     let has_selection = self
                         .terminal_manager()
                         .active_terminal_ref()
-                        .map(|t| t.with_term(|term| {
-                            term.selection_to_string().map_or(false, |s| !s.is_empty())
-                        }))
+                        .map(|t| {
+                            t.with_term(|term| {
+                                term.selection_to_string().map_or(false, |s| !s.is_empty())
+                            })
+                        })
                         .unwrap_or(false);
                     if has_selection {
                         self.copy_selection(cx);
@@ -1014,7 +1092,8 @@ impl GpuiShellView {
                 "ctrl+t" => {
                     // New tab (Cmd+T on macOS)
                     let env = self.capture_active_env();
-                    self.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
+                    self.terminal_manager_mut()
+                        .add_tab_to_active_pane("Terminal".into());
                     self.spawn_with_captured_env(&env);
                     cx.notify();
                     return;
@@ -1112,19 +1191,60 @@ impl GpuiShellView {
                 cx.notify();
                 return;
             }
-            "enter" | "tab" | "backspace" | "escape" => {
+            "backspace" | "delete" => {
+                // Clear any visual selection before forwarding to PTY.
+                // The terminal can't know readline's cursor position, so we
+                // can't delete the selected range precisely — but clearing
+                // the highlight + forwarding the key gives the user both
+                // visual cleanup and a character deletion.
+                let has_selection = self
+                    .terminal_manager()
+                    .active_terminal_ref()
+                    .map(|t| {
+                        t.with_term(|term| {
+                            term.selection_to_string().map_or(false, |s| !s.is_empty())
+                        })
+                    })
+                    .unwrap_or(false);
+                if has_selection {
+                    if let Some(term) = self.terminal_manager_mut().active_terminal() {
+                        term.with_term_mut(|t| {
+                            t.selection = None;
+                        });
+                    }
+                }
                 self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
                 cx.notify();
                 return;
             }
-            s if s == "up" || s == "down" || s == "left" || s == "right"
-                || s.starts_with("arrow") || s.starts_with("f1")
-                || s.starts_with("f2") || s.starts_with("f3") || s.starts_with("f4")
-                || s.starts_with("f5") || s.starts_with("f6") || s.starts_with("f7")
-                || s.starts_with("f8") || s.starts_with("f9") || s.starts_with("f10")
-                || s.starts_with("f11") || s.starts_with("f12") || s.starts_with("page")
-                || s.starts_with("home") || s.starts_with("end") || s.starts_with("insert")
-                || s.starts_with("delete") => {
+            "enter" | "tab" | "escape" => {
+                self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
+                cx.notify();
+                return;
+            }
+            s if s == "up"
+                || s == "down"
+                || s == "left"
+                || s == "right"
+                || s.starts_with("arrow")
+                || s.starts_with("f1")
+                || s.starts_with("f2")
+                || s.starts_with("f3")
+                || s.starts_with("f4")
+                || s.starts_with("f5")
+                || s.starts_with("f6")
+                || s.starts_with("f7")
+                || s.starts_with("f8")
+                || s.starts_with("f9")
+                || s.starts_with("f10")
+                || s.starts_with("f11")
+                || s.starts_with("f12")
+                || s.starts_with("page")
+                || s.starts_with("home")
+                || s.starts_with("end")
+                || s.starts_with("insert")
+                || s.starts_with("delete") =>
+            {
                 self.handle_terminal_input(key, ctrl, shift, alt, window, cx);
                 cx.notify();
                 return;

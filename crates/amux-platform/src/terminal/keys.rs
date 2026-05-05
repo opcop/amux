@@ -18,7 +18,7 @@ pub fn to_pty(key: &str, ctrl: bool, shift: bool, alt: bool) -> Vec<u8> {
 pub fn to_pty_with_mode(key: &str, ctrl: bool, shift: bool, alt: bool, app_cursor: bool) -> Vec<u8> {
     // Special keys
     match key {
-        "Enter" => return if alt { vec![0x0A] } else { vec![0x0D] },
+        "Enter" => return if alt || shift { vec![0x0A] } else { vec![0x0D] },
         "Tab" => return vec![0x09],
         "Escape" => return vec![0x1B],
         "Backspace" => return vec![0x7F],
@@ -160,6 +160,16 @@ mod tests {
     #[test]
     fn test_enter() {
         assert_eq!(to_pty("Enter", false, false, false), vec![0x0D]);
+    }
+
+    #[test]
+    fn test_shift_enter_sends_lf() {
+        assert_eq!(to_pty("Enter", false, true, false), vec![0x0A]);
+    }
+
+    #[test]
+    fn test_alt_enter_sends_lf() {
+        assert_eq!(to_pty("Enter", false, false, true), vec![0x0A]);
     }
 
     #[test]

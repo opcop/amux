@@ -10,6 +10,7 @@
 pub enum SidebarMode {
     Workspaces,
     Agents,
+    Workbench,
 }
 
 /// Item representing an agent in the sidebar.

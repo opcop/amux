@@ -169,7 +169,13 @@ pub(crate) fn render_layout(
             // heal), show the same "Starting terminal..." placeholder the
             // missing-PTY branch uses. The bootstrap tick will re-run
             // ensure_workspace_terminal on the next interaction.
+            let mut has_waiting_agent = false;
             let (tab_strip, content) = if let Some(pane) = manager.get_pane(pane_id) {
+                // Check if the active tab has an agent waiting for input,
+                // used below to draw a subtle "ready for input" indicator.
+                has_waiting_agent = pane.tabs.iter().any(|t| {
+                    matches!(t.agent_status, Some(amux_platform::terminal::manager::AgentStatus::Waiting))
+                });
                 let tabs = pane.tab_titles();
                 let pid_for_tabs = pane_id.clone();
                 let has_multiple_panes = manager.total_panes() > 1;
@@ -720,8 +726,11 @@ pub(crate) fn render_layout(
                 pane_div
             };
             pane_div
-                // Active pane indicator: only show when multiple panes exist
-                // No extra border — active pane is indicated by tab strip's blue underline
+                // When the agent is waiting for input, draw a thin green
+                // top border to mimic desktop-app "input focus" feedback.
+                .when(is_active && has_waiting_agent, |d| {
+                    d.border_t_2().border_color(rgb(crate::theme::SUCCESS))
+                })
                 // Tab strip at top (limux style)
                 .child(tab_strip)
                 // Terminal content
@@ -1469,7 +1478,9 @@ fn render_exited_overlay(
                         .items_center()
                         .gap_3()
                         .child(
-                            div().text_sm().text_color(rgb(crate::theme::TEXT_DIM)).child("Process exited")
+                            div().flex().flex_col().items_center().gap(px(2.0))
+                                .child(div().text_sm().text_color(rgb(crate::theme::TEXT_DIM)).child("Process exited"))
+                                .child(div().text_xs().text_color(rgb(crate::theme::TEXT_DISABLED)).child("Tip: 'echo $?' in a new tab to see exit code"))
                         )
                         .child(
                             div()
@@ -1687,7 +1698,7 @@ pub(crate) fn render_help_overlay(cx: &mut Context<GpuiShellView>) -> impl IntoE
             div()
                 .id("help-overlay-modal")
                 .w(px(560.0))
-                .max_h(px(600.0))
+                .max_h(px(700.0))
                 .rounded(px(10.0))
                 .bg(rgb(crate::theme::SURFACE_DIM))
                 .border_1()
@@ -1708,9 +1719,9 @@ pub(crate) fn render_help_overlay(cx: &mut Context<GpuiShellView>) -> impl IntoE
                         .child(
                             div().text_xs().text_color(rgb(crate::theme::TEXT_DIM))
                                 .child(if cfg!(target_os = "macos") {
-                                    "Cmd+Shift+H / About Amux / Esc to close"
+                                    "Toggle: Cmd+Shift+H · Esc to close"
                                 } else {
-                                    "Ctrl+Shift+H / About Amux / Esc to close"
+                                    "Toggle: Ctrl+Shift+H · Esc to close"
                                 })
                         )
                 )

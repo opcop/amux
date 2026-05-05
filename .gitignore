@@ -29,3 +29,16 @@ vendor/
 
 third_party/
 .gstack/
+
+# Local agent/workspace state
+.agents/
+.claude-plugin/
+.qwen/
+/config.json
+/views.json
+/events.jsonl
+/skills-lock.json
+/labels/
+/statuses/
+/sessions/
+/untitled.md

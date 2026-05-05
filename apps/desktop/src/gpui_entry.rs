@@ -1,12 +1,11 @@
 #[cfg(feature = "gpui")]
-use amux_ui::{DesktopApp, GpuiWindowModel};
-#[cfg(feature = "gpui")]
-use gpui::{AppContext, Context, Window};
+use crate::gpui_workspace_sidebar::WorkspaceSidebarState;
 #[cfg(feature = "gpui")]
 use amux_platform::terminal::manager::TerminalManager;
 #[cfg(feature = "gpui")]
-use crate::gpui_workspace_sidebar::WorkspaceSidebarState;
-
+use amux_ui::{DesktopApp, GpuiWindowModel};
+#[cfg(feature = "gpui")]
+use gpui::{AppContext, Context, Window};
 
 #[cfg(feature = "gpui")]
 pub(crate) const SIDEBAR_WIDTH_COLLAPSED: f32 = 28.0;
@@ -80,6 +79,24 @@ pub(crate) struct GpuiShellView {
     pub(crate) api_key_input: Option<ApiKeyInputState>,
     /// Active AI profile name (persisted per workspace via env_profile_id)
     pub(crate) active_ai_profile: Option<String>,
+    /// Selected Workbench task id for the inline detail/action panel.
+    pub(crate) selected_workbench_task_id: Option<String>,
+    /// Inline proof/reason input for the selected Workbench task.
+    pub(crate) workbench_action_input: Option<WorkbenchActionInputState>,
+    /// Pending multi-line paste awaiting confirmation double-tap.
+    pub(crate) pending_paste: Option<crate::state::PendingPaste>,
+    /// Last seen agent status per pane (pane_id.0 → status label).
+    /// Used to detect status transitions for workbench auto-update.
+    pub(crate) last_agent_statuses: std::collections::HashMap<String, Option<String>>,
+    /// One-time discoverability hint shown on first render.
+    pub(crate) first_render_toast_shown: bool,
+    /// Hover peek state for agent sidebar — which agent pane is
+    /// being hovered and since when.
+    pub(crate) hovered_agent_pane: Option<String>,
+    pub(crate) hovered_agent_since: Option<std::time::Instant>,
+    /// Cached peek content (last N lines) for the hovered agent pane.
+    pub(crate) peek_content: Option<Vec<String>>,
+    pub(crate) peek_cached_for: Option<String>,
     /// New-tab dropdown picker (from `+▾` button on tab bar)
     pub(crate) new_tab_picker: Option<NewTabPickerState>,
     /// IME preedit text (composition in progress)
@@ -128,10 +145,8 @@ pub(crate) struct GpuiShellView {
     /// drains the channel each render tick and schedules a background
     /// reload for any path that still has a live `preview_tabs` entry.
     pub(crate) preview_watcher: Option<notify::RecommendedWatcher>,
-    pub(crate) preview_reload_tx:
-        std::sync::mpsc::Sender<Result<notify::Event, notify::Error>>,
-    pub(crate) preview_reload_rx:
-        std::sync::mpsc::Receiver<Result<notify::Event, notify::Error>>,
+    pub(crate) preview_reload_tx: std::sync::mpsc::Sender<Result<notify::Event, notify::Error>>,
+    pub(crate) preview_reload_rx: std::sync::mpsc::Receiver<Result<notify::Event, notify::Error>>,
     /// In-document search state for the active preview (`/`, `n`, `N`).
     /// `None` when no search is active. Cleared on Escape or when the
     /// active preview tab changes path.
@@ -165,8 +180,7 @@ pub(crate) struct GpuiShellView {
     /// (via generation mismatch), or click outside the preview body.
     /// Not persisted across app restart — selection is a per-session
     /// UI affordance, not saved state.
-    pub(crate) preview_selection:
-        Option<crate::preview_selection::PreviewSelectionState>,
+    pub(crate) preview_selection: Option<crate::preview_selection::PreviewSelectionState>,
     /// Window-space bounds of the markdown preview body container,
     /// refreshed every render tick via an `on_prepaint` canvas inside
     /// `render_markdown_body`. Mouse handlers read this to convert
@@ -183,7 +197,8 @@ pub(crate) struct GpuiShellView {
     /// Unix socket notification receiver. The listener thread pushes
     /// `SocketNotification` messages; the 1 Hz poll loop drains them
     /// and creates toast notifications.
-    pub(crate) socket_notify_rx: Option<std::sync::mpsc::Receiver<amux_platform::socket_notify::SocketNotification>>,
+    pub(crate) socket_notify_rx:
+        Option<std::sync::mpsc::Receiver<amux_platform::socket_notify::SocketNotification>>,
     /// Help overlay showing keyboard shortcuts and commands.
     pub(crate) show_help: bool,
     /// Workspace pending delete confirmation (first click sets this, second click deletes)
@@ -211,10 +226,10 @@ pub(crate) struct HoverLinkState {
 // comment for scope policy. Imported here for internal use only.
 #[cfg(feature = "gpui")]
 pub(crate) use crate::state::{
-    AgentPickerState, AiProfilePickerState, ApiKeyInputState, ContextMenuState,
-    NewTabPickerState, PanePickerState, ResizeDragState, ScrollbarDragState,
-    ScrollbarHit, SearchState, SelectionAutoScrollState, TemplatePickerState,
-    ToastNotification,
+    AgentPickerState, AiProfilePickerState, ApiKeyInputState, ContextMenuState, NewTabPickerState,
+    PanePickerState, PendingPaste, ResizeDragState, ScrollbarDragState, ScrollbarHit, SearchState,
+    SelectionAutoScrollState, TemplatePickerState, ToastNotification, WorkbenchActionInputKind,
+    WorkbenchActionInputState,
 };
 
 // Drag ghost views (`DragTab`, `DragWorkspace`) live in
@@ -310,15 +325,12 @@ impl GpuiShellView {
             .detach();
             return;
         }
-        // Picker capability not advertised — historically this
-        // dropped into the command palette with a "workspace open "
-        // query pre-filled, but the palette UI was never mounted in
-        // the render tree so that fallback only turned the terminal
-        // into an invisible keystroke trap. Log the capability gap
-        // and return without side effects; the caller (right-click
-        // menu or sidebar) already has its own no-op on miss.
-        eprintln!(
-            "[amux] prompt_open_local_workspace: folder picker not available on this platform"
+        // Folder picker not available on this platform (e.g. Linux
+        // without xdg-desktop-portal). Show a toast so the user knows
+        // what happened instead of silently doing nothing.
+        self.push_workbench_toast(
+            "Open workspace requires a native folder picker — use 'Ctrl+Shift+N' or type the path",
+            crate::theme::WARNING,
         );
     }
 
@@ -412,8 +424,7 @@ impl GpuiShellView {
                               cx: &mut Context<GpuiShellView>| {
                     let trimmed = new_name.trim();
                     if !trimmed.is_empty() {
-                        let pid =
-                            amux_platform::terminal::manager::PaneId(pane_id_for_sub.clone());
+                        let pid = amux_platform::terminal::manager::PaneId(pane_id_for_sub.clone());
                         if let Some(pane) = this.terminal_manager_mut().get_pane_mut(&pid) {
                             if let Some(tab) = pane.tabs.get_mut(tab_idx) {
                                 tab.title = trimmed.to_string();
@@ -480,24 +491,55 @@ impl GpuiShellView {
 
     /// Returns the display name for the active workspace, falling back to the workspace ID.
     pub(crate) fn workspace_name(&self) -> String {
-        self.model.active_workspace_name.clone()
+        self.model
+            .active_workspace_name
+            .clone()
             .unwrap_or_else(|| self.active_workspace_id.clone())
     }
 
+    pub(crate) fn workbench_store(&self) -> crate::workbench::store::WorkbenchStore {
+        crate::workbench::store::WorkbenchStore::for_workspace(&self.active_workspace_id)
+    }
+
+    pub(crate) fn recover_workbench_missing_assignees(&self) -> Vec<crate::workbench::model::Task> {
+        let pane_ids: std::collections::HashSet<String> = self
+            .terminal_manager()
+            .pane_list()
+            .into_iter()
+            .map(|pane| pane.pane_id.0)
+            .collect();
+        self.workbench_store()
+            .recover_missing_assignees(&pane_ids)
+            .unwrap_or_default()
+    }
+
     /// Look up the agent kind for a given pane, defaulting to the provided fallback.
-    fn agent_kind_for_pane(&self, pane_id: &amux_platform::terminal::manager::PaneId, default: &str) -> String {
-        self.terminal_manager().pane_list().iter()
+    fn agent_kind_for_pane(
+        &self,
+        pane_id: &amux_platform::terminal::manager::PaneId,
+        default: &str,
+    ) -> String {
+        self.terminal_manager()
+            .pane_list()
+            .iter()
             .find(|p| p.pane_id == *pane_id)
             .and_then(|p| p.agent_kind.clone())
             .unwrap_or_else(|| default.to_string())
     }
 
     /// Create a new shell view with terminal manager
-    pub fn new(app: DesktopApp, model: GpuiWindowModel, config: crate::gpui_config::AmuxConfig, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app: DesktopApp,
+        model: GpuiWindowModel,
+        config: crate::gpui_config::AmuxConfig,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
 
         // Get the active workspace ID
-        let active_ws_id = model.workspace_items.iter()
+        let active_ws_id = model
+            .workspace_items
+            .iter()
             .find(|w| w.is_active)
             .map(|w| w.id.clone())
             .unwrap_or_else(|| "default".to_string());
@@ -516,14 +558,17 @@ impl GpuiShellView {
             // Restore active AI profile from persisted layout
             if let Some(profile_name) = tm.env_profile_id() {
                 let presets = crate::gpui_config::builtin_presets();
-                let profile_env = presets.iter()
+                let profile_env = presets
+                    .iter()
                     .find(|p| p.name == profile_name)
                     .map(|p| {
                         let key = config.ai_keys.get(p.name).cloned().unwrap_or_default();
                         (p.env)(&key)
                     })
                     .or_else(|| {
-                        config.ai_profiles.iter()
+                        config
+                            .ai_profiles
+                            .iter()
                             .find(|p| p.name == profile_name)
                             .map(|p| p.env.clone())
                     });
@@ -542,7 +587,8 @@ impl GpuiShellView {
                     return Some((preset.env)(&key));
                 }
                 // Then check custom profiles
-                ai_profiles.iter()
+                ai_profiles
+                    .iter()
                     .find(|p| p.name == profile_id)
                     .map(|p| p.env.clone())
             });
@@ -557,12 +603,11 @@ impl GpuiShellView {
         // PTY processes will be spawned on the first render frame (deferred for fast startup)
 
         // Restore active AI profile for the active pane (per-pane or workspace-level)
-        let active_ai_profile = workspace_terminals.get(&active_ws_id)
-            .and_then(|tm| {
-                tm.active_pane_id()
-                    .and_then(|pid| tm.pane_profile_id(pid).map(|s| s.to_string()))
-                    .or_else(|| tm.env_profile_id().map(|s| s.to_string()))
-            });
+        let active_ai_profile = workspace_terminals.get(&active_ws_id).and_then(|tm| {
+            tm.active_pane_id()
+                .and_then(|pid| tm.pane_profile_id(pid).map(|s| s.to_string()))
+                .or_else(|| tm.env_profile_id().map(|s| s.to_string()))
+        });
 
         let ws_order: Vec<String> = model.workspace_items.iter().map(|w| w.id.clone()).collect();
         let (preview_reload_tx, preview_reload_rx) = std::sync::mpsc::channel();
@@ -604,6 +649,15 @@ impl GpuiShellView {
             ai_profile_picker: None,
             api_key_input: None,
             active_ai_profile,
+            selected_workbench_task_id: None,
+            workbench_action_input: None,
+            pending_paste: None,
+            last_agent_statuses: std::collections::HashMap::new(),
+            first_render_toast_shown: false,
+            hovered_agent_pane: None,
+            hovered_agent_since: None,
+            peek_content: None,
+            peek_cached_for: None,
             new_tab_picker: None,
             ime_preedit: None,
             scroll_accumulator: 0.0,
@@ -637,7 +691,6 @@ impl GpuiShellView {
             confirming_delete_ws: None,
         }
     }
-
 
     /// Get cell dimensions (width, height). Falls back to defaults if not yet measured.
     pub(crate) fn cell_dims(&self) -> (f32, f32) {
@@ -734,7 +787,10 @@ impl GpuiShellView {
     /// Convert a window-space pixel position to terminal cell coordinates.
     /// Finds the pane under the cursor — does NOT assume the active pane.
     /// Returns (pane_id, col, row) so the caller knows which pane was clicked.
-    pub(crate) fn pixel_to_term_cell_at(&self, pos: gpui::Point<gpui::Pixels>) -> Option<(amux_platform::terminal::manager::PaneId, usize, usize)> {
+    pub(crate) fn pixel_to_term_cell_at(
+        &self,
+        pos: gpui::Point<gpui::Pixels>,
+    ) -> Option<(amux_platform::terminal::manager::PaneId, usize, usize)> {
         let (cw, ch) = self.cell_dims();
         let cw = cw.max(1.0);
         let ch = ch.max(1.0);
@@ -748,7 +804,11 @@ impl GpuiShellView {
             if x >= px_x && x < px_x + pw && y >= px_y && y < px_y + ph {
                 let col = ((x - px_x - pad).max(0.0) / cw) as usize;
                 let row = ((y - px_y) / ch).max(0.0) as usize;
-                return Some((amux_platform::terminal::manager::PaneId(pid.clone()), col, row));
+                return Some((
+                    amux_platform::terminal::manager::PaneId(pid.clone()),
+                    col,
+                    row,
+                ));
             }
         }
         None
@@ -791,7 +851,11 @@ impl GpuiShellView {
     pub(crate) fn scrollbar_hit_test(
         &self,
         pos: gpui::Point<gpui::Pixels>,
-    ) -> Option<(amux_platform::terminal::manager::PaneId, ScrollbarHit, ScrollbarDragState)> {
+    ) -> Option<(
+        amux_platform::terminal::manager::PaneId,
+        ScrollbarHit,
+        ScrollbarDragState,
+    )> {
         use amux_platform::terminal::manager::PaneId;
         let (cw, ch) = self.cell_dims();
         let cw = cw.max(1.0);
@@ -927,17 +991,22 @@ impl GpuiShellView {
     }
 
     pub(crate) fn terminal_manager(&self) -> &TerminalManager {
-        self.workspace_terminals.get(&self.active_workspace_id)
+        self.workspace_terminals
+            .get(&self.active_workspace_id)
             .expect("active workspace must have a terminal manager")
     }
 
     /// Get the terminal manager for the active workspace (mutable).
     /// Auto-creates if missing (defensive against stale workspace IDs).
     pub(crate) fn terminal_manager_mut(&mut self) -> &mut TerminalManager {
-        if !self.workspace_terminals.contains_key(&self.active_workspace_id) {
+        if !self
+            .workspace_terminals
+            .contains_key(&self.active_workspace_id)
+        {
             self.ensure_workspace_terminal(&self.active_workspace_id.clone());
         }
-        self.workspace_terminals.get_mut(&self.active_workspace_id)
+        self.workspace_terminals
+            .get_mut(&self.active_workspace_id)
             .expect("just ensured workspace exists")
     }
 
@@ -994,12 +1063,16 @@ impl GpuiShellView {
 
         if !self.workspace_terminals.contains_key(workspace_id) {
             let mut tm = TerminalManager::with_scrollback(self.config.scrollback);
-            let ws_name = self.model.workspace_items.iter()
+            let ws_name = self
+                .model
+                .workspace_items
+                .iter()
                 .find(|w| w.id == workspace_id)
                 .map(|w| w.name.clone())
                 .unwrap_or_else(|| workspace_id.to_string());
             tm.set_workspace_name(&ws_name);
-            self.workspace_terminals.insert(workspace_id.to_string(), tm);
+            self.workspace_terminals
+                .insert(workspace_id.to_string(), tm);
         }
 
         // Single heal + spawn path for both freshly-created and restored
@@ -1012,8 +1085,7 @@ impl GpuiShellView {
         if let Some(tm) = self.workspace_terminals.get_mut(workspace_id) {
             tm.heal_layout();
             let (shell, args) = Self::default_shell();
-            let pane_ids: Vec<_> = tm.active_layout()
-                .map(|l| l.pane_ids()).unwrap_or_default();
+            let pane_ids: Vec<_> = tm.active_layout().map(|l| l.pane_ids()).unwrap_or_default();
             for pid in pane_ids {
                 tm.spawn_all_tabs_in_pane(&pid, &shell, &args, spawn_cwd.as_deref());
             }
@@ -1028,7 +1100,10 @@ impl GpuiShellView {
 
         // Auto-run startup if workspace is empty and has a startup file
         if self.is_workspace_empty() {
-            let ws_name = self.model.workspace_items.iter()
+            let ws_name = self
+                .model
+                .workspace_items
+                .iter()
                 .find(|w| w.id == workspace_id)
                 .map(|w| w.name.clone())
                 .unwrap_or_else(|| workspace_id.to_string());
@@ -1042,7 +1117,11 @@ impl GpuiShellView {
     /// Get the default shell program and args for the current platform
     pub(crate) fn default_shell() -> (String, Vec<String>) {
         if cfg!(target_os = "windows") {
-            let shell = if Self::silent_command("pwsh.exe").arg("--version").output().is_ok() {
+            let shell = if Self::silent_command("pwsh.exe")
+                .arg("--version")
+                .output()
+                .is_ok()
+            {
                 "pwsh.exe"
             } else {
                 "powershell.exe"
@@ -1062,10 +1141,10 @@ impl GpuiShellView {
     }
 
     pub(crate) fn default_cwd() -> Option<String> {
-        std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string())
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
     }
-
-
 
     /// Capture the active tab's shell + cwd before any operation that changes active pane.
     ///
@@ -1081,40 +1160,63 @@ impl GpuiShellView {
                 if let Some(wsl_cmd) = Self::detect_wsl_from_title_str(t) {
                     let (shell, args) = Self::default_shell();
                     let wsl_cwd = Self::extract_wsl_path_from_title(t);
-                    return CapturedEnv { shell, args, cwd: wsl_cwd, initial_input: Some(wsl_cmd) };
+                    return CapturedEnv {
+                        shell,
+                        args,
+                        cwd: wsl_cwd,
+                        initial_input: Some(wsl_cmd),
+                    };
                 }
             }
             // Fallback: detect WSL from prompt line (user@host:/path$)
-            if let Some(prompt_line) = self.terminal_manager().active_terminal_ref()
+            if let Some(prompt_line) = self
+                .terminal_manager()
+                .active_terminal_ref()
                 .map(|t| t.cursor_line_text())
             {
-                if let Some(linux_path) = crate::preview_open::extract_cwd_from_prompt_line(&prompt_line) {
+                if let Some(linux_path) =
+                    crate::preview_open::extract_cwd_from_prompt_line(&prompt_line)
+                {
                     if linux_path.starts_with('/') {
                         let (shell, args) = Self::default_shell();
                         let wsl_cmd = format!("wsl --cd {}", linux_path);
-                        return CapturedEnv { shell, args, cwd: Some(linux_path), initial_input: Some(wsl_cmd) };
+                        return CapturedEnv {
+                            shell,
+                            args,
+                            cwd: Some(linux_path),
+                            initial_input: Some(wsl_cmd),
+                        };
                     }
                 }
             }
         }
 
-        let inherited = self.terminal_manager().active_shell_cmd()
+        let inherited = self
+            .terminal_manager()
+            .active_shell_cmd()
             .map(|(s, a)| (s.to_string(), a.to_vec()));
 
         // Best-effort CWD: use the same resolve chain as file picker
         // Prompt extraction is the most reliable source on Windows —
         // PowerShell prompt always shows the real current directory.
         // sysinfo often returns the spawn-time CWD, not the live one after `cd`.
-        let prompt_cwd = self.terminal_manager().active_terminal_ref()
+        let prompt_cwd = self
+            .terminal_manager()
+            .active_terminal_ref()
             .map(|t| t.cursor_line_text())
             .and_then(|line| crate::preview_open::extract_cwd_from_prompt_line(&line))
             .map(|p| crate::preview_open::maybe_convert_wsl_path(self, &p));
         let process_cwd = self.terminal_manager().active_process_cwd();
         let saved_cwd = self.terminal_manager().active_saved_cwd();
 
-        let live_cwd = prompt_cwd.filter(|p| std::path::Path::new(p).is_dir())
-            .or_else(|| process_cwd.filter(|p| std::path::Path::new(p).is_dir()))
-            .or_else(|| saved_cwd.filter(|p| std::path::Path::new(p).is_dir()));
+        // Only stat the prompt-derived path (least reliable parse).
+        // process_cwd and saved_cwd come from the OS / OSC 7 so we
+        // trust them directly — the spawn will surface an error if
+        // the directory vanished.
+        let live_cwd = prompt_cwd
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .or(process_cwd)
+            .or(saved_cwd);
 
         let (shell, args) = inherited.unwrap_or_else(Self::default_shell);
         // If the pane has no detectable live cwd (PTY not up yet,
@@ -1122,7 +1224,12 @@ impl GpuiShellView {
         // the active workspace's own path before hitting the GUI
         // launch dir. See `spawn_cwd` doc for why.
         let cwd = live_cwd.or_else(|| self.spawn_cwd());
-        CapturedEnv { shell, args, cwd, initial_input: None }
+        CapturedEnv {
+            shell,
+            args,
+            cwd,
+            initial_input: None,
+        }
     }
 
     /// Parse a "user@host:path" or "user@host/path" terminal title.
@@ -1131,7 +1238,9 @@ impl GpuiShellView {
     fn parse_wsl_title_path(title: &str) -> Option<&str> {
         let title = title.trim();
         let at_pos = title.find('@')?;
-        if at_pos == 0 { return None; }
+        if at_pos == 0 {
+            return None;
+        }
         let after_at = &title[at_pos + 1..];
         let path = if let Some(colon_pos) = after_at.find(':') {
             after_at[colon_pos + 1..].trim_start()
@@ -1159,7 +1268,11 @@ impl GpuiShellView {
     /// Extract the WSL path from a "user@host:path" terminal title.
     fn extract_wsl_path_from_title(title: &str) -> Option<String> {
         let path = Self::parse_wsl_title_path(title)?;
-        if path.starts_with('/') { Some(path.to_string()) } else { None }
+        if path.starts_with('/') {
+            Some(path.to_string())
+        } else {
+            None
+        }
     }
 
     /// Spawn a terminal in the active pane's active tab, inheriting env from the current tab.
@@ -1178,8 +1291,14 @@ impl GpuiShellView {
         } else {
             env.cwd.as_deref()
         };
-        if let Err(e) = self.terminal_manager_mut().spawn_in_active(&env.shell, &env.args, pty_cwd) {
-            eprintln!("[amux] spawn_in_active failed: {} | shell={:?} args={:?} cwd={:?}", e, env.shell, env.args, pty_cwd);
+        if let Err(e) = self
+            .terminal_manager_mut()
+            .spawn_in_active(&env.shell, &env.args, pty_cwd)
+        {
+            eprintln!(
+                "[amux] spawn_in_active failed: {} | shell={:?} args={:?} cwd={:?}",
+                e, env.shell, env.args, pty_cwd
+            );
         }
         // Send initial command if present (e.g. "wsl --cd /path")
         if let Some(ref cmd) = env.initial_input {
@@ -1201,10 +1320,15 @@ impl GpuiShellView {
     }
 
     /// Restart the terminal in a specific pane (used when process exits)
-    pub(crate) fn restart_terminal_in_pane(&mut self, pane_id: &amux_platform::terminal::manager::PaneId) {
+    pub(crate) fn restart_terminal_in_pane(
+        &mut self,
+        pane_id: &amux_platform::terminal::manager::PaneId,
+    ) {
         self.terminal_manager_mut().set_active_pane(pane_id);
         // Restart with the same shell + cwd the tab was using
-        let inherited = self.terminal_manager().active_shell_cmd()
+        let inherited = self
+            .terminal_manager()
+            .active_shell_cmd()
             .map(|(s, a)| (s.to_string(), a.to_vec()));
         let saved_cwd = self.terminal_manager().active_cwd();
 
@@ -1213,9 +1337,10 @@ impl GpuiShellView {
         // cwd (shouldn't normally happen — tab records cwd at spawn
         // — but be robust).
         let cwd = saved_cwd.or_else(|| self.spawn_cwd());
-        let _ = self.terminal_manager_mut().restart_active_terminal(&shell, &args, cwd.as_deref());
+        let _ = self
+            .terminal_manager_mut()
+            .restart_active_terminal(&shell, &args, cwd.as_deref());
     }
-
 
     /// Reorder a workspace by moving it from one index to another.
     pub(crate) fn reorder_workspace(&mut self, from_index: usize, to_id: &str) {
@@ -1225,7 +1350,11 @@ impl GpuiShellView {
             if from_index != to_index && from_index < items.len() {
                 let item = items.remove(from_index);
                 // After remove, adjust target: if we removed before target, target shifted left
-                let adjusted = if from_index < to_index { to_index.saturating_sub(1) } else { to_index };
+                let adjusted = if from_index < to_index {
+                    to_index.saturating_sub(1)
+                } else {
+                    to_index
+                };
                 let insert_at = adjusted.min(items.len());
                 items.insert(insert_at, item);
                 self.workspace_order = items.iter().map(|w| w.id.clone()).collect();
@@ -1244,8 +1373,14 @@ impl GpuiShellView {
     fn apply_workspace_order(&mut self) {
         let order = &self.workspace_order;
         self.model.workspace_items.sort_by(|a, b| {
-            let ia = order.iter().position(|id| id == &a.id).unwrap_or(usize::MAX);
-            let ib = order.iter().position(|id| id == &b.id).unwrap_or(usize::MAX);
+            let ia = order
+                .iter()
+                .position(|id| id == &a.id)
+                .unwrap_or(usize::MAX);
+            let ib = order
+                .iter()
+                .position(|id| id == &b.id)
+                .unwrap_or(usize::MAX);
             ia.cmp(&ib)
         });
         // Add any new workspaces to the order list
@@ -1262,7 +1397,9 @@ impl GpuiShellView {
     /// logic in `search.rs` can be a plain `fn(&mut SearchState,
     /// &mut Term)`.
     pub(crate) fn search_rebuild(&mut self) {
-        let Some(mut state) = self.search_state.take() else { return };
+        let Some(mut state) = self.search_state.take() else {
+            return;
+        };
         if let Some(term) = self.terminal_manager_mut().active_terminal() {
             term.with_term_mut(|t| {
                 crate::search::rebuild(&mut state, t);
@@ -1276,7 +1413,9 @@ impl GpuiShellView {
     /// end. Thin wrapper — the cycling is trivial and the scroll/
     /// highlight work lives in `crate::search::apply_current`.
     pub(crate) fn search_navigate(&mut self, forward: bool) {
-        let Some(mut state) = self.search_state.take() else { return };
+        let Some(mut state) = self.search_state.take() else {
+            return;
+        };
         if state.matches.is_empty() {
             self.search_state = Some(state);
             return;
@@ -1303,13 +1442,11 @@ impl GpuiShellView {
         }
     }
 
-
     // Terminal context menu lives in `crate::menu` now — the
     // builder and action dispatch are free functions taking
     // `&GpuiShellView` / `&mut GpuiShellView`. Call sites go
     // through `crate::menu::build_items(self)` and
     // `crate::menu::dispatch(self, label, window, cx)`.
-
 
     // ─── Browser Pane ────────────────────────────────────────────
 
@@ -1353,7 +1490,9 @@ impl GpuiShellView {
             }
         }
 
-        if pairs.is_empty() { return; }
+        if pairs.is_empty() {
+            return;
+        }
 
         // Push next_browser_id past the highest saved id so new
         // browsers opened later don't collide with a restored entry.
@@ -1365,7 +1504,9 @@ impl GpuiShellView {
         for (bid, url) in pairs {
             // Skip if somehow already installed (defensive — the
             // latch should prevent this, but be safe).
-            if self.browser_tabs.contains_key(&bid) { continue; }
+            if self.browser_tabs.contains_key(&bid) {
+                continue;
+            }
             self.install_browser_tab_entry(bid, &url, window, cx);
         }
     }
@@ -1425,8 +1566,8 @@ impl GpuiShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use gpui_component::input::{InputState, InputEvent};
         use crate::gpui_browser::{BrowserPaneState, BrowserTabEntry};
+        use gpui_component::input::{InputEvent, InputState};
 
         let raw_handle = match self.cached_window_handle {
             Some(h) => h,
@@ -1446,36 +1587,47 @@ impl GpuiShellView {
 
         // Subscribe: Enter navigates.
         let bid = browser_id;
-        cx.subscribe(&url_input, move |this: &mut GpuiShellView, input_entity, event: &InputEvent, cx| {
-            match event {
+        cx.subscribe(
+            &url_input,
+            move |this: &mut GpuiShellView, input_entity, event: &InputEvent, cx| match event {
                 InputEvent::PressEnter { .. } => {
                     let url = input_entity.read(cx).value().to_string();
-                    if url.is_empty() { return; }
+                    if url.is_empty() {
+                        return;
+                    }
                     let url = if !url.contains("://") {
                         if url.starts_with("localhost") || url.contains(':') {
                             format!("http://{}", url)
                         } else {
                             format!("https://{}", url)
                         }
-                    } else { url };
+                    } else {
+                        url
+                    };
                     if let Some(entry) = this.browser_tabs.get_mut(&bid) {
                         entry.browser.navigate(&url);
                     }
                     this.restore_terminal_focus = true;
                     cx.notify();
                 }
-                InputEvent::Blur => { cx.notify(); }
+                InputEvent::Blur => {
+                    cx.notify();
+                }
                 _ => {}
-            }
-        }).detach();
+            },
+        )
+        .detach();
 
         let bounds_cell = std::rc::Rc::new(std::cell::Cell::new(None));
 
-        self.browser_tabs.insert(browser_id, BrowserTabEntry {
-            browser: BrowserPaneState::new(url),
-            url_input,
-            bounds_cell: bounds_cell.clone(),
-        });
+        self.browser_tabs.insert(
+            browser_id,
+            BrowserTabEntry {
+                browser: BrowserPaneState::new(url),
+                url_input,
+                bounds_cell: bounds_cell.clone(),
+            },
+        );
 
         // Defer WebView2 creation — matches the original open path.
         cx.spawn(async move |this, cx| {
@@ -1493,7 +1645,8 @@ impl GpuiShellView {
                 this.restore_terminal_focus = true;
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     /// Close the browser tab that is active in the current pane.
@@ -1501,10 +1654,14 @@ impl GpuiShellView {
         // Find the active pane's active tab — if it's a browser, close it
         let active_pid = self.terminal_manager().active_pane_id().cloned();
         if let Some(ref pid) = active_pid {
-            let browser_id = self.terminal_manager().get_pane(pid)
+            let browser_id = self
+                .terminal_manager()
+                .get_pane(pid)
                 .and_then(|p| p.active_tab_kind())
                 .and_then(|k| match k {
-                    amux_platform::terminal::manager::TabKind::Browser { browser_id, .. } => Some(*browser_id),
+                    amux_platform::terminal::manager::TabKind::Browser { browser_id, .. } => {
+                        Some(*browser_id)
+                    }
                     _ => None,
                 });
             if let Some(bid) = browser_id {
@@ -1520,7 +1677,9 @@ impl GpuiShellView {
     }
 
     /// Get the active browser tab entry (if the active pane's active tab is a browser).
-    pub(crate) fn active_browser_entry(&self) -> Option<(u64, &crate::gpui_browser::BrowserTabEntry)> {
+    pub(crate) fn active_browser_entry(
+        &self,
+    ) -> Option<(u64, &crate::gpui_browser::BrowserTabEntry)> {
         let pid = self.terminal_manager().active_pane_id()?;
         let pane = self.terminal_manager().get_pane(pid)?;
         match pane.active_tab_kind()? {
@@ -1536,13 +1695,18 @@ impl GpuiShellView {
         self.active_browser_entry().is_some()
     }
 
-
     /// Check if the current terminal input line is an `amux` command.
     /// Returns Some(true) if intercepted, Some(false) if not an amux command, None if can't read.
-    fn try_intercept_amux_command(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<bool> {
+    fn try_intercept_amux_command(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
         // Read the cursor line — this is always the line the user just typed on,
         // regardless of screen position or leftover content below.
-        let last_line = self.terminal_manager().active_terminal_ref()
+        let last_line = self
+            .terminal_manager()
+            .active_terminal_ref()
             .map(|t| t.cursor_line_text())?;
 
         // Extract the command after the prompt. Look for common prompt patterns:
@@ -1567,7 +1731,12 @@ impl GpuiShellView {
                 if let Some(path) = parts.get(2) {
                     let path = path.trim();
                     if !path.is_empty() {
-                        crate::preview_open::open_preview_file_with_cwd(self, cx, path, prompt_cwd.as_deref());
+                        crate::preview_open::open_preview_file_with_cwd(
+                            self,
+                            cx,
+                            path,
+                            prompt_cwd.as_deref(),
+                        );
                         return Some(true);
                     }
                 }
@@ -1588,8 +1757,724 @@ impl GpuiShellView {
                 self.handle_pane_command(pane_rest);
                 Some(true)
             }
+            Some("mission") | Some("goal") | Some("task") => {
+                let noun = parts.get(1).copied().unwrap_or("");
+                let rest = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                self.handle_workbench_command(noun, rest);
+                Some(true)
+            }
+            Some("agent") => {
+                let rest = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                self.handle_workbench_agent_command(rest);
+                Some(true)
+            }
             _ => Some(false),
         }
+    }
+
+    fn handle_workbench_command(&mut self, noun: &str, rest: &str) {
+        self.recover_workbench_missing_assignees();
+        let parsed = crate::workbench::command::parse_args(rest);
+        let action = parsed.positional.first().map(String::as_str).unwrap_or("");
+        let store = self.workbench_store();
+
+        let result = match (noun, action) {
+            ("mission", "create") | ("mission", "set") => {
+                let title = parsed.positional.get(1).cloned().unwrap_or_default();
+                if title.is_empty() {
+                    Err("usage: amux mission create \"title\" --description \"...\"".to_string())
+                } else {
+                    store
+                        .create_mission(crate::workbench::store::CreateMission {
+                            title,
+                            description: parsed
+                                .flags
+                                .get("description")
+                                .or_else(|| parsed.flags.get("desc"))
+                                .cloned()
+                                .unwrap_or_default(),
+                        })
+                        .map(|mission| format!("mission created: {}", mission.title))
+                        .map_err(|err| err.to_string())
+                }
+            }
+            ("mission", "show") | ("mission", "status") => Ok(self.format_workbench_status()),
+            ("mission", "complete") => store
+                .complete_mission()
+                .map(|mission| format!("mission completed: {}", mission.title))
+                .map_err(|err| err.to_string()),
+            ("goal", "create") => {
+                let title = parsed.positional.get(1).cloned().unwrap_or_default();
+                if title.is_empty() {
+                    Err("usage: amux goal create \"title\" --acceptance \"...\"".to_string())
+                } else {
+                    let priority = parsed
+                        .flags
+                        .get("priority")
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .unwrap_or(2);
+                    store
+                        .create_goal(crate::workbench::store::CreateGoal {
+                            title,
+                            description: parsed
+                                .flags
+                                .get("description")
+                                .or_else(|| parsed.flags.get("desc"))
+                                .cloned()
+                                .unwrap_or_default(),
+                            acceptance: parsed.flags.get("acceptance").cloned().unwrap_or_default(),
+                            priority,
+                        })
+                        .map(|goal| format!("goal {} created: {}", goal.id, goal.title))
+                        .map_err(|err| err.to_string())
+                }
+            }
+            ("goal", "list") => Ok(self.format_goal_list()),
+            ("goal", "show") => {
+                let id = parsed.positional.get(1).map(String::as_str).unwrap_or("");
+                if id.is_empty() {
+                    Err("usage: amux goal show <id>".to_string())
+                } else {
+                    store
+                        .load_goal(id)
+                        .map(|goal| serde_json::to_string_pretty(&goal).unwrap_or_default())
+                        .ok_or_else(|| format!("goal not found: {id}"))
+                }
+            }
+            ("goal", "done") | ("goal", "complete") => {
+                let id = parsed.positional.get(1).map(String::as_str).unwrap_or("");
+                if id.is_empty() {
+                    Err("usage: amux goal done <id>".to_string())
+                } else {
+                    store
+                        .complete_goal(id)
+                        .map(|goal| format!("goal {} done: {}", goal.id, goal.title))
+                        .map_err(|err| err.to_string())
+                }
+            }
+            ("task", "create") => {
+                let title = parsed.positional.get(1).cloned().unwrap_or_default();
+                if title.is_empty() {
+                    Err("usage: amux task create \"title\" --goal 01 --priority 1".to_string())
+                } else {
+                    let priority = parsed
+                        .flags
+                        .get("priority")
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .unwrap_or(2);
+                    store
+                        .create_task(crate::workbench::store::CreateTask {
+                            title,
+                            description: parsed
+                                .flags
+                                .get("description")
+                                .or_else(|| parsed.flags.get("desc"))
+                                .cloned()
+                                .unwrap_or_default(),
+                            goal_id: parsed.flags.get("goal").cloned(),
+                            priority,
+                            depends_on: crate::workbench::command::csv(parsed.flags.get("depends")),
+                            tags: crate::workbench::command::csv(parsed.flags.get("tags")),
+                            specialty: parsed.flags.get("specialty").cloned(),
+                        })
+                        .map(|task| format!("task {} created: {}", task.id, task.title))
+                        .map_err(|err| err.to_string())
+                }
+            }
+            ("task", "list") => Ok(self.format_task_list()),
+            ("task", "show") => {
+                let id = parsed.positional.get(1).map(String::as_str).unwrap_or("");
+                if id.is_empty() {
+                    Err("usage: amux task show <id>".to_string())
+                } else {
+                    store
+                        .load_task(id)
+                        .map(|task| serde_json::to_string_pretty(&task).unwrap_or_default())
+                        .ok_or_else(|| format!("task not found: {id}"))
+                }
+            }
+            ("task", "send") | ("task", "assign") => {
+                let task_id = parsed.positional.get(1).map(String::as_str).unwrap_or("");
+                let pane_id = parsed
+                    .flags
+                    .get("pane")
+                    .cloned()
+                    .or_else(|| parsed.positional.get(2).cloned());
+                match (task_id.is_empty(), pane_id) {
+                    (true, _) => Err("usage: amux task send <id> --pane <pane-id>".to_string()),
+                    (_, None) => Err("usage: amux task send <id> --pane <pane-id>".to_string()),
+                    (_, Some(pane_id)) => self.send_workbench_task(task_id, &pane_id),
+                }
+            }
+            ("task", "done") => {
+                let task_id = parsed.positional.get(1).map(String::as_str).unwrap_or("");
+                if task_id.is_empty() {
+                    Err("usage: amux task done <id> --proof \"...\"".to_string())
+                } else {
+                    let proof = parsed.flags.get("proof").cloned().unwrap_or_else(|| {
+                        parsed
+                            .positional
+                            .get(2)
+                            .cloned()
+                            .unwrap_or_else(|| "completed".to_string())
+                    });
+                    store
+                        .complete_task(
+                            task_id,
+                            crate::workbench::model::Proof::from_text_or_json(proof),
+                        )
+                        .map(|task| format!("task {} done: {}", task.id, task.title))
+                        .map_err(|err| err.to_string())
+                }
+            }
+            ("task", "block") => {
+                let task_id = parsed.positional.get(1).map(String::as_str).unwrap_or("");
+                if task_id.is_empty() {
+                    Err("usage: amux task block <id> --reason \"...\"".to_string())
+                } else {
+                    let reason = parsed.flags.get("reason").cloned().unwrap_or_else(|| {
+                        parsed
+                            .positional
+                            .get(2)
+                            .cloned()
+                            .unwrap_or_else(|| "blocked".to_string())
+                    });
+                    store
+                        .block_task(task_id, reason)
+                        .map(|task| format!("task {} blocked: {}", task.id, task.title))
+                        .map_err(|err| err.to_string())
+                }
+            }
+            _ => Err(format!(
+                "unknown workbench command: amux {noun} {action}\n\
+                 available: mission create/show/status/complete, goal create/list/show/done, task create/list/show/send/done/block"
+            )),
+        };
+
+        match result {
+            Ok(text) => self.echo_to_terminal(&text),
+            Err(err) => self.echo_to_terminal(&format!("error: {err}")),
+        }
+    }
+
+    fn handle_workbench_agent_command(&mut self, rest: &str) {
+        self.recover_workbench_missing_assignees();
+        let parsed = crate::workbench::command::parse_args(rest);
+        let action = parsed.positional.first().map(String::as_str).unwrap_or("");
+        let result = match action {
+            "list" => Ok(self.format_agent_workbench_list(false)),
+            "idle" => Ok(self.format_agent_workbench_list(true)),
+            "assign" => {
+                let task_ref = parsed.positional.get(1).map(String::as_str).unwrap_or("");
+                if task_ref.is_empty() {
+                    Err("usage: amux agent assign <task-id|next>".to_string())
+                } else {
+                    match (
+                        if task_ref == "next" {
+                            self.next_ready_workbench_task_id()
+                        } else {
+                            Some(task_ref.to_string())
+                        },
+                        self.find_idle_agent_pane(),
+                    ) {
+                        (None, _) => Err("no ready task found".to_string()),
+                        (_, None) => Err("no idle agent pane found".to_string()),
+                        (Some(task_id), Some(pane_id)) => self.send_workbench_task(&task_id, &pane_id),
+                    }
+                }
+            }
+            _ => Err(
+                "unknown agent command\navailable: amux agent list, amux agent idle, amux agent assign <task-id|next>"
+                    .to_string(),
+            ),
+        };
+
+        match result {
+            Ok(text) => self.echo_to_terminal(&text),
+            Err(err) => self.echo_to_terminal(&format!("error: {err}")),
+        }
+    }
+
+    pub(crate) fn send_workbench_task_to_idle(&mut self, task_id: &str) -> Result<String, String> {
+        let pane_id = self
+            .find_idle_agent_pane()
+            .ok_or_else(|| "no idle agent pane found".to_string())?;
+        self.send_workbench_task(task_id, &pane_id)
+    }
+
+    pub(crate) fn start_workbench_action_input(
+        &mut self,
+        task_id: String,
+        kind: WorkbenchActionInputKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_component::input::{InputEvent, InputState};
+        let placeholder = match kind {
+            WorkbenchActionInputKind::Complete => {
+                "proof text or JSON: {\"notes\":\"...\",\"tests\":\"cargo test\"}"
+            }
+            WorkbenchActionInputKind::Block => "blocking reason",
+            WorkbenchActionInputKind::CreateMission => "mission title --description \"...\"",
+            WorkbenchActionInputKind::CreateGoal => {
+                "goal title --acceptance \"...\" --priority 1"
+            }
+            WorkbenchActionInputKind::CreateTask => {
+                "task title --goal 01 --priority 1 --depends 001 --tags rust,ui"
+            }
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let input_for_focus = input.clone();
+        window.on_next_frame(move |window, cx| {
+            input_for_focus.update(cx, |state, cx| state.focus(window, cx));
+        });
+
+        cx.subscribe(
+            &input,
+            move |this: &mut GpuiShellView, _input_entity, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let result = this.execute_workbench_action_input(cx);
+                    match result {
+                        Ok(msg) => this.push_workbench_toast(msg, crate::theme::ACCENT),
+                        Err(err) => this.push_workbench_toast(err, crate::theme::DANGER),
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+
+        self.workbench_action_input = Some(WorkbenchActionInputState {
+            task_id,
+            kind,
+            input,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_workbench_action_input(&mut self) {
+        self.workbench_action_input = None;
+    }
+
+    pub(crate) fn start_workbench_create_input(
+        &mut self,
+        kind: WorkbenchActionInputKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_workbench_action_input(String::new(), kind, window, cx);
+    }
+
+    pub(crate) fn execute_workbench_action_input(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let Some(action) = self.workbench_action_input.clone() else {
+            return Err("no Workbench action input is active".to_string());
+        };
+        let value = action.input.read(cx).value().to_string();
+        let result = match action.kind {
+            WorkbenchActionInputKind::Complete => {
+                self.complete_workbench_task_from_ui(&action.task_id, value)
+            }
+            WorkbenchActionInputKind::Block => {
+                self.block_workbench_task_from_ui(&action.task_id, value)
+            }
+            WorkbenchActionInputKind::CreateMission => self.create_workbench_mission_from_ui(value),
+            WorkbenchActionInputKind::CreateGoal => self.create_workbench_goal_from_ui(value),
+            WorkbenchActionInputKind::CreateTask => self.create_workbench_task_from_ui(value),
+        };
+        if result.is_ok() {
+            self.workbench_action_input = None;
+        }
+        result
+    }
+
+    fn create_workbench_mission_from_ui(&mut self, value: String) -> Result<String, String> {
+        let parsed = crate::workbench::command::parse_args(&value);
+        let title = parsed.positional.join(" ").trim().to_string();
+        if title.is_empty() {
+            return Err("mission title is required".to_string());
+        }
+        self.workbench_store()
+            .create_mission(crate::workbench::store::CreateMission {
+                title,
+                description: parsed
+                    .flags
+                    .get("description")
+                    .or_else(|| parsed.flags.get("desc"))
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .map(|mission| format!("mission created: {}", mission.title))
+            .map_err(|err| err.to_string())
+    }
+
+    fn create_workbench_goal_from_ui(&mut self, value: String) -> Result<String, String> {
+        let parsed = crate::workbench::command::parse_args(&value);
+        let title = parsed.positional.join(" ").trim().to_string();
+        if title.is_empty() {
+            return Err("goal title is required".to_string());
+        }
+        let priority = parsed
+            .flags
+            .get("priority")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(2);
+        self.workbench_store()
+            .create_goal(crate::workbench::store::CreateGoal {
+                title,
+                description: parsed
+                    .flags
+                    .get("description")
+                    .or_else(|| parsed.flags.get("desc"))
+                    .cloned()
+                    .unwrap_or_default(),
+                acceptance: parsed.flags.get("acceptance").cloned().unwrap_or_default(),
+                priority,
+            })
+            .map(|goal| format!("goal {} created: {}", goal.id, goal.title))
+            .map_err(|err| err.to_string())
+    }
+
+    fn create_workbench_task_from_ui(&mut self, value: String) -> Result<String, String> {
+        let parsed = crate::workbench::command::parse_args(&value);
+        let title = parsed.positional.join(" ").trim().to_string();
+        if title.is_empty() {
+            return Err("task title is required".to_string());
+        }
+        let priority = parsed
+            .flags
+            .get("priority")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(2);
+        let task = self
+            .workbench_store()
+            .create_task(crate::workbench::store::CreateTask {
+                title,
+                description: parsed
+                    .flags
+                    .get("description")
+                    .or_else(|| parsed.flags.get("desc"))
+                    .cloned()
+                    .unwrap_or_default(),
+                goal_id: parsed.flags.get("goal").cloned(),
+                priority,
+                depends_on: crate::workbench::command::csv(parsed.flags.get("depends")),
+                tags: crate::workbench::command::csv(parsed.flags.get("tags")),
+                specialty: parsed.flags.get("specialty").cloned(),
+            })
+            .map_err(|err| err.to_string())?;
+        self.selected_workbench_task_id = Some(task.id.clone());
+        Ok(format!("task {} created: {}", task.id, task.title))
+    }
+
+    pub(crate) fn complete_workbench_task_from_ui(
+        &mut self,
+        task_id: &str,
+        proof: String,
+    ) -> Result<String, String> {
+        if proof.trim().is_empty() {
+            return Err("proof is required".to_string());
+        }
+        self.workbench_store()
+            .complete_task(
+                task_id,
+                crate::workbench::model::Proof::from_text_or_json(proof),
+            )
+            .map(|task| format!("task {} done: {}", task.id, task.title))
+            .map_err(|err| err.to_string())
+    }
+
+    pub(crate) fn block_workbench_task_from_ui(
+        &mut self,
+        task_id: &str,
+        reason: String,
+    ) -> Result<String, String> {
+        if reason.trim().is_empty() {
+            return Err("block reason is required".to_string());
+        }
+        self.workbench_store()
+            .block_task(task_id, reason)
+            .map(|task| format!("task {} blocked: {}", task.id, task.title))
+            .map_err(|err| err.to_string())
+    }
+
+    pub(crate) fn focus_workbench_task_pane(&mut self, task_id: &str) -> Result<String, String> {
+        let task = self
+            .workbench_store()
+            .load_task(task_id)
+            .ok_or_else(|| format!("task not found: {task_id}"))?;
+        let pane_id = task
+            .assignee_pane_id
+            .ok_or_else(|| format!("task {task_id} has no assigned pane"))?;
+        let pane = amux_platform::terminal::manager::PaneId(pane_id.clone());
+        if self.terminal_manager().get_pane(&pane).is_none() {
+            return Err(format!("assigned pane missing: {pane_id}"));
+        }
+        self.terminal_manager_mut().set_active_pane(&pane);
+        Ok(format!("focused {pane_id}"))
+    }
+
+    pub(crate) fn push_workbench_toast(&mut self, message: impl Into<String>, color: u32) {
+        let pane_id = self
+            .terminal_manager()
+            .active_pane_id()
+            .cloned()
+            .unwrap_or_else(|| amux_platform::terminal::manager::PaneId::unknown());
+        self.toasts.push(crate::state::ToastNotification {
+            message: message.into(),
+            color,
+            frame_created: self.cursor_blink_frame,
+            pane_id,
+            tab_index: 0,
+        });
+    }
+
+    fn find_idle_agent_pane(&self) -> Option<String> {
+        self.terminal_manager()
+            .pane_list()
+            .into_iter()
+            .filter(|pane| Self::is_idle_agent_pane(pane))
+            .map(|pane| pane.pane_id.0)
+            .next()
+    }
+
+    fn is_idle_agent_pane(pane: &amux_platform::terminal::manager::PaneInfo) -> bool {
+        if pane.agent_kind.is_none() || pane.tab_kind != "terminal" {
+            return false;
+        }
+        !matches!(pane.agent_status.as_deref(), Some("thinking..."))
+    }
+
+    fn next_ready_workbench_task_id(&self) -> Option<String> {
+        let tasks = self.workbench_store().list_tasks();
+        let done: std::collections::HashSet<String> = tasks
+            .iter()
+            .filter(|task| task.status == crate::workbench::model::TaskStatus::Done)
+            .map(|task| task.id.clone())
+            .collect();
+        tasks
+            .into_iter()
+            .filter(|task| task.status == crate::workbench::model::TaskStatus::Todo)
+            .filter(|task| task.depends_on.iter().all(|dep| done.contains(dep)))
+            .min_by(|a, b| {
+                a.priority
+                    .cmp(&b.priority)
+                    .then_with(|| a.created_at.cmp(&b.created_at))
+                    .then_with(|| a.id.cmp(&b.id))
+            })
+            .map(|task| task.id)
+    }
+
+    fn format_agent_workbench_list(&self, idle_only: bool) -> String {
+        let tasks = self.workbench_store().list_tasks();
+        let mut rows = Vec::new();
+        for pane in self.terminal_manager().pane_list() {
+            if pane.agent_kind.is_none() {
+                continue;
+            }
+            let idle = Self::is_idle_agent_pane(&pane);
+            if idle_only && !idle {
+                continue;
+            }
+            let current_task = tasks
+                .iter()
+                .find(|task| {
+                    task.assignee_pane_id.as_deref() == Some(pane.pane_id.0.as_str())
+                        && matches!(
+                            task.status,
+                            crate::workbench::model::TaskStatus::Assigned
+                                | crate::workbench::model::TaskStatus::InProgress
+                        )
+                })
+                .map(|task| format!(" task:{}", task.id))
+                .unwrap_or_default();
+            rows.push(format!(
+                "{}  {}  {}  {}{}",
+                pane.pane_id.0,
+                pane.agent_kind.unwrap_or_else(|| "agent".to_string()),
+                pane.agent_status.unwrap_or_else(|| "unknown".to_string()),
+                pane.tab_title,
+                current_task,
+            ));
+        }
+        if rows.is_empty() {
+            if idle_only {
+                "No idle agent panes found".to_string()
+            } else {
+                "No agent panes found".to_string()
+            }
+        } else {
+            rows.join("\n")
+        }
+    }
+
+    fn send_workbench_task(&mut self, task_id: &str, pane_id: &str) -> Result<String, String> {
+        let store = self.workbench_store();
+        let task = store
+            .load_task(task_id)
+            .ok_or_else(|| format!("task not found: {task_id}"))?;
+        if matches!(task.status, crate::workbench::model::TaskStatus::Done) {
+            return Err(format!("task {task_id} is already done"));
+        }
+        let all_tasks = store.list_tasks();
+        let blocked_by =
+            crate::workbench::store::WorkbenchStore::blocked_dependencies_for(&task, &all_tasks);
+        if !blocked_by.is_empty() {
+            return Err(format!(
+                "task {task_id} is blocked by {}",
+                blocked_by.join(", ")
+            ));
+        }
+
+        let target = amux_platform::terminal::manager::PaneId(pane_id.to_string());
+        let Some(target_info) = self
+            .terminal_manager()
+            .pane_list()
+            .into_iter()
+            .find(|pane| pane.pane_id == target)
+        else {
+            store.record_task_send_failed(task_id, pane_id, "target pane not found");
+            return Err(format!("target pane not found: {pane_id}"));
+        };
+        let Some(agent_kind) = target_info.agent_kind.clone() else {
+            store.record_task_send_failed(task_id, pane_id, "target pane is not an agent");
+            return Err(format!("target pane is not an agent: {pane_id}"));
+        };
+        let goal = task.goal_id.as_deref().and_then(|id| store.load_goal(id));
+        let recent_done = all_tasks
+            .iter()
+            .filter(|candidate| {
+                candidate.status == crate::workbench::model::TaskStatus::Done
+                    && candidate.goal_id == task.goal_id
+                    && candidate.id != task.id
+            })
+            .rev()
+            .take(5)
+            .collect();
+        let mission = store.load_mission();
+        let prompt = crate::workbench::prompt::build_dispatch_prompt(
+            crate::workbench::prompt::DispatchContext {
+                mission: mission.as_ref(),
+                goal: goal.as_ref(),
+                task: &task,
+                project_guidelines: crate::workbench::prompt::load_project_guidelines(
+                    self.spawn_cwd().as_deref(),
+                ),
+                recent_done,
+            },
+        );
+        if let Err(err) = store.write_dispatch(task_id, &prompt) {
+            let msg = err.to_string();
+            store.record_task_send_failed(task_id, pane_id, &msg);
+            return Err(msg);
+        }
+        if let Err(err) = self.terminal_manager_mut().pane_send_text(&target, &prompt) {
+            let msg = err.to_string();
+            store.record_task_send_failed(task_id, pane_id, &msg);
+            return Err(msg);
+        }
+        store.record_agent_message_sent(task_id, pane_id);
+        if let Err(err) = store.assign_task(task_id, pane_id.to_string(), Some(agent_kind)) {
+            let msg = err.to_string();
+            store.record_task_send_failed(task_id, pane_id, &msg);
+            return Err(msg);
+        }
+        Ok(format!("sent task {task_id} to {pane_id}"))
+    }
+
+    pub(crate) fn format_workbench_status(&self) -> String {
+        let store = self.workbench_store();
+        let mission = store.load_mission();
+        let goals = store.list_goals();
+        let tasks = store.list_tasks();
+        let done = tasks
+            .iter()
+            .filter(|task| task.status == crate::workbench::model::TaskStatus::Done)
+            .count();
+        let running = tasks
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.status,
+                    crate::workbench::model::TaskStatus::Assigned
+                        | crate::workbench::model::TaskStatus::InProgress
+                )
+            })
+            .count();
+        let blocked = tasks
+            .iter()
+            .filter(|task| task.status == crate::workbench::model::TaskStatus::Blocked)
+            .count();
+        let mut out = String::new();
+        let issues = store.storage_issues();
+        if let Some(mission) = mission {
+            out.push_str(&format!(
+                "Mission: {} [{:?}]\n",
+                mission.title, mission.status
+            ));
+        } else {
+            out.push_str("Mission: none\n");
+        }
+        out.push_str(&format!("Goals: {}\n", goals.len()));
+        out.push_str(&format!(
+            "Tasks: {}/{} done, {} running, {} blocked\n",
+            done,
+            tasks.len(),
+            running,
+            blocked
+        ));
+        if !issues.is_empty() {
+            out.push_str(&format!("Storage warnings: {}\n", issues.len()));
+            for issue in issues.iter().take(3) {
+                out.push_str(&format!("- {}: {}\n", issue.path.display(), issue.message));
+            }
+        }
+        out
+    }
+
+    fn format_goal_list(&self) -> String {
+        let goals = self.workbench_store().list_goals();
+        if goals.is_empty() {
+            return "No goals. Run: amux goal create \"title\"".to_string();
+        }
+        goals
+            .iter()
+            .map(|goal| {
+                format!(
+                    "{}  P{}  {:?}  {}",
+                    goal.id, goal.priority, goal.status, goal.title
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn format_task_list(&self) -> String {
+        let tasks = self.workbench_store().list_tasks();
+        if tasks.is_empty() {
+            return "No tasks. Run: amux task create \"title\"".to_string();
+        }
+        tasks
+            .iter()
+            .map(|task| {
+                let assignee = task
+                    .assignee_pane_id
+                    .as_ref()
+                    .map(|p| format!(" @{p}"))
+                    .unwrap_or_default();
+                format!(
+                    "{}  P{}  {}  {}{}",
+                    task.id,
+                    task.priority,
+                    task.status.label(),
+                    task.title,
+                    assignee
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Handle `amux pane <subcommand>` commands.
@@ -1608,7 +2493,9 @@ impl GpuiShellView {
                 // Parse: <pane-id> [--lines N]
                 let args: Vec<&str> = sub_args.split_whitespace().collect();
                 if let Some(pane_id_str) = args.first() {
-                    let lines = args.iter().position(|a| *a == "--lines")
+                    let lines = args
+                        .iter()
+                        .position(|a| *a == "--lines")
                         .and_then(|i| args.get(i + 1))
                         .and_then(|n| n.parse::<usize>().ok())
                         .unwrap_or(50);
@@ -1619,7 +2506,10 @@ impl GpuiShellView {
                             self.echo_to_terminal(&output);
                         }
                         None => {
-                            self.echo_to_terminal(&format!("error: pane '{}' not found or has no terminal", pane_id_str));
+                            self.echo_to_terminal(&format!(
+                                "error: pane '{}' not found or has no terminal",
+                                pane_id_str
+                            ));
                         }
                     }
                 } else {
@@ -1632,12 +2522,18 @@ impl GpuiShellView {
                 if args.len() >= 2 {
                     let target_id_str = args[0];
                     let text = args[1].trim_matches('"');
-                    let target = amux_platform::terminal::manager::PaneId(target_id_str.to_string());
+                    let target =
+                        amux_platform::terminal::manager::PaneId(target_id_str.to_string());
 
                     // Build bridge message from current pane identity
                     let ws_name = self.workspace_name();
-                    let source_pane_id = self.terminal_manager().active_pane_id()
-                        .cloned().unwrap_or_else(|| amux_platform::terminal::manager::PaneId("unknown".to_string()));
+                    let source_pane_id = self
+                        .terminal_manager()
+                        .active_pane_id()
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            amux_platform::terminal::manager::PaneId::unknown()
+                        });
                     let agent_kind = self.agent_kind_for_pane(&source_pane_id, "user");
 
                     let msg = amux_core::bridge::BridgeMessage {
@@ -1647,7 +2543,10 @@ impl GpuiShellView {
                         text: text.to_string(),
                     };
                     let formatted = msg.format();
-                    match self.terminal_manager_mut().pane_send_text(&target, &formatted) {
+                    match self
+                        .terminal_manager_mut()
+                        .pane_send_text(&target, &formatted)
+                    {
                         Ok(()) => self.echo_to_terminal(&format!("sent to {}", target_id_str)),
                         Err(e) => self.echo_to_terminal(&format!("error: {}", e)),
                     }
@@ -1657,10 +2556,18 @@ impl GpuiShellView {
             }
             "id" => {
                 let ws_name = self.workspace_name();
-                let pane_id = self.terminal_manager().active_pane_id()
-                    .cloned().unwrap_or_else(|| amux_platform::terminal::manager::PaneId("unknown".to_string()));
+                let pane_id = self
+                    .terminal_manager()
+                    .active_pane_id()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        amux_platform::terminal::manager::PaneId::unknown()
+                    });
                 let agent_kind = self.agent_kind_for_pane(&pane_id, "none");
-                let output = format!("pane_id: {}\nworkspace: {}\nagent: {}", pane_id.0, ws_name, agent_kind);
+                let output = format!(
+                    "pane_id: {}\nworkspace: {}\nagent: {}",
+                    pane_id.0, ws_name, agent_kind
+                );
                 self.echo_to_terminal(&output);
             }
             "teach" => {
@@ -1668,7 +2575,10 @@ impl GpuiShellView {
                 self.echo_to_terminal(&template);
             }
             _ => {
-                self.echo_to_terminal(&format!("unknown pane command: '{}'\navailable: list, read, message, id, teach", sub));
+                self.echo_to_terminal(&format!(
+                    "unknown pane command: '{}'\navailable: list, read, message, id, teach",
+                    sub
+                ));
             }
         }
     }
@@ -1717,12 +2627,20 @@ Environment variables available: $AMUX_PANE_ID, $AMUX_WORKSPACE, $AMUX_VERSION"#
     }
 
     /// Handle key input for the terminal
-    pub fn handle_terminal_input(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn handle_terminal_input(
+        &mut self,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Reset cursor blink on any terminal input and cancel any pending bell flash
         self.cursor_blink_frame = 0;
         self.bell_flash_frame = None;
         use amux_platform::terminal::keys;
-        
+
         // GPUI sends lowercase keys but to_pty expects title case
         let normalized_key = match key {
             "enter" => "Enter",
@@ -1754,7 +2672,7 @@ Environment variables available: $AMUX_PANE_ID, $AMUX_WORKSPACE, $AMUX_VERSION"#
             "space" => "Space",
             _ => key,
         };
-        
+
         // Intercept `amux` commands on Enter before sending to PTY
         if normalized_key == "Enter" && !ctrl && !alt {
             if let Some(handled) = self.try_intercept_amux_command(window, cx) {
@@ -1770,8 +2688,15 @@ Environment variables available: $AMUX_PANE_ID, $AMUX_WORKSPACE, $AMUX_VERSION"#
         }
 
         // Check app cursor key mode from active terminal
-        let app_cursor = self.terminal_manager().active_terminal_ref()
-            .map(|t| t.with_term(|term| term.mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR)))
+        let app_cursor = self
+            .terminal_manager()
+            .active_terminal_ref()
+            .map(|t| {
+                t.with_term(|term| {
+                    term.mode()
+                        .contains(alacritty_terminal::term::TermMode::APP_CURSOR)
+                })
+            })
             .unwrap_or(false);
         let input = keys::to_pty_with_mode(normalized_key, ctrl, shift, alt, app_cursor);
 
@@ -1780,7 +2705,7 @@ Environment variables available: $AMUX_PANE_ID, $AMUX_WORKSPACE, $AMUX_VERSION"#
             terminal.scroll_to_bottom();
             terminal.send_input(&input);
         }
-        
+
         // Don't request re-render here - the 60fps polling loop will trigger re-render when PTY output arrives
     }
 }
@@ -1842,7 +2767,6 @@ fn extract_command_after_prompt(line: &str) -> &str {
     }
     line
 }
-
 
 /// Spawn the selection edge auto-scroll loop. The loop ticks every
 /// 40ms while `selection_autoscroll` is `Some`, scrolls the
@@ -1934,8 +2858,6 @@ fn tick_selection_autoscroll(this: &mut GpuiShellView, state: SelectionAutoScrol
     });
 }
 
-
-
 // NOTE: render_context_menu, first_pane_in_layout, render_layout
 // have been moved to gpui_layout_renderer.rs
 // NOTE: pub fn run, the macOS dock icon pipeline, and the 60 fps
@@ -1983,10 +2905,7 @@ mod extract_command_tests {
         // `amux preview file.md` reached the shell and zsh reported
         // `command not found: amux`.
         let line = "Brc20BatchMint \u{e0a0} main amux preview README.md";
-        assert_eq!(
-            extract_command_after_prompt(line),
-            "amux preview README.md"
-        );
+        assert_eq!(extract_command_after_prompt(line), "amux preview README.md");
     }
 
     #[test]
@@ -1995,10 +2914,7 @@ mod extract_command_tests {
         // When user types on the ❯ line, the cursor_line_text may be
         // `❯ amux preview file.md`. `> ` detector catches it.
         let line = "❯ amux preview README.md";
-        assert_eq!(
-            extract_command_after_prompt(line),
-            "amux preview README.md"
-        );
+        assert_eq!(extract_command_after_prompt(line), "amux preview README.md");
     }
 
     #[test]
@@ -2015,10 +2931,7 @@ mod extract_command_tests {
         // (e.g. a cwd like `~/foamux`), the bare-amux fallback must
         // not treat the last 4 chars as a command. Guarded by the
         // word-boundary check.
-        assert_eq!(
-            extract_command_after_prompt("~/foamux"),
-            "~/foamux"
-        );
+        assert_eq!(extract_command_after_prompt("~/foamux"), "~/foamux");
     }
 
     #[test]
@@ -2027,10 +2940,7 @@ mod extract_command_tests {
         // `rfind` gives us the last occurrence — the user command —
         // not the cwd substring.
         let line = "~/data/repository/ai/arden/amux \u{e0a0} main amux preview README.md";
-        assert_eq!(
-            extract_command_after_prompt(line),
-            "amux preview README.md"
-        );
+        assert_eq!(extract_command_after_prompt(line), "amux preview README.md");
     }
 
     #[test]
@@ -2042,4 +2952,3 @@ mod extract_command_tests {
         assert_eq!(extract_command_after_prompt(line), line);
     }
 }
-

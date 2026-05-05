@@ -112,8 +112,8 @@ fn set_macos_dock_icon() {
                 let _ = std::fs::create_dir_all(parent);
             }
             let tmp = cache_path.with_extension("png.tmp");
-            if let Err(err) = std::fs::write(&tmp, &bytes)
-                .and_then(|_| std::fs::rename(&tmp, &cache_path))
+            if let Err(err) =
+                std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &cache_path))
             {
                 eprintln!("[amux-icon] failed to write icon cache: {err}");
             }
@@ -130,10 +130,8 @@ fn set_macos_dock_icon() {
             // from blowing up.
             return;
         };
-        let data: Retained<NSData> = NSData::dataWithBytes_length(
-            png_bytes.as_ptr().cast(),
-            png_bytes.len(),
-        );
+        let data: Retained<NSData> =
+            NSData::dataWithBytes_length(png_bytes.as_ptr().cast(), png_bytes.len());
         let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
             eprintln!("[amux-icon] failed to decode squircle PNG into NSImage");
             return;
@@ -246,7 +244,12 @@ fn build_squircle_icon_png(jpg_bytes: &[u8]) -> Result<Vec<u8>, String> {
 
     let mut png_buf: Vec<u8> = Vec::with_capacity((canvas_side * canvas_side * 4) as usize);
     image::codecs::png::PngEncoder::new(&mut png_buf)
-        .write_image(&canvas, canvas_side, canvas_side, image::ExtendedColorType::Rgba8)
+        .write_image(
+            &canvas,
+            canvas_side,
+            canvas_side,
+            image::ExtendedColorType::Rgba8,
+        )
         .map_err(|e| format!("encode png: {e}"))?;
     Ok(png_buf)
 }
@@ -261,7 +264,16 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
     // Required for WebView2 to render correctly inside GPUI's DirectComposition window.
     // SAFETY: called once at startup before any threads are spawned.
     #[cfg(target_os = "windows")]
-    unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true") };
+    unsafe {
+        std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true")
+    };
+
+    // Ensure readline mouse mode is enabled so click-to-position-cursor
+    // works in bash/zsh interactive prompts (including AI agent input).
+    ensure_readline_mouse_mode();
+    // Ensure the Agent Bridge prompt template exists so agents can
+    // learn inter-agent communication commands.
+    crate::gpui_entry::GpuiShellView::ensure_agent_prompt_file();
 
     let mut app = app.clone();
     let model = app.render_with(&GpuiRenderer);
@@ -547,9 +559,14 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                         Timer::after(std::time::Duration::from_millis(1000)).await;
                         let result = this.update(cx, |this: &mut GpuiShellView, cx: &mut Context<GpuiShellView>| {
                             let frame = this.cursor_blink_frame;
+                            let mut changed = false;
+                            let mut pane_snapshots = Vec::new();
                             let active_ws = this.active_workspace_id.clone();
                             if let Some(tm) = this.workspace_terminals.get_mut(&active_ws) {
                                 let notifs = tm.poll_activity();
+                                if !notifs.is_empty() {
+                                    changed = true;
+                                }
                                 for n in notifs {
                                     if matches!(n.new_status, amux_platform::terminal::manager::AgentStatus::Waiting | amux_platform::terminal::manager::AgentStatus::Error) {
                                         this.sidebar_state.collapsed = false;
@@ -568,16 +585,72 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                                         tab_index: n.tab_index,
                                     });
                                 }
-                                this.terminal_manager_mut().clear_active_activity();
+                                tm.clear_active_activity();
+
+                                // Snapshot pane statuses while we have the mutable
+                                // borrow; process them below after the borrow is released.
+                                pane_snapshots = tm
+                                    .pane_list()
+                                    .into_iter()
+                                    .map(|info| (info.pane_id.0.clone(), info.agent_status.clone()))
+                                    .collect();
+                            }
+                            // --- mutable borrow released ---
+
+                            // Auto-update workbench tasks when assigned agent
+                            // transitions to Done (command succeeded) or Error
+                            // (command failed).
+                            for (pane_id, agent_status) in &pane_snapshots {
+                                let prev = this
+                                    .last_agent_statuses
+                                    .get(pane_id)
+                                    .cloned()
+                                    .unwrap_or(None);
+                                if prev == *agent_status {
+                                    continue;
+                                }
+                                let store = this.workbench_store();
+                                match agent_status.as_deref() {
+                                    Some("done") => {
+                                        for task in store.find_active_tasks_for_pane(pane_id) {
+                                            let _ = store.complete_task(
+                                                &task.id,
+                                                crate::workbench::model::Proof::default(),
+                                            );
+                                            this.push_workbench_toast(
+                                                format!("Task completed: {}", task.title),
+                                                crate::theme::SUCCESS,
+                                            );
+                                            changed = true;
+                                        }
+                                    }
+                                    Some("error") => {
+                                        for task in store.find_active_tasks_for_pane(pane_id) {
+                                            let _ = store.block_task(
+                                                &task.id,
+                                                "agent reported error".to_string(),
+                                            );
+                                            this.push_workbench_toast(
+                                                format!("Task blocked: {} — agent error", task.title),
+                                                crate::theme::DANGER,
+                                            );
+                                            changed = true;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                this.last_agent_statuses
+                                    .insert(pane_id.clone(), agent_status.clone());
                             }
 
                             // Drain socket notifications from external tools
                             if let Some(ref rx) = this.socket_notify_rx {
                                 while let Ok(notif) = rx.try_recv() {
+                                    changed = true;
                                     let color = match notif.kind.as_str() {
-                                        "error" => 0xf38ba8u32,
-                                        "agent_status" => 0x81a2be,
-                                        _ => 0xf9e2af,
+                                        "error" => crate::theme::DANGER,
+                                        "agent_status" => crate::theme::ACCENT,
+                                        _ => crate::theme::WARNING,
                                     };
                                     let msg = if notif.body.is_empty() {
                                         notif.title.clone()
@@ -598,13 +671,25 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                             this.toasts.retain(|t| {
                                 frame.wrapping_sub(t.frame_created) < 180
                             });
+                            let recovered = this.recover_workbench_missing_assignees();
+                            if !recovered.is_empty() {
+                                this.sidebar_state.collapsed = false;
+                                this.sidebar_state.mode = crate::gpui_workspace_sidebar::SidebarMode::Workbench;
+                                this.push_workbench_toast(
+                                    format!("Workbench blocked {} task(s): pane missing", recovered.len()),
+                                    crate::theme::DANGER,
+                                );
+                                changed = true;
+                            }
                             // Auto-save every ~5 seconds
                             let tick = save_tick.get();
                             save_tick.set(tick.wrapping_add(1));
                             if tick % 5 == 0 {
                                 this.save_all_layouts();
                             }
-                            cx.notify();
+                            if changed {
+                                cx.notify();
+                            }
                         });
                         if result.is_err() {
                             break;
@@ -632,6 +717,33 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
             }
         }
     });
+}
+
+/// Ensure `~/.inputrc` has `set enable-mouse on` so readline-based
+/// shells (bash, zsh with readline) accept mouse click-to-position.
+/// Safe to call multiple times — only writes when the setting is
+/// missing. Existing user config is never modified.
+fn ensure_readline_mouse_mode() {
+    let home = if cfg!(target_os = "windows") {
+        match std::env::var("USERPROFILE") {
+            Ok(p) => p,
+            Err(_) => return,
+        }
+    } else {
+        match std::env::var("HOME") {
+            Ok(p) => p,
+            Err(_) => return,
+        }
+    };
+    let inputrc = std::path::PathBuf::from(&home).join(".inputrc");
+    let content = match std::fs::read_to_string(&inputrc) {
+        Ok(c) => c,
+        Err(_) => String::new(),
+    };
+    if content.contains("enable-mouse") {
+        return; // already configured, leave it alone
+    }
+    let _ = std::fs::write(&inputrc, content + "\nset enable-mouse on\n");
 }
 
 #[cfg(not(feature = "gpui"))]

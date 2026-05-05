@@ -238,6 +238,23 @@ pub(crate) struct ApiKeyInputState {
     pub(crate) input: gpui::Entity<gpui_component::input::InputState>,
 }
 
+/// Inline Workbench task action input state.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkbenchActionInputState {
+    pub(crate) task_id: String,
+    pub(crate) kind: WorkbenchActionInputKind,
+    pub(crate) input: gpui::Entity<gpui_component::input::InputState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkbenchActionInputKind {
+    Complete,
+    Block,
+    CreateMission,
+    CreateGoal,
+    CreateTask,
+}
+
 /// New-tab picker state (dropdown from the `+▾` button).
 #[derive(Clone, Debug)]
 pub(crate) struct NewTabPickerState {
@@ -255,6 +272,15 @@ pub(crate) struct NewTabPickerItem {
     pub(crate) label: String,
     pub(crate) icon: &'static str,
     pub(crate) separator_after: bool,
+}
+
+/// Pending multi-line paste awaiting confirmation. When the user
+/// pastes text containing newlines we hold it and show a toast;
+/// a second paste within the timeout window confirms and delivers.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingPaste {
+    pub(crate) text: String,
+    pub(crate) created: std::time::Instant,
 }
 
 #[cfg(test)]

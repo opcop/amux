@@ -83,6 +83,9 @@ impl FrameGuard {
 
 impl Drop for FrameGuard {
     fn drop(&mut self) {
+        if !hud_enabled() {
+            return;
+        }
         let micros = self.start.elapsed().as_micros() as u64;
         if let Ok(mut w) = window_cell().lock() {
             w.push(micros);
@@ -236,6 +239,11 @@ pub fn dump_startup_report() {
 mod tests {
     use super::*;
 
+    fn input_latency_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
     #[test]
     fn frame_window_rolls_over() {
         let mut w = FrameWindow::new();
@@ -263,6 +271,7 @@ mod tests {
 
     #[test]
     fn input_latency_mark_then_consume() {
+        let _guard = input_latency_test_guard();
         // Clear any stale state from earlier tests in the same
         // process (atomics are global).
         INPUT_TIMESTAMP_NS.store(0, Ordering::Relaxed);
@@ -282,6 +291,7 @@ mod tests {
 
     #[test]
     fn input_latency_consume_without_mark_is_noop() {
+        let _guard = input_latency_test_guard();
         INPUT_TIMESTAMP_NS.store(0, Ordering::Relaxed);
         LAST_INPUT_LATENCY_US.store(12345, Ordering::Relaxed);
         consume_input_latency();

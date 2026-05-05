@@ -2,12 +2,37 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_bootstrap;
-#[cfg(feature = "gpui")]
-mod gpui_clipboard;
 mod crash;
 #[cfg(feature = "gpui")]
 mod drag;
+#[cfg(feature = "gpui")]
+mod gpui_browser;
+#[cfg(feature = "gpui")]
+mod gpui_clipboard;
 mod gpui_config;
+#[cfg(feature = "gpui")]
+mod gpui_entry;
+#[cfg(feature = "gpui")]
+mod gpui_entry_render;
+#[cfg(feature = "gpui")]
+mod gpui_input_handler;
+#[cfg(feature = "gpui")]
+mod gpui_keyboard_shortcuts;
+#[cfg(feature = "gpui")]
+mod gpui_layout_renderer;
+#[cfg(feature = "gpui")]
+mod gpui_pickers;
+#[cfg(feature = "gpui")]
+mod gpui_preview;
+#[cfg(feature = "gpui")]
+mod gpui_status_bar;
+#[cfg(feature = "gpui")]
+mod gpui_terminal;
+#[cfg(feature = "gpui")]
+mod gpui_vibe_tools;
+mod gpui_workspace_persistence;
+#[cfg(feature = "gpui")]
+mod gpui_workspace_sidebar;
 #[cfg(feature = "gpui")]
 mod menu;
 mod metrics;
@@ -28,34 +53,10 @@ mod search;
 #[cfg(feature = "gpui")]
 mod state;
 mod tab_intercept;
-mod theme;
-#[cfg(feature = "gpui")]
-mod gpui_entry;
-#[cfg(feature = "gpui")]
-mod gpui_entry_render;
-#[cfg(feature = "gpui")]
-mod gpui_pickers;
-#[cfg(feature = "gpui")]
-mod gpui_input_handler;
-#[cfg(feature = "gpui")]
-mod gpui_layout_renderer;
-#[cfg(feature = "gpui")]
-mod gpui_preview;
-#[cfg(feature = "gpui")]
-mod gpui_vibe_tools;
-mod gpui_workspace_persistence;
-#[cfg(feature = "gpui")]
-mod gpui_status_bar;
-#[cfg(feature = "gpui")]
-mod gpui_keyboard_shortcuts;
-#[cfg(feature = "gpui")]
-mod gpui_terminal;
-#[cfg(feature = "gpui")]
-mod gpui_workspace_sidebar;
-#[cfg(feature = "gpui")]
-mod gpui_browser;
 #[cfg(not(feature = "gpui"))]
 mod text_entry;
+mod theme;
+mod workbench;
 
 fn main() {
     metrics::startup_phase("main_entry");

@@ -91,7 +91,8 @@ pub(crate) fn dispatch(
             use crate::gpui_workspace_sidebar::SidebarMode;
             view.sidebar_state.mode = match view.sidebar_state.mode {
                 SidebarMode::Workspaces => SidebarMode::Agents,
-                SidebarMode::Agents => SidebarMode::Workspaces,
+                SidebarMode::Agents => SidebarMode::Workbench,
+                SidebarMode::Workbench => SidebarMode::Workspaces,
             };
             if view.sidebar_state.collapsed {
                 view.sidebar_state.collapsed = false;
@@ -132,7 +133,8 @@ pub(crate) fn dispatch(
         "pane new-tab" => {
             close_palette(view);
             let env = view.capture_active_env();
-            view.terminal_manager_mut().add_tab_to_active_pane("Terminal".into());
+            view.terminal_manager_mut()
+                .add_tab_to_active_pane("Terminal".into());
             view.spawn_with_captured_env(&env);
         }
         "pane close" => {

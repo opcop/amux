@@ -70,12 +70,6 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
             "Open workspace",
             ShortcutCategory::Workspace,
         ),
-        Shortcut::new(
-            "ctrl+shift+w",
-            "Ctrl+Shift+W",
-            "Close workspace",
-            ShortcutCategory::Workspace,
-        ),
         // Pane shortcuts
         Shortcut::new(
             "ctrl+d",
@@ -229,13 +223,6 @@ pub fn all_shortcuts() -> Vec<Shortcut> {
             "Ctrl+E",
             "Use selection for find",
             ShortcutCategory::Find,
-        ),
-        // Command palette
-        Shortcut::new(
-            "ctrl+p",
-            "Ctrl+P",
-            "Open command palette",
-            ShortcutCategory::App,
         ),
         Shortcut::new(
             "ctrl+shift+h",

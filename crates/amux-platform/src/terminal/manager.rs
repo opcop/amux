@@ -12,6 +12,13 @@ use crate::terminal::alacritty_view::AlacrittyTerminal;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaneId(pub String);
 
+impl PaneId {
+    /// Sentinel for when no real pane is known (toasts, fallbacks).
+    pub fn unknown() -> Self {
+        PaneId("unknown".to_string())
+    }
+}
+
 /// Split direction
 #[derive(Clone, Debug, Copy)]
 pub enum SplitDirection {
@@ -1507,10 +1514,18 @@ impl TerminalManager {
                         tab.cached_cwd = term.current_cwd();
                     }
 
-                    // Auto-detect agent kind from terminal title on first output
+                    // Auto-detect agent kind from terminal title, falling
+                    // back to output scanning when the title is generic.
                     if tab.agent_kind.is_none() {
                         if let Some(title) = term.title() {
                             tab.agent_kind = Self::detect_agent_kind(&title);
+                        }
+                        // Title didn't match — try output-based detection.
+                        // Many agents print a startup banner (e.g. "Claude
+                        // Code v1.2") that the title heuristic misses.
+                        if tab.agent_kind.is_none() {
+                            let lines = term.last_lines(12);
+                            tab.agent_kind = Self::detect_agent_kind_from_output(&lines);
                         }
                     }
 
@@ -1519,7 +1534,7 @@ impl TerminalManager {
                     // whose shell hasn't opted into shell integration.
                     if tab.agent_kind.is_some() {
                         let old_status = tab.agent_status.clone();
-                        let lines = term.last_lines(5);
+                        let lines = term.last_lines(8);
                         tab.agent_status = Self::detect_agent_status(
                             tab.agent_kind.as_ref().unwrap(),
                             &lines,
@@ -1636,16 +1651,15 @@ impl TerminalManager {
             return None;
         }
 
-        // Length heuristic: the agent keyword must occupy >= 30% of the
-        // title. "claude" is 6 chars → title must be ≤ 20 chars.
-        // "aider" is 5 chars → title must be ≤ 16 chars.
-        // "claude-project" (14 chars) still passes (6/14 ≈ 43%).
-        // But "~/projects/claude-experiment — bash" (35 chars) fails
-        // (6/35 ≈ 17%).
+        // Length heuristic: the agent keyword must occupy >= 15% of the
+        // title, or the total title must be ≤ 40 chars (common for
+        // agent-set titles like "Claude Code" or "claude — -zsh").
         let agent_len = if has_claude { 6 } else if has_aider { 5 }
             else if has_opencode { 8 } else if has_codex { 5 }
             else if has_gemini { 6 } else { 7 }; // copilot
-        if (agent_len as f64) / (title.len().max(1) as f64) < 0.30 {
+        let ratio = (agent_len as f64) / (title.len().max(1) as f64);
+        let is_short_title = title.len() <= 40;
+        if ratio < 0.15 && !is_short_title {
             return None;
         }
 
@@ -1710,6 +1724,40 @@ impl TerminalManager {
     /// status markers. Extracted out of `detect_agent_status` so both
     /// the Unknown-phase fallback and the Executing-phase refinement
     /// can share the same logic.
+    /// Scan recent terminal output for agent startup signatures.
+    /// Used as a fallback when the terminal title doesn't contain an
+    /// agent keyword (e.g. generic shell title, or title not yet set).
+    fn detect_agent_kind_from_output(lines: &[String]) -> Option<AgentKind> {
+        for line in lines.iter().rev() {
+            let tl = line.to_lowercase();
+            if tl.contains("claude code")
+                || tl.contains("claude-4")
+                || tl.contains("claude opus")
+                || tl.contains("claude sonnet")
+                || tl.contains("claude haiku")
+                || (tl.contains("claude") && tl.contains("model"))
+            {
+                return Some(AgentKind::Claude);
+            }
+            if tl.contains("aider v") || (tl.contains("aider") && tl.contains("model")) {
+                return Some(AgentKind::Aider);
+            }
+            if tl.contains("opencode v") || tl.contains("opencode") && tl.contains("model") {
+                return Some(AgentKind::OpenCode);
+            }
+            if tl.contains("codex v") || tl.contains("codex cli") {
+                return Some(AgentKind::Codex);
+            }
+            if tl.contains("gemini cli") || tl.contains("gemini-2") {
+                return Some(AgentKind::Gemini);
+            }
+            if tl.contains("github copilot") || tl.contains("copilot cli") {
+                return Some(AgentKind::Copilot);
+            }
+        }
+        None
+    }
+
     fn detect_agent_status_regex(kind: &AgentKind, lines: &[String]) -> Option<AgentStatus> {
         if lines.is_empty() {
             return None;
@@ -1725,25 +1773,29 @@ impl TerminalManager {
             match kind {
                 AgentKind::Claude => {
                     // Claude Code prompt patterns (waiting for input):
-                    //   "⏣ > "  — the standard prompt
-                    //   "> "     — minimal prompt, only at start of line
+                    //   "⏣ > "  — the standard prompt (U+23E3)
+                    //   "⏵ > "  — alternate prompt style (U+23F5)
+                    //   ">"      — bare prompt
+                    //   "> "     — prompt with space
                     if trimmed.ends_with("\u{23e3} > ")
+                        || trimmed.ends_with("\u{23f5} > ")
+                        || trimmed.ends_with("\u{276f} ")
                         || trimmed == ">"
                         || trimmed.starts_with("> ")
+                        || trimmed.ends_with(" ⏣")
                     {
                         return Some(AgentStatus::Waiting);
                     }
                     // Claude Code thinking markers:
-                    // Braille spinners used by claude's progress bar
-                    if trimmed.contains("\u{280b}") // ⠋
-                        || trimmed.contains("\u{2819}") // ⠙
-                        || trimmed.contains("\u{2818}") // ⠸
-                        || trimmed.contains("\u{280c}") // ⠼
-                        || trimmed.contains("\u{281c}") // ⠴
-                        || trimmed.contains("\u{280e}") // ⠦
-                        || trimmed.contains("\u{2807}") // ⠇
-                        || trimmed.contains("\u{280f}") // ⠏
+                    // Braille spinners (U+2800 block) plus "Thinking…" label
+                    if trimmed.contains("\u{280b}") || trimmed.contains("\u{2819}")
+                        || trimmed.contains("\u{2818}") || trimmed.contains("\u{280c}")
+                        || trimmed.contains("\u{281c}") || trimmed.contains("\u{280e}")
+                        || trimmed.contains("\u{2807}") || trimmed.contains("\u{280f}")
+                        || trimmed.contains("\u{283f}") || trimmed.contains("\u{2827}")
+                        || trimmed.contains("\u{28ff}") || trimmed.contains("\u{283b}")
                         || trimmed.contains("Thinking")
+                        || trimmed.contains("thinking\u{2026}")  // "thinking…"
                     {
                         return Some(AgentStatus::Thinking);
                     }
@@ -1751,6 +1803,8 @@ impl TerminalManager {
                     if trimmed.contains("Claude Code error")
                         || trimmed.contains("API Error")
                         || trimmed.contains("Rate limit")
+                        || trimmed.contains("(error)")
+                        || trimmed.contains("(interrupted)")
                     {
                         return Some(AgentStatus::Error);
                     }
@@ -1783,10 +1837,18 @@ impl TerminalManager {
                     }
                 }
                 AgentKind::Gemini | AgentKind::Copilot => {
-                    if trimmed.ends_with("$ ") || trimmed.ends_with("> ") {
+                    // Only match prompts that look agent-specific, not
+                    // generic shell prompts (every terminal has "$ ").
+                    if trimmed.starts_with("gemini>")
+                        || trimmed.starts_with("copilot>")
+                        || trimmed.contains("Gemini CLI")
+                        || trimmed.contains("GitHub Copilot")
+                    {
                         return Some(AgentStatus::Waiting);
                     }
-                    if trimmed.contains("Thinking") || trimmed.contains("Generating") {
+                    if trimmed.contains("Thinking") || trimmed.contains("Generating")
+                        || trimmed.contains("gemini") || trimmed.contains("copilot")
+                    {
                         return Some(AgentStatus::Thinking);
                     }
                 }

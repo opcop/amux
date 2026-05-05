@@ -7,23 +7,24 @@
 #![cfg(feature = "gpui")]
 
 use gpui::{
-    rgb, AppContext, Context, FontWeight, IntoElement, Render, Window,
-    px, div, prelude::*,
+    AppContext, Context, FontWeight, IntoElement, Render, Window, div, prelude::*, px, rgb,
 };
 
 use crate::drag::DragWorkspace;
 use crate::gpui_entry::{
-    spawn_selection_autoscroll_loop, GpuiShellView, HoverLinkState, SIDEBAR_WIDTH_COLLAPSED,
-    SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    GpuiShellView, HoverLinkState, SIDEBAR_WIDTH_COLLAPSED, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    spawn_selection_autoscroll_loop,
 };
 use crate::gpui_layout_renderer::{
     render_agent_picker, render_ai_profile_picker, render_api_key_input, render_context_menu,
-    render_help_overlay, render_layout, render_new_tab_picker, render_pane_picker, render_template_picker,
+    render_help_overlay, render_layout, render_new_tab_picker, render_pane_picker,
+    render_template_picker,
 };
-use crate::gpui_status_bar::{render_status_bar, AgentSummary, StatusBarData};
+use crate::gpui_status_bar::{AgentSummary, StatusBarData, render_status_bar};
 use crate::gpui_workspace_sidebar::{AgentSidebarItem, SidebarMode};
 use crate::state::{
-    ContextMenuState, ScrollbarHit, SearchMode, SelectionAutoScrollState,
+    ContextMenuState, ScrollbarHit, SearchMode, SelectionAutoScrollState, WorkbenchActionInputKind,
+    WorkbenchActionInputState,
 };
 
 /// Format a u64 token count into a human-readable string.
@@ -37,6 +38,434 @@ fn format_tokens(n: u64) -> String {
     } else {
         String::new()
     }
+}
+
+fn section_label(label: &'static str, color: u32) -> impl IntoElement {
+    div()
+        .pt(px(8.0))
+        .pb(px(4.0))
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(color))
+        .child(label)
+}
+
+fn workbench_task_row(
+    task: &crate::workbench::model::Task,
+    color: u32,
+    selected: bool,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    let detail = task
+        .blocked_reason
+        .clone()
+        .map(|reason| format!("blocked: {reason}"))
+        .or_else(|| {
+            task.assignee_pane_id
+                .as_ref()
+                .map(|pane| format!("@{pane}"))
+        })
+        .or_else(|| {
+            task.proof
+                .as_ref()
+                .map(|proof| proof.notes.trim())
+                .filter(|notes| !notes.is_empty())
+                .map(|notes| format!("proof: {notes}"))
+        })
+        .unwrap_or_default();
+    let task_id = task.id.clone();
+    div()
+        .id(gpui::ElementId::Name(
+            format!("workbench-task-{}", task.id).into(),
+        ))
+        .flex_col()
+        .px(px(6.0))
+        .py(px(5.0))
+        .mx(px(-4.0))
+        .rounded(px(4.0))
+        .when(selected, |row| row.bg(rgb(crate::theme::SURFACE_RAISED)))
+        .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            if this
+                .workbench_action_input
+                .as_ref()
+                .is_some_and(|action| action.task_id != task_id)
+            {
+                this.workbench_action_input = None;
+            }
+            this.selected_workbench_task_id = Some(task_id.clone());
+            cx.notify();
+        }))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(crate::theme::TEXT_DIM))
+                        .child(format!("P{}", task.priority)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(color))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(task.id.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_xs()
+                        .text_color(rgb(crate::theme::TEXT))
+                        .child(task.title.clone()),
+                ),
+        )
+        .when(!detail.is_empty(), move |row| {
+            row.child(
+                div()
+                    .pt(px(2.0))
+                    .text_xs()
+                    .text_color(rgb(crate::theme::TEXT_DIM))
+                    .child(detail),
+            )
+        })
+}
+
+fn workbench_meta_line(label: &'static str, value: String) -> impl IntoElement {
+    div()
+        .flex()
+        .gap(px(6.0))
+        .text_xs()
+        .child(div().text_color(rgb(crate::theme::TEXT_DIM)).child(label))
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .text_color(rgb(crate::theme::TEXT))
+                .child(value),
+        )
+}
+
+fn workbench_action_input_panel(
+    action: &WorkbenchActionInputState,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    let title = match action.kind {
+        WorkbenchActionInputKind::Complete => "Completion proof",
+        WorkbenchActionInputKind::Block => "Block reason",
+        WorkbenchActionInputKind::CreateMission => "New mission",
+        WorkbenchActionInputKind::CreateGoal => "New goal",
+        WorkbenchActionInputKind::CreateTask => "New task",
+    };
+    let submit = match action.kind {
+        WorkbenchActionInputKind::Complete => "Save proof",
+        WorkbenchActionInputKind::Block => "Block task",
+        WorkbenchActionInputKind::CreateMission => "Create mission",
+        WorkbenchActionInputKind::CreateGoal => "Create goal",
+        WorkbenchActionInputKind::CreateTask => "Create task",
+    };
+    let accent = match action.kind {
+        WorkbenchActionInputKind::Complete => crate::theme::SUCCESS,
+        WorkbenchActionInputKind::Block => crate::theme::DANGER,
+        WorkbenchActionInputKind::CreateMission => crate::theme::ACCENT,
+        WorkbenchActionInputKind::CreateGoal => crate::theme::ACCENT,
+        WorkbenchActionInputKind::CreateTask => crate::theme::ACCENT,
+    };
+
+    div()
+        .mt(px(4.0))
+        .p(px(6.0))
+        .rounded(px(4.0))
+        .bg(rgb(crate::theme::SURFACE_RAISED))
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(accent))
+                .child(title),
+        )
+        .child({
+            use gpui_component::Sizable;
+            gpui_component::input::Input::new(&action.input)
+                .small()
+                .cleanable(false)
+                .appearance(true)
+        })
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .id("workbench-action-input-cancel")
+                        .px(px(7.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(crate::theme::TEXT_DIM))
+                        .bg(rgb(crate::theme::SURFACE))
+                        .hover(|d| d.text_color(rgb(crate::theme::TEXT)))
+                        .cursor_pointer()
+                        .child("Cancel")
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.cancel_workbench_action_input();
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .id("workbench-action-input-submit")
+                        .px(px(7.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(crate::theme::SURFACE))
+                        .bg(rgb(accent))
+                        .hover(|d| d.bg(rgb(crate::theme::ACCENT)))
+                        .cursor_pointer()
+                        .child(submit)
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            let result = this.execute_workbench_action_input(cx);
+                            match result {
+                                Ok(msg) => this.push_workbench_toast(msg, crate::theme::ACCENT),
+                                Err(err) => this.push_workbench_toast(err, crate::theme::DANGER),
+                            }
+                            cx.notify();
+                        })),
+                ),
+        )
+}
+
+fn workbench_task_detail_panel(
+    task: &crate::workbench::model::Task,
+    events: Vec<crate::workbench::model::WorkbenchEvent>,
+    dispatch_path: String,
+    active_action: Option<WorkbenchActionInputState>,
+    cx: &mut Context<GpuiShellView>,
+) -> impl IntoElement {
+    let send_id = task.id.clone();
+    let focus_id = task.id.clone();
+    let done_id = task.id.clone();
+    let block_id = task.id.clone();
+    let active_action_for_panel = active_action.filter(|action| action.task_id == task.id);
+    let mut panel = div()
+        .mt(px(10.0))
+        .pt(px(8.0))
+        .border_t_1()
+        .border_color(rgb(crate::theme::BORDER))
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(crate::theme::TEXT))
+                        .child(format!("{}  {}", task.id, task.title)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(crate::theme::TEXT_DIM))
+                        .child(task.status.label()),
+                ),
+        )
+        .child(workbench_meta_line(
+            "priority",
+            format!("P{}", task.priority),
+        ))
+        .when_some(task.goal_id.clone(), |p, goal| {
+            p.child(workbench_meta_line("goal", goal))
+        })
+        .when_some(task.assignee_pane_id.clone(), |p, pane| {
+            p.child(workbench_meta_line("pane", pane))
+        })
+        .when_some(task.assigned_at.clone(), |p, assigned| {
+            p.child(workbench_meta_line("assigned", assigned))
+        })
+        .when_some(task.last_activity_at.clone(), |p, activity| {
+            p.child(workbench_meta_line("activity", activity))
+        })
+        .when(!task.description.trim().is_empty(), |p| {
+            p.child(workbench_meta_line("notes", task.description.clone()))
+        })
+        .when(!task.depends_on.is_empty(), |p| {
+            p.child(workbench_meta_line("depends", task.depends_on.join(", ")))
+        })
+        .when(!task.tags.is_empty(), |p| {
+            p.child(workbench_meta_line("tags", task.tags.join(", ")))
+        })
+        .when(!dispatch_path.is_empty(), |p| {
+            p.child(workbench_meta_line("dispatch", dispatch_path))
+        });
+
+    if let Some(proof) = &task.proof {
+        panel = panel
+            .child(section_label("PROOF", crate::theme::SUCCESS))
+            .when(!proof.notes.trim().is_empty(), |p| {
+                p.child(workbench_meta_line("notes", proof.notes.clone()))
+            })
+            .when_some(proof.tests.clone(), |p, tests| {
+                p.child(workbench_meta_line("tests", tests))
+            })
+            .when(!proof.files_changed.is_empty(), |p| {
+                p.child(workbench_meta_line("files", proof.files_changed.join(", ")))
+            })
+            .when(!proof.commands_run.is_empty(), |p| {
+                p.child(workbench_meta_line(
+                    "commands",
+                    proof.commands_run.join(" | "),
+                ))
+            })
+            .when(!proof.errors.is_empty(), |p| {
+                p.child(workbench_meta_line("errors", proof.errors.join(" | ")))
+            });
+    }
+
+    let mut event_col = div().flex_col().gap(px(3.0));
+    for event in events.into_iter().take(4) {
+        event_col = event_col.child(
+            div()
+                .text_xs()
+                .text_color(rgb(crate::theme::TEXT_DIM))
+                .child(format!("{:?}: {}", event.kind, event.message)),
+        );
+    }
+    panel = panel
+        .child(section_label("ACTIVITY", crate::theme::TEXT_DIM))
+        .child(event_col);
+
+    panel
+        .child(
+            div()
+                .flex()
+                .gap(px(5.0))
+                .pt(px(4.0))
+                .child(
+                    div()
+                        .id("workbench-action-send-idle")
+                        .px(px(7.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(crate::theme::ACCENT))
+                        .bg(rgb(crate::theme::SURFACE_RAISED))
+                        .hover(|d| {
+                            d.bg(rgb(crate::theme::SURFACE))
+                                .text_color(rgb(crate::theme::TEXT))
+                        })
+                        .cursor_pointer()
+                        .child("Send idle")
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            let result = this.send_workbench_task_to_idle(&send_id);
+                            match result {
+                                Ok(msg) => this.push_workbench_toast(msg, crate::theme::ACCENT),
+                                Err(err) => this.push_workbench_toast(err, crate::theme::DANGER),
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .id("workbench-action-focus")
+                        .px(px(7.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(crate::theme::TEXT))
+                        .bg(rgb(crate::theme::SURFACE_RAISED))
+                        .hover(|d| {
+                            d.bg(rgb(crate::theme::SURFACE))
+                                .text_color(rgb(crate::theme::TEXT))
+                        })
+                        .cursor_pointer()
+                        .child("Focus")
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            let result = this.focus_workbench_task_pane(&focus_id);
+                            match result {
+                                Ok(msg) => this.push_workbench_toast(msg, crate::theme::ACCENT),
+                                Err(err) => this.push_workbench_toast(err, crate::theme::DANGER),
+                            }
+                            cx.notify();
+                        })),
+                )
+                .when(
+                    task.status != crate::workbench::model::TaskStatus::Done,
+                    |row| {
+                        row.child(
+                            div()
+                                .id("workbench-action-done")
+                                .px(px(7.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(crate::theme::SUCCESS))
+                                .bg(rgb(crate::theme::SURFACE_RAISED))
+                                .hover(|d| {
+                                    d.bg(rgb(crate::theme::SURFACE))
+                                        .text_color(rgb(crate::theme::TEXT))
+                                })
+                                .cursor_pointer()
+                                .child("Done")
+                                .on_click(cx.listener(move |this, _event, window, cx| {
+                                    this.start_workbench_action_input(
+                                        done_id.clone(),
+                                        WorkbenchActionInputKind::Complete,
+                                        window,
+                                        cx,
+                                    );
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("workbench-action-block")
+                                .px(px(7.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(crate::theme::DANGER))
+                                .bg(rgb(crate::theme::SURFACE_RAISED))
+                                .hover(|d| {
+                                    d.bg(rgb(crate::theme::SURFACE))
+                                        .text_color(rgb(crate::theme::TEXT))
+                                })
+                                .cursor_pointer()
+                                .child("Block")
+                                .on_click(cx.listener(move |this, _event, window, cx| {
+                                    this.start_workbench_action_input(
+                                        block_id.clone(),
+                                        WorkbenchActionInputKind::Block,
+                                        window,
+                                        cx,
+                                    );
+                                    cx.notify();
+                                })),
+                        )
+                    },
+                ),
+        )
+        .when_some(active_action_for_panel, |panel, action| {
+            panel.child(workbench_action_input_panel(&action, cx))
+        })
 }
 
 #[cfg(feature = "gpui")]
@@ -70,6 +499,14 @@ impl Render for GpuiShellView {
                 crate::metrics::dump_startup_report();
             });
         }
+        // Show a one-time discoverability hint on first render.
+        if !self.first_render_toast_shown {
+            self.first_render_toast_shown = true;
+            self.push_workbench_toast(
+                "Ctrl+Shift+H — Keyboard shortcuts & help",
+                crate::theme::INFO,
+            );
+        }
 
         // Focus management.
         // When the browser is open, trust GPUI's own focus system:
@@ -92,7 +529,11 @@ impl Render for GpuiShellView {
             //   - Click terminal  → root's track_focus + focus_parent()
             //   - Click URL Input → Input's track_focus (with prevent_default)
             //   - Click WebView2  → WebView2 gets OS focus, GPUI does nothing
-        } else if self.renaming_workspace.is_some() || self.renaming_tab.is_some() || self.api_key_input.is_some() {
+        } else if self.renaming_workspace.is_some()
+            || self.renaming_tab.is_some()
+            || self.api_key_input.is_some()
+            || self.workbench_action_input.is_some()
+        {
             // Rename / API key input active: leave focus on the Input.
             // Re-grabbing the root handle here races the focus
             // `on_next_frame` the rename/input helper just scheduled.
@@ -107,7 +548,8 @@ impl Render for GpuiShellView {
         // Sync URL bar and tab title when navigation changed the page address.
         // Only update when the Input is NOT focused (don't overwrite user's editing).
         if let Some(url) = self.pending_url_bar_update.take() {
-            let child_input_focused = self.active_browser_entry()
+            let child_input_focused = self
+                .active_browser_entry()
                 .map(|(_, e)| {
                     use gpui::Focusable;
                     e.url_input.read(cx).focus_handle(cx).is_focused(window)
@@ -154,10 +596,18 @@ impl Render for GpuiShellView {
         let workspace_groups = self.model.workspace_groups.clone();
 
         // Measure font metrics on first render
-        let metrics = self.cell_metrics.get_or_insert_with(|| {
-            crate::gpui_terminal::measure_cell_metrics(window, &self.config.font_family, self.config.font_size, self.config.line_height)
-        }).clone();
-        let cell_w = metrics.width.max(1.0);  // guard against zero
+        let metrics = self
+            .cell_metrics
+            .get_or_insert_with(|| {
+                crate::gpui_terminal::measure_cell_metrics(
+                    window,
+                    &self.config.font_family,
+                    self.config.font_size,
+                    self.config.line_height,
+                )
+            })
+            .clone();
+        let cell_w = metrics.width.max(1.0); // guard against zero
         let cell_h = metrics.height.max(1.0);
 
         // Resize terminals — skip during drag to avoid content loss
@@ -170,21 +620,22 @@ impl Render for GpuiShellView {
             // which eats into the viewport but isn't accounted for by
             // status_bar_h alone. Without subtracting it, the terminal
             // computes 1-2 extra rows that get clipped at the bottom.
-            let titlebar_h = if cfg!(target_os = "macos") { crate::theme::TITLEBAR_H } else { 0.0 };
-            let content_h = vp.height.as_f32() - status_bar_h - titlebar_h;            if let Some(zpid) = self.zoomed_pane.clone() {
-                // Zoom mode: give the zoomed pane the full content area
-                self.terminal_manager_mut().resize_pane_terminals(
-                    &zpid, content_w, content_h, cell_w, cell_h,
-                );
+            let titlebar_h = if cfg!(target_os = "macos") {
+                crate::theme::TITLEBAR_H
             } else {
-                self.terminal_manager_mut().resize_all_panes(
-                    content_w, content_h, cell_w, cell_h,
-                );
+                0.0
+            };
+            let content_h = vp.height.as_f32() - status_bar_h - titlebar_h;
+            if let Some(zpid) = self.zoomed_pane.clone() {
+                // Zoom mode: give the zoomed pane the full content area
+                self.terminal_manager_mut()
+                    .resize_pane_terminals(&zpid, content_w, content_h, cell_w, cell_h);
+            } else {
+                self.terminal_manager_mut()
+                    .resize_all_panes(content_w, content_h, cell_w, cell_h);
             }
         }
 
-
-        
         // IME input handler canvas. GPUI positions its built-in IME
         // composition box (the "方框" with preedit text) at the canvas
         // bounds and uses those bounds as the anchor for the macOS
@@ -869,8 +1320,11 @@ impl Render for GpuiShellView {
                                 // Header: mode tabs + collapse button
                                 .child({
                                     let is_ws_mode = self.sidebar_state.mode == SidebarMode::Workspaces;
+                                    let is_agents_mode = self.sidebar_state.mode == SidebarMode::Agents;
+                                    let is_workbench_mode = self.sidebar_state.mode == SidebarMode::Workbench;
                                     let ws_text_color = if is_ws_mode { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) };
-                                    let ag_text_color = if !is_ws_mode { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) };
+                                    let ag_text_color = if is_agents_mode { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) };
+                                    let wb_text_color = if is_workbench_mode { rgb(crate::theme::TEXT) } else { rgb(crate::theme::TEXT_DIM) };
                                     div()
                                         .flex()
                                         .justify_between()
@@ -895,7 +1349,7 @@ impl Render for GpuiShellView {
                                                         .when(is_ws_mode, |d| d.border_b_2().border_color(rgb(crate::theme::ACCENT)))
                                                         .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
                                                         .cursor_pointer()
-                                                        .child("WS")
+                                                        .child("Workspaces")
                                                         .on_click(cx.listener(|this, _e, _w, cx| {
                                                             this.sidebar_state.mode = SidebarMode::Workspaces;
                                                             cx.notify();
@@ -911,12 +1365,31 @@ impl Render for GpuiShellView {
                                                         .text_xs()
                                                         .font_weight(FontWeight::SEMIBOLD)
                                                         .text_color(ag_text_color)
-                                                        .when(!is_ws_mode, |d| d.border_b_2().border_color(rgb(crate::theme::ACCENT)))
+                                                        .when(is_agents_mode, |d| d.border_b_2().border_color(rgb(crate::theme::ACCENT)))
                                                         .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
                                                         .cursor_pointer()
                                                         .child("Agents")
                                                         .on_click(cx.listener(|this, _e, _w, cx| {
                                                             this.sidebar_state.mode = SidebarMode::Agents;
+                                                            cx.notify();
+                                                        })),
+                                                )
+                                                // Workbench tab
+                                                .child(
+                                                    div()
+                                                        .id("sidebar-tab-workbench")
+                                                        .px(px(6.0))
+                                                        .py(px(3.0))
+                                                        .rounded(px(3.0))
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(wb_text_color)
+                                                        .when(is_workbench_mode, |d| d.border_b_2().border_color(rgb(crate::theme::ACCENT)))
+                                                        .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)).text_color(rgb(crate::theme::TEXT)))
+                                                        .cursor_pointer()
+                                                        .child("Workbench")
+                                                        .on_click(cx.listener(|this, _e, _w, cx| {
+                                                            this.sidebar_state.mode = SidebarMode::Workbench;
                                                             cx.notify();
                                                         })),
                                                 ),
@@ -938,7 +1411,285 @@ impl Render for GpuiShellView {
                                         )
                                 })
                                 // Sidebar body: workspace list or agents view
-                                .child(if self.sidebar_state.mode == SidebarMode::Agents {
+                                .child(if self.sidebar_state.mode == SidebarMode::Workbench {
+                                    let store = self.workbench_store();
+                                    let mission = store.load_mission();
+                                    let goals = store.list_goals();
+                                    let tasks = store.list_tasks();
+                                    let selected_task_id = self.selected_workbench_task_id.clone()
+                                        .filter(|id| tasks.iter().any(|task| task.id == *id))
+                                        .or_else(|| {
+                                            tasks.iter()
+                                                .find(|task| matches!(
+                                                    task.status,
+                                                    crate::workbench::model::TaskStatus::Assigned
+                                                        | crate::workbench::model::TaskStatus::InProgress
+                                                        | crate::workbench::model::TaskStatus::Blocked
+                                                ))
+                                                .or_else(|| tasks.first())
+                                                .map(|task| task.id.clone())
+                                        });
+                                    let issues = store.storage_issues();
+                                    let done_goals = goals.iter()
+                                        .filter(|goal| goal.status == crate::workbench::model::GoalStatus::Done)
+                                        .count();
+                                    let done_count = tasks.iter()
+                                        .filter(|task| task.status == crate::workbench::model::TaskStatus::Done)
+                                        .count();
+                                    let running: Vec<_> = tasks.iter()
+                                        .filter(|task| matches!(
+                                            task.status,
+                                            crate::workbench::model::TaskStatus::Assigned
+                                                | crate::workbench::model::TaskStatus::InProgress
+                                        ))
+                                        .collect();
+                                    let blocked: Vec<_> = tasks.iter()
+                                        .filter(|task| task.status == crate::workbench::model::TaskStatus::Blocked)
+                                        .collect();
+                                    let mut todo: Vec<_> = tasks.iter()
+                                        .filter(|task| task.status == crate::workbench::model::TaskStatus::Todo)
+                                        .collect();
+                                    todo.sort_by_key(|task| task.priority);
+                                    let mut recent_done: Vec<_> = tasks.iter()
+                                        .filter(|task| task.status == crate::workbench::model::TaskStatus::Done)
+                                        .collect();
+                                    recent_done.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                                    let active_create_action = self.workbench_action_input.clone()
+                                        .filter(|action| matches!(
+                                            action.kind,
+                                            WorkbenchActionInputKind::CreateMission
+                                                | WorkbenchActionInputKind::CreateGoal
+                                                | WorkbenchActionInputKind::CreateTask
+                                        ));
+
+                                    let mut col = div()
+                                        .flex_col()
+                                        .flex_1()
+                                        .overflow_y_hidden()
+                                        .px_3()
+                                        .py_2();
+
+                                    col = col.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(crate::theme::TEXT_DIM))
+                                            .child("MISSION"),
+                                    );
+                                    col = col.child(
+                                        div()
+                                            .pt(px(2.0))
+                                            .pb(px(8.0))
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(crate::theme::TEXT))
+                                            .child(
+                                                mission.as_ref()
+                                                    .map(|m| m.title.clone())
+                                                    .unwrap_or_else(|| "No mission set".to_string()),
+                                            ),
+                                    );
+                                    col = col.child(
+                                        div()
+                                            .mb(px(8.0))
+                                            .p(px(8.0))
+                                            .rounded(px(5.0))
+                                            .bg(rgb(crate::theme::SURFACE))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(crate::theme::TEXT_DIM))
+                                                    .child(format!("Goals: {}/{} done | Tasks: {}/{} done", done_goals, goals.len(), done_count, tasks.len())),
+                                            )
+                                            .child(
+                                                div()
+                                                    .pt(px(2.0))
+                                                    .text_xs()
+                                                    .text_color(rgb(crate::theme::TEXT_DIM))
+                                                    .child(format!("Running: {} | Blocked: {}", running.len(), blocked.len())),
+                                            ),
+                                    );
+                                    col = col.child(
+                                        div()
+                                            .mb(px(8.0))
+                                            .flex()
+                                            .gap(px(5.0))
+                                            .child(
+                                                div()
+                                                    .id("workbench-create-mission")
+                                                    .px(px(7.0))
+                                                    .py(px(4.0))
+                                                    .rounded(px(4.0))
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(crate::theme::TEXT))
+                                                    .bg(rgb(crate::theme::SURFACE_RAISED))
+                                                    .hover(|d| d.bg(rgb(crate::theme::SURFACE)).text_color(rgb(crate::theme::ACCENT)))
+                                                    .cursor_pointer()
+                                                    .child("Mission")
+                                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                                        this.start_workbench_create_input(
+                                                            WorkbenchActionInputKind::CreateMission,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("workbench-create-goal")
+                                                    .px(px(7.0))
+                                                    .py(px(4.0))
+                                                    .rounded(px(4.0))
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(crate::theme::TEXT))
+                                                    .bg(rgb(crate::theme::SURFACE_RAISED))
+                                                    .hover(|d| d.bg(rgb(crate::theme::SURFACE)).text_color(rgb(crate::theme::ACCENT)))
+                                                    .cursor_pointer()
+                                                    .child("Goal")
+                                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                                        this.start_workbench_create_input(
+                                                            WorkbenchActionInputKind::CreateGoal,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("workbench-create-task")
+                                                    .px(px(7.0))
+                                                    .py(px(4.0))
+                                                    .rounded(px(4.0))
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(crate::theme::ACCENT))
+                                                    .bg(rgb(crate::theme::SURFACE_RAISED))
+                                                    .hover(|d| d.bg(rgb(crate::theme::SURFACE)).text_color(rgb(crate::theme::TEXT)))
+                                                    .cursor_pointer()
+                                                    .child("Task")
+                                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                                        this.start_workbench_create_input(
+                                                            WorkbenchActionInputKind::CreateTask,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    );
+                                    if let Some(action) = active_create_action {
+                                        col = col.child(workbench_action_input_panel(&action, cx));
+                                    }
+                                    if !issues.is_empty() {
+                                        col = col.child(
+                                            div()
+                                                .mb(px(8.0))
+                                                .p(px(8.0))
+                                                .rounded(px(5.0))
+                                                .bg(rgb(crate::theme::SURFACE_RAISED))
+                                                .border_1()
+                                                .border_color(rgb(crate::theme::DANGER))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(rgb(crate::theme::DANGER))
+                                                        .child(format!("Storage warnings: {}", issues.len())),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .pt(px(2.0))
+                                                        .text_xs()
+                                                        .text_color(rgb(crate::theme::TEXT_DIM))
+                                                        .child(
+                                                            issues.first()
+                                                                .map(|issue| issue.path.display().to_string())
+                                                                .unwrap_or_default(),
+                                                        ),
+                                                ),
+                                        );
+                                    }
+
+                                    if tasks.is_empty() {
+                                        col = col
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(crate::theme::TEXT_DIM))
+                                                    .child("Create a task from any terminal:"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .pt(px(4.0))
+                                                    .text_xs()
+                                                    .text_color(rgb(crate::theme::ACCENT))
+                                                    .child("amux task create \"title\""),
+                                            );
+                                    }
+
+                                    if !running.is_empty() {
+                                        col = col.child(section_label("RUNNING", 0x81a2be));
+                                        for task in running.into_iter().take(6) {
+                                            let selected = selected_task_id.as_deref() == Some(task.id.as_str());
+                                            col = col.child(workbench_task_row(task, crate::theme::ACCENT, selected, cx));
+                                        }
+                                    }
+                                    if !todo.is_empty() {
+                                        col = col.child(section_label("TODO", crate::theme::TEXT_DIM));
+                                        for task in todo.into_iter().take(8) {
+                                            let selected = selected_task_id.as_deref() == Some(task.id.as_str());
+                                            col = col.child(workbench_task_row(task, crate::theme::TEXT, selected, cx));
+                                        }
+                                    }
+                                    if !blocked.is_empty() {
+                                        col = col.child(section_label("BLOCKED", crate::theme::DANGER));
+                                        for task in blocked.into_iter().take(6) {
+                                            let selected = selected_task_id.as_deref() == Some(task.id.as_str());
+                                            col = col.child(workbench_task_row(task, crate::theme::DANGER, selected, cx));
+                                        }
+                                    }
+                                    if !recent_done.is_empty() {
+                                        col = col.child(section_label("RECENTLY DONE", crate::theme::SUCCESS));
+                                        for task in recent_done.into_iter().take(6) {
+                                            let selected = selected_task_id.as_deref() == Some(task.id.as_str());
+                                            col = col.child(workbench_task_row(task, crate::theme::TEXT_DIM, selected, cx));
+                                        }
+                                    }
+                                    if let Some(task_id) = selected_task_id {
+                                        if let Some(task) = tasks.iter().find(|task| task.id == task_id) {
+                                            let events = store.list_task_events(&task.id, 8);
+                                            let dispatch_path = store.dispatch_path(&task.id).display().to_string();
+                                            col = col.child(workbench_task_detail_panel(
+                                                task,
+                                                events,
+                                                dispatch_path,
+                                                self.workbench_action_input.clone(),
+                                                cx,
+                                            ));
+                                        }
+                                    }
+                                    col.into_any_element()
+                                } else if self.sidebar_state.mode == SidebarMode::Agents {
+                                    // Hover peek: capture last 8 lines of output
+                                    // when user hovers an agent row for > 300ms.
+                                    if let Some(ref pane_id) = self.hovered_agent_pane {
+                                        if self.peek_cached_for.as_deref() != Some(pane_id) {
+                                            if let Some(since) = self.hovered_agent_since {
+                                                if since.elapsed() > std::time::Duration::from_millis(300) {
+                                                    let pid = amux_platform::terminal::manager::PaneId(pane_id.clone());
+                                                    self.peek_content = self.terminal_manager().pane_read(&pid, 8);
+                                                    self.peek_cached_for = Some(pane_id.clone());
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        self.peek_content = None;
+                                        self.peek_cached_for = None;
+                                    }
+
                                     // Agents view: only show panes where a known
                                     // VibeCoding tool (Claude Code, OpenCode, Codex,
                                     // Aider, Gemini, Copilot) was detected via
@@ -950,11 +1701,11 @@ impl Render for GpuiShellView {
                                         .filter(|info| info.agent_kind.is_some())
                                         .map(|info| {
                                             let (icon, color) = match info.agent_status.as_deref() {
-                                                Some("thinking...") => ("*".to_string(), 0x81a2beu32),
-                                                Some("waiting")     => ("!".to_string(), 0xf9e2af),
-                                                Some("done")        => ("+".to_string(), 0xb5bd68),
-                                                Some("error")       => ("!".to_string(), 0xf38ba8),
-                                                _                   => ("-".to_string(), 0x969896),
+                                                Some("thinking...") => ("*".to_string(), crate::theme::ACCENT),
+                                                Some("waiting")     => ("!".to_string(), crate::theme::WARNING),
+                                                Some("done")        => ("+".to_string(), crate::theme::SUCCESS),
+                                                Some("error")       => ("!".to_string(), crate::theme::DANGER),
+                                                _                   => ("-".to_string(), crate::theme::TEXT_DIM),
                                             };
                                             let session = info.agent_session.as_ref();
                                             AgentSidebarItem {
@@ -991,10 +1742,10 @@ impl Render for GpuiShellView {
                                         grouped.entry(key).or_default().push(agent);
                                     }
                                     let group_meta: [(u8, &str, &str, u32); 4] = [
-                                        (0, "!", "ATTENTION", 0xf9e2af),
-                                        (1, "*", "RUNNING",   0x81a2be),
-                                        (2, "+", "COMPLETED", 0xb5bd68),
-                                        (3, "-", "IDLE",      0x969896),
+                                        (0, "!", "ATTENTION", crate::theme::WARNING),
+                                        (1, "*", "RUNNING",   crate::theme::ACCENT),
+                                        (2, "+", "COMPLETED", crate::theme::SUCCESS),
+                                        (3, "-", "IDLE",      crate::theme::TEXT_DIM),
                                     ];
                                     let mut col = div()
                                         .flex_col()
@@ -1046,6 +1797,17 @@ impl Render for GpuiShellView {
                                                 } else {
                                                     agent.pane_id.clone()
                                                 };
+                                                let hover_pane = agent.pane_id.clone();
+                                                let is_hovered = self.hovered_agent_pane.as_deref() == Some(&hover_pane);
+                                                let show_peek = is_hovered && self.hovered_agent_since
+                                                    .map(|t| t.elapsed() > std::time::Duration::from_millis(300))
+                                                    .unwrap_or(false);
+                                                let peek_lines_snapshot: Vec<String> = if show_peek {
+                                                    self.peek_content.clone().unwrap_or_default()
+                                                } else {
+                                                    Vec::new()
+                                                };
+
                                                 col = col.child(
                                                     div()
                                                         .id(gpui::ElementId::Name(format!("agent-{}", agent.pane_id).into()))
@@ -1054,6 +1816,14 @@ impl Render for GpuiShellView {
                                                         .rounded(px(4.0))
                                                         .cursor_pointer()
                                                         .hover(|d| d.bg(rgb(crate::theme::SURFACE_RAISED)))
+                                                        .on_mouse_move(cx.listener(move |this, _event, _window, cx| {
+                                                            if this.hovered_agent_pane.as_deref() != Some(&hover_pane) {
+                                                                this.hovered_agent_pane = Some(hover_pane.clone());
+                                                                this.hovered_agent_since = Some(std::time::Instant::now());
+                                                                this.peek_content = None;
+                                                                cx.notify();
+                                                            }
+                                                        }))
                                                         .child(
                                                             div().flex().items_center().gap(px(6.0))
                                                                 .child(div().text_xs().text_color(rgb(icon_color)).child(icon_c))
@@ -1062,13 +1832,16 @@ impl Render for GpuiShellView {
                                                                     d.child(div().text_xs().text_color(rgb(crate::theme::TEXT_DIM)).child(kind_c))
                                                                 })
                                                                 .child(div().text_xs().text_color(rgb(crate::theme::SURFACE_RAISED)).child(pane_short))
+                                                                .when(agent.agent_status.as_deref() == Some("waiting"), move |d| {
+                                                                    d.child(div().text_xs().text_color(rgb(crate::theme::SUCCESS)).child("⟳ Reply"))
+                                                                })
                                                         )
                                                         // Session detail line: tool | tokens | sub-agents | todos
                                                         .when(!tool_c.is_empty() || tokens_c.is_some() || sub_c.is_some() || todo_c.is_some(), move |d| {
                                                             d.child(
                                                                 div().flex().items_center().gap(px(8.0)).pt(px(2.0))
                                                                     .when(!tool_c.is_empty(), move |d2| {
-                                                                        d2.child(div().text_xs().text_color(rgb(0x81a2be)).child(tool_c))
+                                                                        d2.child(div().text_xs().text_color(rgb(crate::theme::ACCENT)).child(tool_c))
                                                                     })
                                                                     .when_some(tokens_c, |d2, t| {
                                                                         d2.child(div().text_xs().text_color(rgb(crate::theme::TEXT_DIM)).child(t))
@@ -1079,6 +1852,24 @@ impl Render for GpuiShellView {
                                                                     .when_some(todo_c, |d2, p| {
                                                                         d2.child(div().text_xs().text_color(rgb(0xa6e3a1)).child(p))
                                                                     })
+                                                            )
+                                                        })
+                                                        // Hover peek popover
+                                                        .when(show_peek, move |d| {
+                                                            d.child(
+                                                                div()
+                                                                    .absolute().left(px(4.0)).right(px(4.0))
+                                                                    .top(px(32.0))
+                                                                    .p(px(6.0)).rounded(px(5.0))
+                                                                    .bg(rgb(crate::theme::SURFACE_DIM))
+                                                                    .border_1().border_color(rgb(crate::theme::BORDER))
+                                                                    .shadow_lg()
+                                                                    .flex_col().gap(px(1.0))
+                                                                    .children(peek_lines_snapshot.iter().map(|line| {
+                                                                        div()
+                                                                            .text_xs().text_color(rgb(crate::theme::TEXT_DIM))
+                                                                            .child(line.clone())
+                                                                    }))
                                                             )
                                                         })
                                                         .on_click(cx.listener(move |this, _event, _window, cx| {
