@@ -83,8 +83,6 @@ pub(crate) struct GpuiShellView {
     pub(crate) selected_workbench_task_id: Option<String>,
     /// Inline proof/reason input for the selected Workbench task.
     pub(crate) workbench_action_input: Option<WorkbenchActionInputState>,
-    /// Pending multi-line paste awaiting confirmation double-tap.
-    pub(crate) pending_paste: Option<crate::state::PendingPaste>,
     /// Last seen agent status per pane (pane_id.0 → status label).
     /// Used to detect status transitions for workbench auto-update.
     pub(crate) last_agent_statuses: std::collections::HashMap<String, Option<String>>,
@@ -227,7 +225,7 @@ pub(crate) struct HoverLinkState {
 #[cfg(feature = "gpui")]
 pub(crate) use crate::state::{
     AgentPickerState, AiProfilePickerState, ApiKeyInputState, ContextMenuState, NewTabPickerState,
-    PanePickerState, PendingPaste, ResizeDragState, ScrollbarDragState, ScrollbarHit, SearchState,
+    PanePickerState, ResizeDragState, ScrollbarDragState, ScrollbarHit, SearchState,
     SelectionAutoScrollState, TemplatePickerState, ToastNotification, WorkbenchActionInputKind,
     WorkbenchActionInputState,
 };
@@ -651,7 +649,6 @@ impl GpuiShellView {
             active_ai_profile,
             selected_workbench_task_id: None,
             workbench_action_input: None,
-            pending_paste: None,
             last_agent_statuses: std::collections::HashMap::new(),
             first_render_toast_shown: false,
             hovered_agent_pane: None,

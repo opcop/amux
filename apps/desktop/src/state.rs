@@ -274,15 +274,6 @@ pub(crate) struct NewTabPickerItem {
     pub(crate) separator_after: bool,
 }
 
-/// Pending multi-line paste awaiting confirmation. When the user
-/// pastes text containing newlines we hold it and show a toast;
-/// a second paste within the timeout window confirms and delivers.
-#[derive(Clone, Debug)]
-pub(crate) struct PendingPaste {
-    pub(crate) text: String,
-    pub(crate) created: std::time::Instant,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

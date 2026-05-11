@@ -53,7 +53,7 @@ impl GpuiShellView {
         let text = cx.read_from_clipboard()
             .and_then(|item| item.text().map(|s| s.to_string()));
         if let Some(text) = text {
-            self.paste_text_with_confirm(&text);
+            self.send_paste_text(&text);
         }
     }
 
@@ -82,41 +82,8 @@ impl GpuiShellView {
 
         // Fallback to text paste
         if let Some(text) = item.text() {
-            self.paste_text_with_confirm(&text);
+            self.send_paste_text(&text);
         }
-    }
-
-    /// Require double-tap confirmation for multi-line pastes to
-    /// prevent accidental execution of pasted multi-line commands.
-    fn paste_text_with_confirm(&mut self, text: &str) {
-        if !text.contains('\n') {
-            self.pending_paste = None;
-            self.send_paste_text(text);
-            return;
-        }
-
-        // Check for pending confirmation
-        if let Some(ref pending) = self.pending_paste {
-            if pending.created.elapsed() < std::time::Duration::from_secs(2) {
-                // Confirmed — deliver the originally captured text.
-                // Re-read from pending so the user's second clipboard
-                // content doesn't accidentally replace it.
-                let confirmed = pending.text.clone();
-                self.pending_paste = None;
-                self.send_paste_text(&confirmed);
-                return;
-            }
-        }
-
-        // First multi-line paste — hold it and ask for confirmation
-        self.pending_paste = Some(crate::state::PendingPaste {
-            text: text.to_string(),
-            created: std::time::Instant::now(),
-        });
-        self.push_workbench_toast(
-            "Multi-line paste — press Ctrl+V again within 2s to confirm",
-            crate::theme::WARNING,
-        );
     }
 
     /// Format the image path for the current terminal context.

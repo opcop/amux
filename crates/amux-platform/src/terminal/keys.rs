@@ -30,10 +30,14 @@ pub fn to_pty_with_mode(key: &str, ctrl: bool, shift: bool, alt: bool, app_curso
                 "ArrowLeft" => "D",
                 _ => unreachable!(),
             };
-            if app_cursor && !ctrl && !shift && !alt {
-                // Application mode: ESC O A/B/C/D
-                return vec![0x1B, b'O', ch.as_bytes()[0]];
-            }
+            // Always use CSI encoding (ESC [ A/B/C/D) for arrow keys
+            // regardless of DECCKM application cursor mode. The SS3
+            // encoding (ESC O A) can cause ^[[A to appear on screen
+            // when the mode read races with the application toggling
+            // \x1b[?1h / \x1b[?1l. Modern shells and readline accept
+            // CSI arrows in both modes; only niche legacy apps require
+            // SS3, and those apps can use Home/End which still respect
+            // app_cursor below.
             return escape_seq(ch, ctrl, shift, alt);
         }
         "Home" => return if app_cursor { vec![0x1B, b'O', b'H'] } else { escape_seq("H", ctrl, shift, alt) },
@@ -184,10 +188,11 @@ mod tests {
 
     #[test]
     fn test_app_cursor_mode_arrow() {
-        // Application cursor mode emits ESC O A instead of ESC [ A
+        // Arrow keys always use CSI encoding regardless of app_cursor
+        // to avoid ^[[A glitches from DECCKM mode race conditions.
         assert_eq!(
             to_pty_with_mode("ArrowUp", false, false, false, true),
-            vec![0x1B, b'O', b'A']
+            vec![0x1B, 0x5B, 0x41]
         );
     }
 }
