@@ -9,7 +9,10 @@ mod drag;
 mod gpui_browser;
 #[cfg(feature = "gpui")]
 mod gpui_clipboard;
+mod git_panel;
 mod gpui_config;
+#[cfg(feature = "gpui")]
+mod gpui_diff_panel;
 #[cfg(feature = "gpui")]
 mod gpui_entry;
 #[cfg(feature = "gpui")]

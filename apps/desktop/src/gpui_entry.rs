@@ -18,6 +18,12 @@ pub(crate) struct GpuiShellView {
     pub(crate) model: GpuiWindowModel,
     pub(crate) sidebar_state: WorkspaceSidebarState,
     pub(crate) workspace_terminals: std::collections::HashMap<String, TerminalManager>,
+    /// Per-workspace git status, refreshed by `spawn_git_status_poll_loop` every
+    /// few seconds. Entries are added the first time a poll succeeds and may
+    /// disappear if the workspace's cwd leaves the repo. Missing entry means
+    /// "not in a git repo" or "not yet polled" — both render as no badge.
+    pub(crate) workspace_git_states:
+        std::collections::HashMap<String, crate::git_panel::model::WorkspaceGitState>,
     pub(crate) active_workspace_id: String,
     pub(crate) focus_handle: gpui::FocusHandle,
     pub(crate) cell_metrics: Option<crate::gpui_terminal::CellMetrics>,
@@ -201,6 +207,11 @@ pub(crate) struct GpuiShellView {
     pub(crate) show_help: bool,
     /// Workspace pending delete confirmation (first click sets this, second click deletes)
     pub(crate) confirming_delete_ws: Option<String>,
+    /// Right-side diff overlay state. `Some` = open, `None` = closed.
+    /// Toggled by `Ctrl+Shift+G` and by the panel's backdrop click / close
+    /// button. Pinned to the workspace it was opened from; switching the
+    /// active workspace in the sidebar does not retarget it.
+    pub(crate) diff_panel: Option<crate::gpui_diff_panel::DiffPanelState>,
 }
 
 /// Per-row visual segment of a hovered file link: `(row, start_col,
@@ -614,6 +625,7 @@ impl GpuiShellView {
             model,
             sidebar_state: WorkspaceSidebarState::default(),
             workspace_terminals,
+            workspace_git_states: std::collections::HashMap::new(),
             active_workspace_id: active_ws_id,
             focus_handle,
             cell_metrics: None,
@@ -686,6 +698,7 @@ impl GpuiShellView {
             socket_notify_rx: None,
             show_help: false,
             confirming_delete_ws: None,
+            diff_panel: None,
         }
     }
 
@@ -1014,6 +1027,369 @@ impl GpuiShellView {
     /// inherit amux's own launch directory — which is `/` when amux
     /// is started from a macOS .app bundle, and many shell prompts
     /// (p10k, spaceship, starship) flag `PWD=/` with a lock icon.
+    /// Toggle the right-side diff overlay for the active workspace.
+    ///
+    /// Opening detects the repo root from the active terminal's cwd; if the
+    /// workspace isn't in a git repo we show a quick toast and bail. The
+    /// initial selection is the first changed file from the cached
+    /// `workspace_git_states` (refreshed every 2s by the status poll loop),
+    /// and a diff load is kicked off immediately so the user sees content
+    /// without an extra click.
+    ///
+    /// Takes `&mut Window` because the commit-message `InputState` lives on
+    /// the panel and must be constructed up-front — `InputState::new(window,
+    /// cx)` can't be invoked from inside async closures.
+    pub(crate) fn toggle_diff_panel(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.diff_panel.is_some() {
+            self.diff_panel = None;
+            cx.notify();
+            return;
+        }
+
+        let ws_id = self.active_workspace_id.clone();
+        let cwd = self
+            .workspace_terminals
+            .get(&ws_id)
+            .and_then(|tm| tm.active_cwd());
+        let Some(cwd) = cwd else {
+            self.push_workbench_toast(
+                "diff: no working directory for active workspace",
+                crate::theme::WARNING,
+            );
+            return;
+        };
+        let Some(repo_root) =
+            crate::git_panel::status::detect_repo_root(std::path::Path::new(&cwd))
+        else {
+            self.push_workbench_toast(
+                "diff: not inside a git repository",
+                crate::theme::WARNING,
+            );
+            return;
+        };
+
+        let initial = self
+            .workspace_git_states
+            .get(&ws_id)
+            .and_then(|s| s.files.first())
+            .map(|entry| entry.path.to_string_lossy().into_owned());
+
+        let commit_input = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx)
+                .placeholder("commit message (Ctrl+Enter to commit)")
+        });
+
+        // Auto-focus the commit input on the next frame so the user can start
+        // typing without an extra click. Same deferred-focus pattern as the
+        // workspace rename input — the entity isn't mounted in the focus
+        // graph until the next render pass.
+        let input_for_focus = commit_input.clone();
+        window.on_next_frame(move |window, cx| {
+            input_for_focus.update(cx, |state, cx| state.focus(window, cx));
+        });
+
+        self.diff_panel = Some(crate::gpui_diff_panel::DiffPanelState::new(
+            ws_id,
+            repo_root,
+            initial.clone(),
+            commit_input,
+        ));
+        if initial.is_some() {
+            spawn_load_diff_for_selection(cx);
+        }
+        cx.notify();
+    }
+
+    /// Stage `path` (repo-relative) in the diff panel's repo. Runs `git add`
+    /// off-thread, then triggers a status refresh + reload of the
+    /// currently-selected file's diff so the panel reflects the new state.
+    pub(crate) fn stage_diff_file(&mut self, path: String, cx: &mut gpui::Context<Self>) {
+        let Some(panel) = self.diff_panel.as_ref() else {
+            return;
+        };
+        let repo_root = panel.repo_root.clone();
+        let workspace_id = panel.workspace_id.clone();
+        spawn_git_mutation(
+            cx,
+            workspace_id,
+            move || crate::git_panel::ops::run_git_add(&repo_root, &path),
+            "git add",
+        );
+    }
+
+    /// Apply just one hunk from the currently-loaded diff to the index.
+    /// `file_idx` / `hunk_idx` point into `panel.loaded_diff`. When
+    /// `reverse` is true the hunk is *removed* from the index (used as
+    /// "unstage this hunk" against a staged diff loaded via `--cached`).
+    /// V1 doesn't expose a staged-diff toggle yet, so the unstage path is
+    /// wired but not reachable from the UI; included now so the action
+    /// surface stays symmetric with file-level stage/unstage.
+    pub(crate) fn apply_diff_hunk(
+        &mut self,
+        file_idx: usize,
+        hunk_idx: usize,
+        reverse: bool,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(panel) = self.diff_panel.as_ref() else {
+            return;
+        };
+        let Some(files) = panel.loaded_diff.as_ref() else {
+            return;
+        };
+        let Some(file) = files.get(file_idx) else {
+            return;
+        };
+        let Some(hunk) = file.hunks.get(hunk_idx) else {
+            return;
+        };
+        let patch = crate::git_panel::diff::build_hunk_patch(file, hunk);
+        let repo_root = panel.repo_root.clone();
+        let workspace_id = panel.workspace_id.clone();
+        let label = if reverse {
+            "git apply --reverse"
+        } else {
+            "git apply"
+        };
+        spawn_git_mutation(
+            cx,
+            workspace_id,
+            move || crate::git_panel::ops::run_git_apply_cached(&repo_root, &patch, reverse),
+            label,
+        );
+    }
+
+    /// Unstage `path` (repo-relative) in the diff panel's repo.
+    pub(crate) fn unstage_diff_file(&mut self, path: String, cx: &mut gpui::Context<Self>) {
+        let Some(panel) = self.diff_panel.as_ref() else {
+            return;
+        };
+        let repo_root = panel.repo_root.clone();
+        let workspace_id = panel.workspace_id.clone();
+        spawn_git_mutation(
+            cx,
+            workspace_id,
+            move || crate::git_panel::ops::run_git_restore_staged(&repo_root, &path),
+            "git restore --staged",
+        );
+    }
+
+    /// Run `git commit` with the current commit message. Empty messages are
+    /// rejected up-front; the user sees the rejection in `commit_error`
+    /// rather than a silent no-op since the button isn't disabled on empty
+    /// message any more (we can't safely read the InputState from render to
+    /// drive that gate — see `render_commit_footer`).
+    ///
+    /// Takes `&mut Window` so the success path can clear the commit-message
+    /// input via `InputState::set_value(..., window, cx)`. See
+    /// `stage_all_and_commit_from_diff_panel` for the same plumbing.
+    pub(crate) fn commit_from_diff_panel(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(panel) = self.diff_panel.as_ref() else {
+            return;
+        };
+        if panel.committing {
+            return;
+        }
+        let message = panel.commit_input.read(cx).value().trim().to_string();
+        if message.is_empty() {
+            if let Some(p) = self.diff_panel.as_mut() {
+                p.commit_error = Some("commit message is empty".to_string());
+            }
+            cx.notify();
+            return;
+        }
+        let repo_root = panel.repo_root.clone();
+        let workspace_id = panel.workspace_id.clone();
+        let input_handle = panel.commit_input.clone();
+
+        // Flip committing flag now so the UI disables the button immediately.
+        if let Some(p) = self.diff_panel.as_mut() {
+            p.committing = true;
+            p.commit_error = None;
+        }
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result =
+                smol::unblock(move || crate::git_panel::ops::run_git_commit(&repo_root, &message))
+                    .await;
+
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(p) = this.diff_panel.as_mut() {
+                    p.committing = false;
+                    match &result {
+                        Ok(()) => {
+                            p.commit_error = None;
+                            // Clear the input so the next commit starts
+                            // fresh. Window is live here thanks to
+                            // `cx.spawn_in(window, ...)`.
+                            input_handle.update(cx, |state, cx| {
+                                state.set_value("", window, cx);
+                            });
+                        }
+                        Err(err) => p.commit_error = Some(err.to_string()),
+                    }
+                }
+                // Refresh status + diff regardless of outcome — even a partial
+                // failure (e.g. signing rejected after the commit recorded)
+                // should reflect the new repo state.
+                spawn_refresh_workspace_git_state(workspace_id, cx);
+                spawn_load_diff_for_selection(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Called when the user clicks a file in the diff panel's left list.
+    /// Sets the selection and kicks off a background load for the new path.
+    pub(crate) fn select_diff_file(&mut self, path: String, cx: &mut gpui::Context<Self>) {
+        let Some(panel) = self.diff_panel.as_mut() else {
+            return;
+        };
+        if panel.selected_path.as_deref() == Some(path.as_str()) {
+            // Same file clicked again — no-op, the load already happened (or
+            // is in flight). Keeps the spinner from re-flashing.
+            return;
+        }
+        panel.selected_path = Some(path);
+        panel.loaded_diff = None;
+        panel.load_error = None;
+        spawn_load_diff_for_selection(cx);
+        cx.notify();
+    }
+
+    /// One-click "Stage all & commit": stages everything reportable
+    /// (`git add -A`) then commits with the current message. Useful when
+    /// the user just wants to capture the whole working state without
+    /// fiddling with per-file stage buttons. Shares the `committing` flag
+    /// with the regular commit path so the UI stays consistent.
+    ///
+    /// Takes `&mut Window` so the success path can clear the commit message
+    /// input (which requires window access via `set_value`). We use
+    /// `cx.spawn_in(window, ...)` to thread an `AsyncWindowContext` through
+    /// the async boundary; without it the spawned task only has an
+    /// `AsyncApp` and `update_in` is unavailable.
+    pub(crate) fn stage_all_and_commit_from_diff_panel(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(panel) = self.diff_panel.as_ref() else {
+            return;
+        };
+        if panel.committing {
+            return;
+        }
+        let message = panel.commit_input.read(cx).value().trim().to_string();
+        if message.is_empty() {
+            if let Some(p) = self.diff_panel.as_mut() {
+                p.commit_error = Some("commit message is empty".to_string());
+            }
+            cx.notify();
+            return;
+        }
+
+        let repo_root = panel.repo_root.clone();
+        let workspace_id = panel.workspace_id.clone();
+        let input_handle = panel.commit_input.clone();
+        if let Some(p) = self.diff_panel.as_mut() {
+            p.committing = true;
+            p.commit_error = None;
+        }
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            // Run stage + commit back-to-back on the blocking pool. Splitting
+            // them across two `smol::unblock` calls would let a `git status`
+            // poll slip in between, which can race the staging set against
+            // the commit and produce confusing "no changes" outcomes.
+            let result = smol::unblock(move || {
+                crate::git_panel::ops::run_git_stage_all(&repo_root)?;
+                crate::git_panel::ops::run_git_commit(&repo_root, &message)
+            })
+            .await;
+
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(p) = this.diff_panel.as_mut() {
+                    p.committing = false;
+                    match &result {
+                        Ok(()) => {
+                            p.commit_error = None;
+                            // Clear the input on success — needs the live
+                            // `Window` from the visual async context.
+                            input_handle.update(cx, |state, cx| {
+                                state.set_value("", window, cx);
+                            });
+                        }
+                        Err(err) => p.commit_error = Some(err.to_string()),
+                    }
+                }
+                spawn_refresh_workspace_git_state(workspace_id, cx);
+                spawn_load_diff_for_selection(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Two-stage push action driven by the panel's `push_confirming` latch.
+    ///
+    /// First click: flip `push_confirming = true` and notify. The button
+    /// label changes to "Confirm push" so the user sees they're one click
+    /// from a network operation that's visible to teammates. Second click
+    /// (while latched): kick off `git push` off-thread, clear the latch,
+    /// and refresh status on completion. Any error is dropped into
+    /// `push_error` for the footer to render.
+    pub(crate) fn push_from_diff_panel(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(panel) = self.diff_panel.as_mut() else {
+            return;
+        };
+        if panel.pushing {
+            return;
+        }
+        if !panel.push_confirming {
+            panel.push_confirming = true;
+            panel.push_error = None;
+            cx.notify();
+            return;
+        }
+
+        // Latched — actually push.
+        let repo_root = panel.repo_root.clone();
+        let workspace_id = panel.workspace_id.clone();
+        panel.pushing = true;
+        panel.push_confirming = false;
+        panel.push_error = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result =
+                smol::unblock(move || crate::git_panel::ops::run_git_push(&repo_root)).await;
+
+            let _ = this.update(cx, |this, cx| {
+                if let Some(p) = this.diff_panel.as_mut() {
+                    p.pushing = false;
+                    match &result {
+                        Ok(()) => p.push_error = None,
+                        Err(err) => p.push_error = Some(err.to_string()),
+                    }
+                }
+                spawn_refresh_workspace_git_state(workspace_id, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn workspace_spawn_cwd(&self, workspace_id: &str) -> Option<String> {
         let target = self
             .model
@@ -2763,6 +3139,213 @@ fn extract_command_after_prompt(line: &str) -> &str {
         }
     }
     line
+}
+
+/// Spawn the per-workspace git status poll loop. Every 2s, snapshot each
+/// workspace's active cwd on the main thread, then shell out to `git status
+/// --porcelain=v2 --branch` from a background blocking pool so the UI never
+/// stalls on a slow filesystem. Results are merged into
+/// `workspace_git_states` and `cx.notify()` repaints the sidebar.
+///
+/// The loop exits when the view is dropped (the `this.update` call returns
+/// `Err` after the entity disappears). Workspaces that aren't in a git repo
+/// produce no entry and simply render as a clean row — there's no special
+/// "checked, not a repo" state.
+#[cfg(feature = "gpui")]
+pub(crate) fn spawn_git_status_poll_loop(cx: &mut gpui::Context<GpuiShellView>) {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    cx.spawn(async move |this, cx| {
+        loop {
+            smol::Timer::after(Duration::from_secs(2)).await;
+
+            // Snapshot the (workspace_id, cwd) pairs we want to poll. Doing this
+            // under `update` keeps the read brief — we drop the borrow before
+            // running any blocking git work.
+            let workspaces: Vec<(String, PathBuf)> = match this.update(cx, |this, _| {
+                this.workspace_terminals
+                    .iter()
+                    .filter_map(|(id, tm)| {
+                        let cwd = tm.active_cwd()?;
+                        Some((id.clone(), PathBuf::from(cwd)))
+                    })
+                    .collect()
+            }) {
+                Ok(snapshot) => snapshot,
+                Err(_) => break, // view gone — exit loop
+            };
+
+            if workspaces.is_empty() {
+                continue;
+            }
+
+            // Run the actual git invocations off the main thread. `smol::unblock`
+            // routes the closure to a blocking-aware executor so a slow git
+            // status on one workspace never blocks render or input.
+            let results: Vec<(String, crate::git_panel::model::WorkspaceGitState)> =
+                smol::unblock(move || {
+                    workspaces
+                        .into_iter()
+                        .filter_map(|(id, cwd)| {
+                            let root = crate::git_panel::status::detect_repo_root(&cwd)?;
+                            let state = crate::git_panel::status::run_git_status(&root).ok()?;
+                            Some((id, state))
+                        })
+                        .collect()
+                })
+                .await;
+
+            // Merge results back on the main thread and trigger a repaint.
+            if this
+                .update(cx, |this, cx| {
+                    for (id, state) in results {
+                        this.workspace_git_states.insert(id, state);
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// Re-run `git status` for `workspace_id` in the background and update
+/// `workspace_git_states` with the result. Used after a mutating action
+/// (stage/unstage/commit) so the sidebar badge and file list reflect the
+/// new state without waiting for the regular 2s poll tick.
+#[cfg(feature = "gpui")]
+pub(crate) fn spawn_refresh_workspace_git_state(
+    workspace_id: String,
+    cx: &mut gpui::Context<GpuiShellView>,
+) {
+    cx.spawn(async move |this, cx| {
+        let repo_root = match this
+            .update(cx, |this, _| {
+                this.workspace_terminals
+                    .get(&workspace_id)
+                    .and_then(|tm| tm.active_cwd())
+                    .and_then(|cwd| {
+                        crate::git_panel::status::detect_repo_root(std::path::Path::new(&cwd))
+                    })
+            })
+            .ok()
+            .flatten()
+        {
+            Some(root) => root,
+            None => return,
+        };
+
+        let new_state = smol::unblock(move || crate::git_panel::status::run_git_status(&repo_root))
+            .await
+            .ok();
+        let Some(new_state) = new_state else {
+            return;
+        };
+
+        let _ = this.update(cx, |this, cx| {
+            this.workspace_git_states.insert(workspace_id, new_state);
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// Run a single mutating git command (e.g. `git add`, `git restore --staged`)
+/// off the main thread, then refresh the affected workspace's status and
+/// reload the diff panel's selected file so the UI converges on the new
+/// reality. Errors are surfaced as a workbench toast — we don't keep a
+/// per-action error slot in `DiffPanelState` because a failed stage is
+/// usually transient (file got modified concurrently, permission issue) and
+/// the immediate refresh will show the user the current state.
+#[cfg(feature = "gpui")]
+fn spawn_git_mutation<F>(
+    cx: &mut gpui::Context<GpuiShellView>,
+    workspace_id: String,
+    op: F,
+    label: &'static str,
+) where
+    F: FnOnce() -> std::io::Result<()> + Send + 'static,
+{
+    cx.spawn(async move |this, cx| {
+        let result = smol::unblock(op).await;
+        let _ = this.update(cx, |this, cx| {
+            if let Err(err) = result {
+                this.push_workbench_toast(
+                    format!("{label} failed: {err}"),
+                    crate::theme::DANGER,
+                );
+            }
+            spawn_refresh_workspace_git_state(workspace_id, cx);
+            spawn_load_diff_for_selection(cx);
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// Load the diff for the diff panel's currently-selected file on a
+/// background thread, then apply the result back on the main thread.
+///
+/// Snapshots the panel's `(repo_root, selected_path, show_staged)` once,
+/// flips `loading = true`, runs `git diff` via `smol::unblock`, and merges
+/// the parsed result (or the error message) back into the panel state. If
+/// the user clicks a different file while a load is in flight, the older
+/// result is dropped silently — we only apply when the snapshot still
+/// matches the panel's current selection.
+#[cfg(feature = "gpui")]
+pub(crate) fn spawn_load_diff_for_selection(cx: &mut gpui::Context<GpuiShellView>) {
+    cx.spawn(async move |this, cx| {
+        // Snapshot the panel under a brief update and flip `loading = true`.
+        // Inline so the borrow drops before we run blocking git work.
+        let snapshot = this
+            .update(cx, |this, cx| {
+                let panel = this.diff_panel.as_mut()?;
+                let path = panel.selected_path.clone()?;
+                panel.loading = true;
+                panel.load_error = None;
+                cx.notify();
+                Some((panel.repo_root.clone(), path, panel.show_staged))
+            })
+            .ok()
+            .flatten();
+        let Some((repo_root, selected_path, show_staged)) = snapshot else {
+            return;
+        };
+        let selected_for_match = selected_path.clone();
+
+        let result = smol::unblock(move || {
+            crate::git_panel::diff::run_git_diff(&repo_root, Some(&selected_path), show_staged)
+                .map(|raw| crate::git_panel::diff::parse_unified_diff(&raw))
+        })
+        .await;
+
+        let _ = this.update(cx, |this, cx| {
+            let Some(panel) = this.diff_panel.as_mut() else {
+                return;
+            };
+            // Drop stale results if the selection moved while we were loading.
+            if panel.selected_path.as_deref() != Some(selected_for_match.as_str()) {
+                return;
+            }
+            panel.loading = false;
+            match result {
+                Ok(files) => {
+                    panel.loaded_diff = Some(files);
+                    panel.load_error = None;
+                }
+                Err(err) => {
+                    panel.loaded_diff = None;
+                    panel.load_error = Some(err.to_string());
+                }
+            }
+            cx.notify();
+        });
+    })
+    .detach();
 }
 
 /// Spawn the selection edge auto-scroll loop. The loop ticks every

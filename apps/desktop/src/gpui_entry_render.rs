@@ -533,10 +533,14 @@ impl Render for GpuiShellView {
             || self.renaming_tab.is_some()
             || self.api_key_input.is_some()
             || self.workbench_action_input.is_some()
+            || self.diff_panel.is_some()
         {
-            // Rename / API key input active: leave focus on the Input.
-            // Re-grabbing the root handle here races the focus
-            // `on_next_frame` the rename/input helper just scheduled.
+            // Rename / API key input / diff panel active: leave focus on the
+            // Input. Re-grabbing the root handle here races the focus
+            // `on_next_frame` the rename/input helper just scheduled — and
+            // for the diff panel specifically, was the reason the commit
+            // message field stayed unresponsive even with auto-focus wired
+            // up: every frame after the first stole focus back to terminal.
         } else {
             // No browser, no rename — safe to ensure terminal
             // always has focus.
@@ -1996,6 +2000,13 @@ impl Render for GpuiShellView {
                                             let is_renaming = self.renaming_workspace.as_ref()
                                                 .map(|(id, _)| id == &item.id)
                                                 .unwrap_or(false);
+                                            // Git status badge. `None` for clean+synced repos and
+                                            // for workspaces that haven't been polled yet (which
+                                            // includes non-git cwds). The poll loop in
+                                            // `spawn_git_status_poll_loop` refreshes this every 2s.
+                                            let git_badge = self.workspace_git_states
+                                                .get(&item.id)
+                                                .and_then(|s| s.badge_label());
 
                                             ws_col = ws_col.child(
                                             div()
@@ -2102,6 +2113,19 @@ impl Render for GpuiShellView {
                                                                 .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
                                                                 .child(item.name.clone())
                                                         )
+                                                        .when_some(git_badge, |d, label| {
+                                                            d.child(
+                                                                div()
+                                                                    .px(px(4.0))
+                                                                    .py_px()
+                                                                    .rounded(px(3.0))
+                                                                    .text_xs()
+                                                                    .text_color(rgb(crate::theme::TEXT_DIM))
+                                                                    .bg(rgb(crate::theme::SURFACE_RAISED))
+                                                                    .flex_shrink_0()
+                                                                    .child(label)
+                                                            )
+                                                        })
                                                         .when(can_delete, |d| {
                                                             d.child(
                                                                 div()
@@ -2623,6 +2647,24 @@ impl Render for GpuiShellView {
             // Help overlay (F1)
             .when(self.show_help, |this| {
                 this.child(render_help_overlay(cx))
+            })
+            // Diff panel modal (Ctrl+Shift+G). Mounted after help so a help
+            // overlay opened over an active diff panel still paints on top.
+            .when_some(self.diff_panel.clone(), |this, panel| {
+                let workspace_name = self
+                    .model
+                    .workspace_items
+                    .iter()
+                    .find(|w| w.id == panel.workspace_id)
+                    .map(|w| w.name.clone())
+                    .unwrap_or_else(|| panel.workspace_id.clone());
+                let git_state = self.workspace_git_states.get(&panel.workspace_id).cloned();
+                this.child(crate::gpui_diff_panel::render_diff_panel(
+                    &panel,
+                    git_state.as_ref(),
+                    &workspace_name,
+                    cx,
+                ))
             })
             // Agent toast notifications (bottom-right)
             .when(!self.toasts.is_empty(), |this| {

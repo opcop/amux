@@ -698,6 +698,13 @@ pub fn run(app: &DesktopApp, config: AmuxConfig) {
                 })
                 .detach();
 
+                // === Git status poll loop ===
+                // Refreshes each workspace's git state every 2s for the sidebar
+                // badge. Runs the blocking `git status` invocations off the main
+                // thread via smol::unblock, so a slow filesystem can't stall the
+                // render tick.
+                crate::gpui_entry::spawn_git_status_poll_loop(cx);
+
                 let mut view = GpuiShellView::new(app, model, config, cx);
                 // Start the Unix socket notification listener so external
                 // tools (Claude Code hooks, etc.) can push notifications.

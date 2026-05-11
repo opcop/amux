@@ -330,6 +330,43 @@ impl GpuiShellView {
             }
         }
 
+        // Same gate for the diff panel's commit-message Input. Without this
+        // early return, every keystroke flows through the modifier-shortcut
+        // matchers below before reaching the focused Input — letters land
+        // in the wrong place (or get swallowed entirely if they map to a
+        // shortcut), and the message field appears unresponsive even though
+        // it has focus. Escape closes the panel and is handled later.
+        //
+        // Exception: Ctrl/Cmd+Enter directly triggers commit. Without this
+        // shortcut, the user has to mouse over to the Commit button after
+        // typing the message — the placeholder text "(Ctrl+Enter to commit)"
+        // promises this behavior, so we intercept it here BEFORE letting
+        // the input handle plain Enter (which inserts a newline for
+        // multi-line messages).
+        if let Some(panel) = self.diff_panel.as_ref() {
+            use gpui::Focusable;
+            let input_focused = panel
+                .commit_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window);
+            if input_focused {
+                let key = event.keystroke.key.as_str();
+                let m = &event.keystroke.modifiers;
+                #[cfg(target_os = "macos")]
+                let ctrl_held = m.platform || m.control;
+                #[cfg(not(target_os = "macos"))]
+                let ctrl_held = m.control;
+                if key == "enter" && ctrl_held {
+                    self.commit_from_diff_panel(window, cx);
+                    return;
+                }
+                if key != "escape" {
+                    return;
+                }
+            }
+        }
+
         let keystroke = &event.keystroke;
         // Cross-platform "app modifier" normalization.
         //
@@ -381,6 +418,15 @@ impl GpuiShellView {
             if keystr == "escape" {
                 return;
             }
+        }
+
+        // Diff panel modal: when open, Escape closes it. Sits above the
+        // preview-selection and preview-search escape handlers because the
+        // diff overlay is the foreground element when both are present.
+        if keystr == "escape" && self.diff_panel.is_some() {
+            self.diff_panel = None;
+            cx.notify();
+            return;
         }
 
         // F12: toggle Web Inspector for the active browser pane.
@@ -836,6 +882,14 @@ impl GpuiShellView {
                 "ctrl+shift+c" => {
                     self.copy_selection(cx);
                     cx.notify();
+                    return;
+                }
+                "ctrl+shift+g" => {
+                    // Toggle the right-side diff panel for the active
+                    // workspace. Plain Ctrl+G is reserved in the shortcut
+                    // catalog as "Find next" so we use the shift variant
+                    // (also matches VS Code's source-control binding).
+                    self.toggle_diff_panel(window, cx);
                     return;
                 }
                 "ctrl+shift+v" => {

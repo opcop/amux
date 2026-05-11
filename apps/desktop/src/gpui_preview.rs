@@ -575,7 +575,7 @@ fn spans_to_plain(spans: &[TextSpan]) -> String {
     spans.iter().map(|s| s.text.as_str()).collect()
 }
 
-fn detect_language(path: &str) -> String {
+pub(crate) fn detect_language(path: &str) -> String {
     match path.rsplit('.').next() {
         Some("rs") => "rust",
         Some("js") | Some("jsx") => "javascript",
@@ -604,14 +604,29 @@ fn detect_language(path: &str) -> String {
 #[cfg(feature = "gpui")]
 #[derive(Clone, Debug)]
 pub struct SyntaxToken {
-    text: String,
-    color: u32,
+    pub(crate) text: String,
+    pub(crate) color: u32,
+}
+
+#[cfg(feature = "gpui")]
+impl SyntaxToken {
+    /// Token text — caller decides how to render (e.g. paint, span).
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// 0xRRGGBB color picked by `highlight_line` based on the token's
+    /// syntactic role. Callers that want to override (e.g. force-dim the
+    /// whole line) should clone and rewrite this field.
+    pub(crate) fn color(&self) -> u32 {
+        self.color
+    }
 }
 
 /// Tokenize a line of code with syntax coloring.
 /// Returns a list of colored tokens for the given language.
 #[cfg(feature = "gpui")]
-fn highlight_line(line: &str, lang: &str) -> Vec<SyntaxToken> {
+pub(crate) fn highlight_line(line: &str, lang: &str) -> Vec<SyntaxToken> {
     let keywords = language_keywords(lang);
     let mut tokens = Vec::new();
     let chars: Vec<char> = line.chars().collect();
