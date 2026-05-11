@@ -639,3 +639,39 @@ MVP 完成后，用户应该可以完成这条主路径：
 ```
 
 只要这条路径稳定，Amux 就已经从“多 AI 终端”进入“多 Agent 工作台”。自动调度、validator、research、成本统计、session replay 都可以在这个基础上继续加。
+
+## 并行能力：Diff Panel
+
+详见 [docs/diff-panel-design.md](./diff-panel-design.md)。
+
+### 为什么放在这里
+
+Agent Workbench 解决的是“任务派出去了”的问题；Diff Panel 解决的是“任务派出去后改了什么”的问题。两者是**互补但解耦**的能力：
+
+- Workbench 的 proof 字段记录的是文字描述。
+- Diff Panel 让用户在不离开 Amux 的情况下直接看到 agent 实际改动的代码。
+- 当一个 task 被标记 `done` 时，用户可以一键打开对应 workspace 的 Diff Panel 验证 proof，再决定是否 commit / push。
+
+这条 review 闭环命中了"review context 经常断裂"的痛点，也是 Amux 相对 Cursor / 2code 类竞品的差异点之一。
+
+### 与 Workbench 阶段的关系
+
+Diff Panel 是**独立 track**，可以与 Workbench 阶段并行推进，**不阻塞 MVP 主路径**：
+
+| Workbench 阶段 | Diff Panel 对应里程碑 |
+|---|---|
+| 阶段 1（任务账本 MVP） | Diff Panel Day 1-3：`git status` 轮询 + sidebar 徽标 |
+| 阶段 2（Command Palette 接入） | Diff Panel Day 4-7：preview panel `DiffMode` 渲染 |
+| 阶段 3（任务上下文拼装） | Diff Panel Day 8-10：stage / commit |
+| 阶段 4（Workbench Sidebar） | Diff Panel Day 11-12：push + 错误显示 |
+| 阶段 5（Agent 完成协议） | Diff Panel Day 13-14：快捷键 + 跨平台测试 |
+
+### 与 Workbench 的集成点（V1 之后再做）
+
+- task `done` 事件触发 Diff Panel 的"未 commit 改动"提醒
+- proof 里自动附上 `git diff --stat` 摘要
+- commit message 自动带 `task-id: <id>` trailer，便于 audit 时把 commit 反查回 task
+
+### 不在本计划讨论
+
+完整规格（功能边界、架构、UX 草图、风险缓解、验收）见 `docs/diff-panel-design.md`。本节只声明 Diff Panel 是 Workbench 计划之外、可并行推进的兄弟交付物。
